@@ -1,0 +1,18 @@
+# Override layered on top of accelerate/config.yaml for local/single-device
+# smoke testing (single GPU or CPU-only), where DDP would otherwise require
+# multiple visible devices. Usage:
+#
+#   uv run accelerate launch --config_file modules/evaluate/configs/accelerate/config.yaml \
+#     --config_file modules/evaluate/configs/accelerate/local.yaml \
+#     modules/evaluate/src/run_evaluate.py ...
+#
+# Note: accelerate does not merge multiple --config_file YAMLs; instead pass
+# the fields below directly as CLI flags to override config.yaml, e.g.:
+#
+#   uv run accelerate launch --config_file modules/evaluate/configs/accelerate/config.yaml \
+#     --distributed_type NO --num_processes 1 \
+#     modules/evaluate/src/run_evaluate.py ...
+distributed_type: 'NO'
+num_processes: 1
+mixed_precision: 'no'
+use_cpu: false

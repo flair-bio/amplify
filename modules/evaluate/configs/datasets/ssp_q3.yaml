@@ -1,0 +1,6 @@
+workspace:
+  dataset_name: ssp_q3
+  dataset_repo_id: swhitfield/biomap-research-ssp_q3
+  target_type: categorical
+  label_format: per_token
+  num_labels: 3

@@ -1,0 +1,6 @@
+workspace:
+  dataset_name: contact_prediction_binary
+  dataset_repo_id: swhitfield/biomap-research-contact_prediction_binary
+  target_type: categorical
+  label_format: contact_pairs
+  num_labels: null # unused: contact_prediction is a per-pair binary score, not a class count

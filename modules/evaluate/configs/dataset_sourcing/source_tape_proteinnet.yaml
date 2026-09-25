@@ -1,0 +1,44 @@
+# One-off TAPE ProteinNet LMDB sourcing configuration.
+# The script auto-loads this file when run from repository root.
+
+seed: 1957723
+
+# Either set all_datasets=true OR provide explicit datasets.
+all_datasets: false
+datasets:
+  - proteinnet_contact_prediction
+
+work_dir: eval_datasets/tape_proteinnet_sourcing
+preprocess: minimal
+max_sequence_length: null
+
+# Pool the default train/validation/test rows and additionally publish
+# random, stratified, and MMseqs hold-cluster-out split families.
+create_split_subsets: true
+
+# The normal workflow reads pre-staged LMDB split directories from this folder.
+source_folder: downloaded_datasets
+
+# Archive conversion remains available when explicitly requested, but is not
+# used by the checked-in LMDB workflow.
+archive_url: http://s3.amazonaws.com/songlabdata/proteindata/data_pytorch/proteinnet.tar.gz
+archive_path: null
+include_train_unfiltered: false
+
+# Upload behavior:
+# - per_dataset_repo: each dataset gets its own HF repo under repo_owner
+# - single_repo: all datasets go into one repo_id under repo_prefix/<dataset_name>
+upload_layout: per_dataset_repo
+
+repo_owner: null
+repo_name_prefix: tape-
+repo_id: null
+repo_prefix: tape
+revision: null
+commit_message: Add sourced TAPE ProteinNet contact prediction dataset
+private: false
+token: null
+
+force_download: false
+overwrite_output: false
+stats_threads: 8

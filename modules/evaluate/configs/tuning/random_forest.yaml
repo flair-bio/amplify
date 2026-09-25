@@ -1,0 +1,16 @@
+# Random forest probe over frozen-trunk embeddings.
+# (v0 only shipped knn/linear/mlp grids); this grid is specific to this codebase.
+# Layer after config.yaml, a model config, and a dataset config.
+steps:
+  mode: tune_probe
+  prepare:
+    embedding_cache:
+      enabled: true
+      pooling: mean
+      layers: [-1]
+  tune:
+    head:
+      head_type: random_forest
+      search_space:
+        n_estimators: [100, 300, 500]
+        max_depth: [null, 10, 20]

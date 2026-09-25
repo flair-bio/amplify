@@ -1,0 +1,7 @@
+workspace:
+  task_type: token_classification
+
+steps:
+  predict:
+    controls:
+      [untrained, random_trunk, random_head, random_both, scrambled_labels]

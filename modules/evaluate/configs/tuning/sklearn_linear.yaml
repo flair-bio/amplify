@@ -1,0 +1,21 @@
+# Logistic/Ridge (classification/regression) probe over frozen-trunk
+# embeddings. Layer after config.yaml, a model config, and a dataset config.
+# Search space for the frozen-trunk sklearn linear probe.
+steps:
+  mode: tune_probe
+  prepare:
+    embedding_cache:
+      enabled: true
+      pooling: mean
+      layers: [-1]
+  tune:
+    head:
+      head_type: sklearn_linear
+      hyperparameters:
+        max_iter: 2000
+      search_space:
+        C: [0.1, 1.0, 10.0]           # classification
+        alpha: [0.01, 0.1, 1.0, 10.0] # regression
+    hyperparameter_search:
+      enabled: true
+      n_trials: 4

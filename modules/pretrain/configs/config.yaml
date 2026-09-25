@@ -1,0 +1,197 @@
+# Default pretraining config for the AMPLIFY 350M architecture
+
+model:
+  hidden_size: 960
+  num_hidden_layers: 32
+  num_attention_heads: 15      # head_dim = 64
+  intermediate_size: 2560
+  embedding_init_range: 0.02
+  decoder_init_range: 0.02
+  norm_eps: 1e-5
+  vocab_size: 32
+  pad_token_id: 0
+  bos_token_id: 3
+  eos_token_id: 4
+  max_position_embeddings: 2048  # allows later context extension without redefining the model
+  rope_theta: 10000.0
+  num_labels: 2
+
+tokenizer:
+  vocab:
+    - "<pad>"
+    - "<unk>"
+    - "<mask>"
+    - "<bos>"
+    - "<eos>"
+    - "|"
+    - "X"
+    - "B"
+    - "O"
+    - "U"
+    - "Z"
+    - "J"
+    - "L"
+    - "A"
+    - "G"
+    - "V"
+    - "S"
+    - "E"
+    - "R"
+    - "T"
+    - "I"
+    - "D"
+    - "P"
+    - "K"
+    - "Q"
+    - "N"
+    - "F"
+    - "Y"
+    - "M"
+    - "H"
+    - "W"
+    - "C"
+  vocab_size: 32
+  pad_token: "<pad>"
+  unk_token: "<unk>"
+  mask_token: "<mask>"
+  bos_token: "<bos>"
+  eos_token: "<eos>"
+  other_special_tokens: null
+  ambiguous_tokens:
+    - "<unk>"
+    - "X"
+    - "B"
+    - "O"
+    - "U"
+    - "Z"
+    - "J"
+  remove_ambiguous: true
+
+optimizer:
+  type: AdamW
+  lr: 1e-3
+  betas: [0.9, 0.95]
+  eps: 1e-8
+  weight_decay: 0.01
+  fused: true
+
+scheduler:
+  type: cosine_with_min_lr
+  num_warmup_steps: 1000
+  num_training_steps: 90000
+  kwargs:
+    min_lr_rate: 0.1
+
+collator:
+  mlm: true
+  mlm_probability: 0.15
+  masking_type: fixed
+  masking_k: 10
+  max_length: 512
+  packing: true
+  pad_to_multiple_of: null
+  random_truncate: true
+  exclude_special_tokens_from_masking: true
+
+dataset:
+  sources:
+    bfd:
+      type: hub
+      repo_id: "flair-bio/bfd"
+      split: train
+      cluster_column: cluster_rep_at_30
+      split_column: cluster_rep_at_30
+      extra_cluster_columns: [cluster_rep_at_30, cluster_rep_at_40, cluster_rep_at_50, cluster_rep_at_60, cluster_rep_at_70, cluster_rep_at_80, cluster_rep_at_90]
+      sampling_fraction: 1.0
+    mgnify:
+      type: hub
+      repo_id: "flair-bio/mgnify"
+      split: train
+      cluster_column: cluster_rep_at_30
+      split_column: cluster_rep_at_30
+      extra_cluster_columns: [cluster_rep_at_30, cluster_rep_at_40, cluster_rep_at_50, cluster_rep_at_60, cluster_rep_at_70, cluster_rep_at_80, cluster_rep_at_90]
+      sampling_fraction: 1.0
+    uniref:
+      type: hub
+      repo_id: "flair-bio/uniref"
+      split: train
+      cluster_column: cluster_rep_at_30
+      split_column: cluster_rep_at_30
+      extra_cluster_columns: [cluster_rep_at_30, cluster_rep_at_40, cluster_rep_at_50, cluster_rep_at_60, cluster_rep_at_70, cluster_rep_at_80, cluster_rep_at_90]
+      sampling_fraction: 1.0
+    oas:
+      type: hub
+      repo_id: "flair-bio/oas"
+      split: train
+      cluster_column: cluster_rep_at_80   # OAS contains 99-80% thresholds
+      split_column: cluster_rep_at_80
+      extra_cluster_columns: [cluster_rep_at_80, cluster_rep_at_85, cluster_rep_at_90, cluster_rep_at_91, cluster_rep_at_92, cluster_rep_at_93, cluster_rep_at_94, cluster_rep_at_95, cluster_rep_at_96, cluster_rep_at_97, cluster_rep_at_98, cluster_rep_at_99]
+      sampling_fraction: 1.0
+  score_column: red_score
+  score_curriculum:
+    type: linear       # "linear", "cosine", or "exponential"
+    start_score: 0.0
+    end_score: 0.0
+    ramp_epochs: 1
+  val_min_score: 0.0
+  val_holdout_modulus: 200
+  seed: 25
+  num_proc: 12                   # processes for the one-time score-filter map
+  split_writer_batch_size: 100000  # rows per Arrow batch in the cached splits
+  cluster_index_cache_dir: null  # defaults to a subdir of the HF datasets cache
+  prepare_only: false            # build caches then exit, without training
+  local_stage_dir: null          # optional node-local dir to copy train/val splits to for better I/O
+
+dataloader:
+  max_tokens: 32768
+  batch_size: null
+  dataloader_num_workers: 8
+  persistent_workers: true
+  pin_memory: true
+  prefetch_factor: 4
+  in_order: true                 # false: yield batches as workers finish (see README)
+  drop_last: true
+
+trainer:
+  num_epochs: 1       # ignored while max_steps is set (kept only as a schema default)
+  max_steps: 100000
+  max_grad_norm: 1.0
+  gradient_accumulation_steps: 8
+  output_dir: "runs/350M"
+  resume_from_checkpoint: null
+  logging_steps: 100
+  eval_steps: 500
+  save_steps: 500
+  hf_save_steps: 2000
+  save_total_limit: null      # cap on resumable checkpoints kept; null = unlimited
+  hf_save_total_limit: null   # cap on HF checkpoints kept; null = unlimited
+  tf32: true
+  # minimizes GPU memory fragmentation using PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  expandable_segments: true
+  deterministic: false       # torch.use_deterministic_algorithms; debugging only and slow
+  dist_timeout_minutes: 90   # raise for first-time cache builds
+
+  # torch.compile options:
+  compile: false
+  compile_mode: default        # default or max-autotune or max-autotune-no-cudagraphs
+  compile_dynamic: true        # set true when dataloader.max_tokens is set
+  compile_fullgraph: false     # diagnostic only
+
+# DistributedDataParallel tuning options, see DDPConfig descriptions in trainer.py
+ddp:
+  broadcast_buffers: true
+  bucket_cap_mb: 100             # no effect on single node; optimal value depends on inter-node bandwidth
+  gradient_as_bucket_view: false
+  static_graph: false
+  comm_hook: none                # 'bf16' reduces data synced with but may affect loss
+
+wandb:
+  enabled: false
+  project: flair-pretrain
+  entity: null
+  run_name: "AMPLIFY_350M"
+  tags: ["350M", "pretrain"]
+  mode: offline
+  dir: null   # defaults to "<trainer.output_dir>/wandb" if unset
+  id: null    # defaults to a slug of `run_name` if unset, for deterministic resume
+  resume: allow

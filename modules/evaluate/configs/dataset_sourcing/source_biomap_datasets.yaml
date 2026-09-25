@@ -1,0 +1,36 @@
+# One-off biomap sourcing configuration.
+# The script auto-loads this file when run from repository root.
+
+seed: 1957723
+
+# Either set all_datasets=true OR provide explicit datasets.
+all_datasets: false
+datasets:
+  - optimal_temperature
+
+work_dir: eval_datasets/biomap_research_sourcing
+preprocess: minimal
+max_sequence_length: null
+
+# Pool the default train/validation/test rows and additionally publish
+# random, stratified, and MMseqs hold-cluster-out split families.
+create_split_subsets: true
+
+# Upload behavior:
+# - per_dataset_repo: each dataset gets its own HF repo under repo_owner
+# - single_repo: all datasets go into one repo_id under repo_prefix/<dataset_name>
+upload_layout: per_dataset_repo
+
+# Leave repo_owner/repo_id null to skip upload and only build local artifacts.
+repo_owner: null
+repo_name_prefix: biomap-research-
+repo_id: null
+repo_prefix: biomap-research
+revision: null
+commit_message: Add sourced biomap-research datasets
+private: false
+token: null
+
+force_download: false
+overwrite_output: false
+stats_threads: 8

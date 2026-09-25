@@ -1,0 +1,6 @@
+workspace:
+  dataset_name: localization_prediction
+  dataset_repo_id: swhitfield/biomap-research-localization_prediction
+  target_type: categorical
+  label_format: scalar
+  num_labels: 10

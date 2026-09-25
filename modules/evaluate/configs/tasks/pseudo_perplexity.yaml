@@ -1,0 +1,10 @@
+workspace:
+  task_type: pseudo_perplexity
+
+steps:
+  mode: evaluate_as_is
+  prepare:
+    embedding_cache:
+      enabled: false
+  predict:
+    controls: ["random_both"]

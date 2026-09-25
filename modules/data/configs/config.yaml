@@ -1,0 +1,96 @@
+dataset:
+  name: test_yeast
+  base_path: "./datasets"
+  tmp_path: null
+
+  source_urls:
+    - https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/reference_proteomes/Eukaryota/UP000002311/UP000002311_559292.fasta.gz
+
+steps:
+  download:
+    enabled: false
+    overwrite: true
+    split: 1
+    max_connections_per_server: 1
+    min_split_size: 1M
+    max_concurrent_downloads: 1
+
+  preprocess:
+    test_mode: false
+    enabled: false
+    generate_fasta: true
+    overwrite_fasta: true
+    overwrite_parquet: true
+    convert_fasta_to_parquet: true
+    fasta_id_column: sequence_id
+    fasta_source_id_column: original_id
+    fasta_description_column: description
+    fasta_sequence_column: sequence
+    seqkit_split_size: 1_000_000
+    fasta_extract_threads: 1   # pigz -dc: diminishing returns beyond 16
+    fasta_write_threads: 1     # pigz monolithic output + seqkit
+    fasta_split_threads: 1     # per-split pigz (N run concurrently via split --filter)
+    fasta_split_compression_level: 1  # fast temp splits, not final storage
+    stats_threads: 1
+    parquet_conversion_workers: 1
+
+  score:
+    enabled: false
+    override_source: null  # defaults to <tmp_path>/<dataset>_parquet_shards
+    output_base_path: null  # defaults to <tmp_path>; scores go in <base>/scores
+    sequence_name_col: sequence_id # input column containing sequence identifiers
+    sequence_column: sequence # input column containing protein sequences
+    score_column: red_score # output score column name
+    inference_model: flair-bio/amplify-350m
+    packed: true
+    mixed_precision: bf16  # Required for sequence packing
+    max_length: 2048
+    pad_to_multiple_of: 8
+    dataloader_workers: 4
+    batch_size: 16
+    shard_index: null
+    shard_count: null
+
+  cluster:
+    enabled: false
+    identity_thresholds: [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3]
+    coverage_threshold: 0.8  # fraction of sequence that must align
+    num_threads: 1
+    resume: true # resume: reuse completed cascade rounds
+    mmseqs:
+      command:
+        split_memory_limit: "400G"
+        clust_hash: true
+        linclust_version: 1
+        num_join_buckets: 32
+
+  assemble:
+    enabled: false
+    dataset_id: ${dataset.name}
+    base_id_column: sequence_id
+    cluster_id_column: sequence_id
+    score_id_column: sequence_id
+    skip_existing: true
+    overwrite: false
+
+  upload:
+    enabled: false
+    repo_id: flair-bio/${dataset.name}
+    private: false
+    split: train
+    source_override: null
+    revision: null
+    commit_message: "Upload sharded parquet dataset"
+
+  stats:
+    enabled: false
+    override_source: null  # defaults to <train_path>/<dataset>_assembled/ (dir of shards), falls back to *.parquet
+    override_output: null  # defaults to <stats_path>/<dataset>_stats_summary.json
+    length_col: sequence_length
+    score_col: red_score
+    sequence_col: sequence
+    quantiles: [0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99]
+    count_ambiguous: true  # full sequence-column scan; disable to skip the extra pass
+    ambiguous_chars: "XBZJ"
+    count_cluster_thresholds: true  # n_unique() per cluster_rep_at_* column, if present
+    cluster_col_prefix: "cluster_rep_at_"

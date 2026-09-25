@@ -1,0 +1,13 @@
+workspace:
+  task_type: categorical_jacobian
+  model_kwargs:
+    mutant_batch_size: 256
+    max_jacobian_bytes: 536870912
+
+steps:
+  mode: evaluate_as_is
+  prepare:
+    embedding_cache:
+      enabled: false
+  predict:
+    controls: [scrambled_labels, separation_prior]

@@ -1,0 +1,100 @@
+seed: 710019
+
+workspace:
+  dataset_name: base_dataset
+  dataset_repo_id: null
+  model_name: base_model
+  model_repo_id: null
+  task_type: null
+  target_type: null # categorical or continuous
+  label_format: null # scalar, per_token, or contact_pairs
+  num_labels: null # number of classes for *_classification tasks; unused (forced to 1) for sequence_regression
+  model_kwargs: {} # extra task.build_model() kwargs, e.g. Jacobian mutant_batch_size/max_jacobian_bytes
+  base_path: "./eval"
+  tmp_path: null
+
+wandb:
+  enabled: false
+  project: "flair-probe"
+  entity: null
+  run_name: null
+  tags: []
+
+steps:
+  mode: tune_probe # tune_probe, finetune, or evaluate_as_is
+  prepare:
+    dataloader_pin_memory: true
+    dataloader_persistent_workers: true
+    batch_size: 16
+    packed: false # requires CUDA and an AMPLIFY checkpoint with packed forward args
+    max_tokens_per_batch: null # optional; requires packed=true and one process
+    embedding_batch_size: 128
+    dataloader_num_workers: null # defaults to min(os.cpu_count(), num_gpus * 4) on GPU runs and up to 4 on CPU-only runs
+    max_length: 512
+    pad_to_multiple_of: 8
+    sequence_column: sequence
+    label_column: targets
+    id_column: id # per-example identifier column; falls back to a positional index if absent
+    tokenize_num_proc: null # defaults to min(os.cpu_count(), num_gpus * 4) on GPU runs and up to 4 on CPU-only runs
+    split: # name is recorded in prediction metadata and scores_long.parquet, so runs over different split methods stay separate
+      name: default # any other name loads train_<name>/validation_<name>/test_<name>, e.g. random, stratified, cluster
+      # Set train/validation/test explicitly only for splits that don't follow that convention;
+      # validation: null holds out validation_fraction of train instead.
+    validation_fraction: 0.1 # share of train held out as validation when the validation split is null or missing from the dataset
+    random_truncate_by_split: # random crop training sequences; keep evaluation deterministic
+      train: true
+      validation: false
+      test: false
+    length_grouped_sampling: true # batch similarly-tokenized-length examples together to reduce per-batch padding
+    embedding_cache:
+      enabled: false # only valid in tune_probe mode; token tasks keep one embedding per valid token in memory
+      pooling: mean # one of mean, cls; must match the head's own pooling (mean for AMPLIFY, cls maybe for ESM)
+      # Only used when embedding_cache.enabled=true; omitted means the final layer.
+      layers: null # hidden-state indices to probe; e.g. [-1, -2] pools and concatenates the final two layers
+      dtype: float16
+      autocast_dtype: float16 # precision used during trunk forward; float32 disables autocast
+      normalize_before_pooling: false # L2-normalize token representations before pooling
+      max_cache_gb: 2.0 # skip disk-caching (compute in-memory only) rather than exceed this budget
+      cache_policy: reuse # one of reuse, refresh, off
+  tune:
+    head:
+      head_type: mlp # one of mlp, torch_linear, sklearn_linear, knn, random_forest, xgboost; classical probes require embedding_cache.enabled=true; torch_linear can use a compatible native nn.Linear head without the cache
+      hyperparameters: {} # constructor kwargs for the chosen estimator; ignored for mlp
+      search_space: {} # classical-estimator dimensions; selected on validation, then the winner is fit on train for test prediction
+    learning_rate: 1e-4
+    weight_decay: 1e-4
+    max_epochs: 3
+    warmup_ratio: 0.06
+    max_grad_norm: 1.0
+    accumulation_steps: 1 # effective batches accumulated per optimizer step; matches Apperitif
+    batch_size: null # cached-embedding probe batch size; null keeps the prepared loader size
+    early_stopping_patience: 5 # stop early after this many epochs with no val improvement
+    optimizer: adamw # one of adamw, adam, sgd, rmsprop, adagrad, adafactor
+    optimizer_kwargs: {} # extra optimizer constructor kwargs, e.g. {momentum: 0.9} for sgd
+    lr_scheduler_type: linear # any name accepted by transformers.get_scheduler, e.g. linear, cosine, cosine_with_restarts, polynomial, constant, constant_with_warmup, inverse_sqrt
+    scheduler_kwargs: {} # extra scheduler-specific kwargs, e.g. {num_cycles: 3}
+    save_best_model: true # persist the best model + tokenizer to workspace.model_path after tuning, for later reuse
+    hyperparameter_search:
+      enabled: false
+      n_trials: 15
+      metric: null # task-specific defaults; direction is inferred
+      direction: null # inferred from the target metric when omitted
+      search_pattern: bohb # one of bohb (Optuna TPE + median pruning), random, grid
+      search_space:
+        learning_rate: [5e-4, 1e-4, 5e-5, 1e-5]
+        max_epochs: [5, 10, 20]
+        weight_decay: [0, 1e-4, 1e-3]
+  predict:
+    collect_probabilities: false # auto-enabled when effective score metrics include roc_auc
+    predictions_filename: predictions.parquet
+    store_sequences: false # include decoded input sequences in main predictions parquet (larger output)
+    controls: [untrained] # subset of: untrained, random_trunk, random_head, random_both, scrambled_labels, scrambled_sequences, majority_class, train_mean, separation_prior
+  score:
+    metrics: null # computes all supported metrics for task_type; set explicitly only to override
+    metric_aggregation: macro # one of micro, macro, weighted
+    bootstrap_enabled: true
+    n_samples: 1000 # bootstrap CI resamples; 1000 is the standard minimum for stable percentile CIs
+    n_permutations: 1000 # trained-vs-control p-value permutations; resolution 1/(n+1)
+    output_filename: bootstrap_results.parquet
+    confidence_interval: 0.95
+    long_filename: scores_long.parquet # tidy/long-format sidecar written on every run, with or without bootstrap

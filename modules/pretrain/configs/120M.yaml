@@ -1,0 +1,37 @@
+# AMPLIFY 120M — overlay on config.yaml (overrides the 120M-specific fields).
+# Everything else is inherited from config.yaml's 350M-shaped defaults.
+
+model:
+  hidden_size: 640
+  num_hidden_layers: 24
+  num_attention_heads: 10      # head_dim = 64
+  intermediate_size: 1712
+  embedding_init_range: 0.02
+  decoder_init_range: 0.02
+  norm_eps: 1e-5
+  vocab_size: 32
+  pad_token_id: 0
+  bos_token_id: 3
+  eos_token_id: 4
+  max_position_embeddings: 2048  # allows later context extension without redefining the model
+  rope_theta: 10000.0
+  num_labels: 2
+
+dataloader:
+  max_tokens: 65536
+
+scheduler:
+  num_warmup_steps: 1000
+  num_training_steps: 90000
+
+trainer:
+  gradient_accumulation_steps: 4
+  max_steps: 100000
+  output_dir: "runs/120M"
+
+wandb:
+  enabled: true
+  entity: "flair-bio"
+  project: "amplify"
+  run_name: "AMPLIFY_120M"
+  tags: ["120M", "pretrain", "test_run"]

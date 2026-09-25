@@ -1,0 +1,6 @@
+workspace:
+  dataset_name: metal_ion_binding
+  dataset_repo_id: swhitfield/biomap-research-metal_ion_binding
+  target_type: categorical
+  label_format: scalar
+  num_labels: 2
