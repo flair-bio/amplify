@@ -1,0 +1,32 @@
+# ProteinGym supervised scoring configuration.
+# Data resolution tries a local HF snapshot, then the configured repo, then data_dir.
+
+model_id: facebook/esm2_t12_35M_UR50D
+data_dir: eval_datasets/proteingym_sourcing/outputs # local fallback dataset
+# Prefer this HF dataset repo before data_dir; null uses data_dir directly.
+data_repo_id: null
+# Force a fresh download before falling back to data_dir.
+force_download: false
+output_dir: eval/proteingym_supervised/facebook_esm2_t12_35M_UR50D
+
+# One of: fold_random_5 | fold_modulo_5 | fold_contiguous_5 |
+# official_average | seeded | custom_kfold.
+split: fold_random_5
+custom_kfold_splits: 5
+
+# linear=Ridge/LogisticRegression; mlp=Linear-GELU-Linear; torch_linear=nn.Linear.
+probe_type: linear
+probe_hyperparameters: {} # fixed constructor kwargs for the selected probe
+# Grid-search candidates on an inner training holdout; {} disables tuning.
+probe_search_space: {}
+
+batch_size: 8
+max_length: 1024
+max_assays: null # null evaluates every sourced assay
+
+dtype: float32
+device: null # null selects CUDA when available, otherwise CPU
+seed: 1957723
+# Add a bootstrap standard error to summary.json when enabled.
+compute_uncertainty: false
+n_bootstrap: 10000

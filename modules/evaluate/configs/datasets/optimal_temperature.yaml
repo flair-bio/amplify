@@ -1,0 +1,6 @@
+workspace:
+  dataset_name: optimal_temperature
+  dataset_repo_id: swhitfield/biomap-research-optimal_temperature
+  target_type: continuous
+  label_format: scalar
+  num_labels: null

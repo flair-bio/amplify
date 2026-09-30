@@ -1,0 +1,15 @@
+# Native model head with an unfrozen trunk (full fine-tuning). Search space
+# uses a restricted search grid; hidden_size isn't
+# swept here since the native head's size is fixed by the trunk architecture,
+# not independently configurable in this codebase.
+
+steps:
+  mode: finetune
+  tune:
+    head:
+      head_type: mlp
+    hyperparameter_search:
+      search_space:
+        learning_rate: [1e-4, 5e-5]
+        max_epochs: [5, 10]
+        weight_decay: [0, 1e-3]

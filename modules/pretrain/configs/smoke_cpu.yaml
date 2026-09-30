@@ -1,0 +1,151 @@
+
+model:
+  hidden_size: 128
+  num_hidden_layers: 2
+  num_attention_heads: 4
+  intermediate_size: 256
+  embedding_init_range: 0.02
+  decoder_init_range: 0.02
+  norm_eps: 1e-5
+  vocab_size: 32
+  pad_token_id: 0
+  bos_token_id: 3
+  eos_token_id: 4
+  max_position_embeddings: 512
+  rope_theta: 10000.0
+  num_labels: 2
+
+tokenizer:
+  vocab:
+    - "<pad>"
+    - "<unk>"
+    - "<mask>"
+    - "<bos>"
+    - "<eos>"
+    - "|"
+    - "X"
+    - "B"
+    - "O"
+    - "U"
+    - "Z"
+    - "J"
+    - "L"
+    - "A"
+    - "G"
+    - "V"
+    - "S"
+    - "E"
+    - "R"
+    - "T"
+    - "I"
+    - "D"
+    - "P"
+    - "K"
+    - "Q"
+    - "N"
+    - "F"
+    - "Y"
+    - "M"
+    - "H"
+    - "W"
+    - "C"
+  vocab_size: 32
+  pad_token: "<pad>"
+  unk_token: "<unk>"
+  mask_token: "<mask>"
+  bos_token: "<bos>"
+  eos_token: "<eos>"
+  other_special_tokens: null
+  ambiguous_tokens:
+    - "<unk>"
+    - "X"
+    - "B"
+    - "O"
+    - "U"
+    - "Z"
+    - "J"
+  remove_ambiguous: true
+
+optimizer:
+  type: AdamW
+  lr: 1e-3
+  betas: [0.9, 0.95]
+  eps: 1e-8
+  weight_decay: 0.01
+  fused: false
+
+scheduler:
+  type: cosine_with_min_lr
+  num_warmup_steps: 10
+  num_training_steps: 300
+  kwargs:
+    min_lr_rate: 0.1
+
+collator:
+  mlm: true
+  mlm_probability: 0.15
+  masking_type: fixed
+  masking_k: 10
+  max_length: 256
+  packing: false
+  pad_to_multiple_of: null
+  random_truncate: true
+  exclude_special_tokens_from_masking: true
+
+dataset:
+  sources:
+    bfd:
+      type: parquet
+      path: data_subsets/bfd_assembled/chunk_000001.parquet
+      sampling_fraction: 0.0015
+      cluster_column: cluster_rep_at_30
+    mgnify:
+      type: parquet
+      path: data_subsets/mgnify_assembled/chunk_000001.parquet
+      sampling_fraction: 0.0015
+      cluster_column: cluster_rep_at_30
+    uniref:
+      type: parquet
+      path: data_subsets/uniref_assembled/chunk_000001.parquet
+      sampling_fraction: 0.0015
+      cluster_column: cluster_rep_at_30
+  score_column: red_score
+  score_curriculum:
+    type: linear
+    start_score: 0.0
+    end_score: 0.01
+    ramp_epochs: 2
+  val_min_score: 0.0
+  val_holdout_modulus: 20
+  seed: 25
+  num_proc: null
+
+dataloader:
+  max_tokens: 2048
+  batch_size: null
+  dataloader_num_workers: 0
+  persistent_workers: false
+  pin_memory: false
+  prefetch_factor: 4
+  drop_last: true
+
+trainer:
+  num_epochs: 3
+  max_steps: null
+  max_grad_norm: 1.0
+  gradient_accumulation_steps: 2
+  output_dir: "smoke_runs/cpu"
+  resume_from_checkpoint: null
+  logging_steps: 10
+  eval_steps: 50
+  save_steps: 50
+  hf_save_steps: 50
+  tf32: false
+
+wandb:
+  enabled: false
+  project: flair-pretrain
+  entity: null
+  run_name: null
+  tags: []
+  mode: offline

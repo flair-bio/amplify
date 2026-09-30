@@ -1,0 +1,17 @@
+# Gradient-trained linear probe over frozen-trunk embeddings. Layer after
+# config.yaml, a model config, and a dataset config.
+steps:
+  mode: tune_probe
+  prepare:
+    embedding_cache:
+      enabled: true
+      pooling: mean
+      layers: [-1]
+  tune:
+    head:
+      head_type: torch_linear
+    hyperparameter_search:
+      search_space:
+        learning_rate: [1e-3, 5e-4, 1e-4]
+        max_epochs: [10, 20, 40]
+        weight_decay: [1e-4, 1e-3]

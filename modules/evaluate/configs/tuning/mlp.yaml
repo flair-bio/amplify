@@ -1,0 +1,23 @@
+# Gradient-trained MLP probe over frozen-trunk embeddings. This is the current
+# restricted frozen-trunk MLP probe grid.
+# Layer after
+# config.yaml, a model config, and a dataset config.
+steps:
+  mode: tune_probe
+  prepare:
+    embedding_cache:
+      enabled: true
+      pooling: mean
+      layers: [-1]
+  tune:
+    head:
+      head_type: mlp
+      hidden_size: 1024 # fixed probe width; this config does not sweep it
+    hyperparameter_search:
+      enabled: true
+      n_trials: 15
+      search_pattern: bohb
+      search_space:
+        learning_rate: [1e-3, 5e-4, 1e-4]
+        max_epochs: [10, 20, 40]
+        weight_decay: [1e-4, 1e-3]

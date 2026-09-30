@@ -1,0 +1,12 @@
+#```yaml
+# migration_map.yml
+# example:
+# entries:
+#   - legacy_repo: AMPLIFY_old
+#     legacy_path: src/amplify/tokenizer.py
+#     new_path: core/tokenizer.py
+#     status: migrated
+#     tests_preserved:
+#       - tests/test_tokenizer.py
+#     migration_note: "Unified with ProSeqO tokeniser; identical outputs verified."
+#```

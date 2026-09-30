@@ -1,0 +1,31 @@
+# One-off ProteinGym sourcing configuration.
+# The script auto-loads this file when run from repository root.
+
+base_url: https://marks.hms.harvard.edu/proteingym
+version: v1.3
+reference_base_url: https://raw.githubusercontent.com/OATML-Markslab/ProteinGym/main/reference_files
+# One of: dms_substitutions | dms_indels | clinical_substitutions | clinical_indels
+track: dms_substitutions
+combine_assays: true
+seed: 1957723
+create_split_subsets: true
+train_fraction: 0.8
+validation_fraction: 0.1
+validation_cluster_identity_threshold: 0.3
+validation_cluster_coverage_threshold: 0.8
+validation_cluster_num_threads: 1
+
+work_dir: eval_datasets/proteingym_sourcing
+
+# Upload is skipped unless repo_owner or repo_id is set.
+upload_layout: per_dataset_repo
+repo_owner: null
+repo_name_prefix: proteingym-
+repo_id: null
+revision: null
+commit_message: Add sourced ProteinGym dataset
+private: false
+
+force_download: false
+overwrite_output: true
+stats_threads: 8

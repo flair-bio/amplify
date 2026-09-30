@@ -1,0 +1,18 @@
+# XGBoost probe over frozen-trunk embeddings.
+# (v0 only shipped knn/linear/mlp grids); this grid is specific to this codebase.
+# Requires the 'xgboost' package (see modules.evaluate.src.model.heads).
+# Layer after config.yaml, a model config, and a dataset config.
+steps:
+  mode: tune_probe
+  prepare:
+    embedding_cache:
+      enabled: true
+      pooling: mean
+      layers: [-1]
+  tune:
+    head:
+      head_type: xgboost
+      search_space:
+        n_estimators: [100, 300]
+        max_depth: [3, 6, 9]
+        learning_rate: [0.3, 0.1, 0.03]

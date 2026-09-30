@@ -1,0 +1,116 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flair-plm"
+version = "0.0.0"
+description = "A modular, enterprise-grade codebase for AMPLIFY protein language model"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT" # Updated to modern SPDX format
+
+# Combined the authors and maintainers from all three repos
+authors = [
+    { name = "Quentin Fournier", email = "quentin.fournier@mila.quebec" },
+    { name = "Lola Le Breton", email = "lola.lebreton@mila.quebec" },
+    { name = "David Heurtel-Depeiges", email = "david.heurtel-depeiges@mila.quebec" },
+    { name = "Benjamin Schulz", email = "bschul02@amgen.com" },
+    { name = "Can (Sam) Chen", email = "can.chen@mila.quebec" },
+    { name = "Robert Vernon", email = "rverno01@amgen.com" },
+]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+# ==========================================
+# 1. CORE DEPENDENCIES
+# Installed for everyone. Shared by all modules.
+# ==========================================
+dependencies = [
+    "torch>=2.14.0",
+    "numpy>=1.26.0",
+    "transformers>=4.49.0",
+    "datasets>=4.2.0",
+    "omegaconf>=2.3.0",
+    "polars>=1.34.0",
+    "polars-bio>=0.28.0",
+    "pydantic>=2.13.0",
+    "pyyaml>=6.0",
+    "huggingface-hub>=1.6.0",
+    "tokenizers>=0.22.0",
+    "tqdm>=4.67.0",
+]
+
+# ==========================================
+# 2. MODULE-SPECIFIC DEPENDENCIES (Extras)
+# Installed explicitly via `uv pip install -e ".[<module>]"`
+# ==========================================
+[project.optional-dependencies]
+
+# Specific to the Data Pipeline
+data = [
+    "pyarrow>=22.0.0",
+    "aria2",
+    "upfp",
+    "matplotlib>=3.9.0",
+]
+
+# Specific to Pretraining
+pretrain = [
+    "accelerate>=1.13.0",
+    "wandb>=0.25.0",
+]
+
+# Specific to Evaluation
+evaluate = [
+    "accelerate>=1.13.0",
+    "scikit-learn",
+    "scipy",
+    "optuna",
+    "peft",
+    "xgboost",
+]
+
+# Heavy GPU Compute Tools (Hardware specific)
+compute = [
+    "flash-attn-4[cu13]>=4.0.0b31; sys_platform == 'linux'",
+]
+
+# Developer Tools
+dev = [
+    "pre-commit",
+    "pytest",
+    "pytest-cov",
+    "pytest-clarity",
+    "black",
+    "xeger",
+    "sphinx",
+    "piccolo-theme",
+]
+
+# The "Full Stack"
+# NOTE: `all` intentionally excludes `compute` to avoid installing
+# CUDA-specific FlashAttention 4 on machines that do not need it.
+all = [
+    "flair-plm[data,pretrain,evaluate,dev]"
+]
+
+[project.urls]
+Homepage = "https://github.com/qfournier/amplify"
+Repository = "https://github.com/qfournier/amplify"
+Issues = "https://github.com/qfournier/amplify/issues"
+Documentation = "https://github.com/qfournier/amplify"
+
+# ==========================================
+# 3. BUILD CONFIGURATION
+# Tell setuptools exactly which folders to package
+# ==========================================
+[tool.setuptools]
+packages = ["modules"]
