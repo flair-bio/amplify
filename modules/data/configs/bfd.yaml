@@ -1,0 +1,24 @@
+# Overlay on config.yaml — only fields that differ from the base defaults.
+# Usage: run_data.py config.yaml bfd.yaml
+dataset:
+  name: bfd
+  source_urls:
+    - https://bfd.mmseqs.com/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt.tar.gz
+
+steps:
+  download:
+    split: 16                        # Split this massive file into 16 chunks
+    max_connections_per_server: 16   # Allow all 16 chunks to download from bfd.mmseqs.com simultaneously
+
+  preprocess:
+    # base config.yaml uses single-threaded settings sized for the tiny yeast smoke
+    # test; bfd is a multi-TB production dataset run on a full compute node, so
+    # extraction/writing/splitting/stats/conversion are parallelized accordingly.
+    fasta_extract_threads: 16
+    fasta_write_threads: 16
+    fasta_split_threads: 8
+    stats_threads: 128
+    parquet_conversion_workers: 14
+
+  cluster:
+    num_threads: 192  # matches a standard-tier CPU node (192 cores / 700G mem); the cluster sbatch job overrides this via steps.cluster.num_threads="$SLURM_CPUS_ON_NODE"

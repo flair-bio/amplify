@@ -1,0 +1,53 @@
+# One-off biomap sourcing configuration.
+# The script auto-loads this file when run from repository root.
+
+# Dataset selection: all_datasets=true processes all 12 source datasets and
+# takes precedence over datasets. Set it to false to use selected names below.
+# Available names:
+# ssp_q3, ssp_q8, fold_prediction, fitness_prediction, metal_ion_binding,
+# localization_prediction, enzyme_catalytic_efficiency, optimal_ph, optimal_temperature,
+# temperature_stability, stability_prediction, solubility_prediction.
+# Example CLI selection: all_datasets=false datasets=[ssp_q3,metal_ion_binding]
+seed: 1957723
+
+all_datasets: true
+datasets:
+  - ssp_q3
+  - ssp_q8
+  - fold_prediction
+  - fitness_prediction
+  - metal_ion_binding
+  - localization_prediction
+  - enzyme_catalytic_efficiency
+  - optimal_ph
+  - optimal_temperature
+  - temperature_stability
+  - stability_prediction
+  - solubility_prediction
+
+# Source and preprocessing.
+work_dir: eval_datasets/biomap_research_sourcing
+preprocess: minimal
+max_sequence_length: null
+
+# Splits: optionally add pooled random, stratified, and MMseqs cluster splits.
+create_split_subsets: true
+
+# Upload: per_dataset_repo creates one repository per dataset under repo_owner;
+# single_repo stores all selected datasets under repo_prefix/<dataset_name>.
+upload_layout: per_dataset_repo
+
+# Set repo_owner or repo_id to upload; leave both null to build local artifacts only.
+repo_owner: null
+repo_name_prefix: biomap-research-
+repo_id: null
+repo_prefix: biomap-research
+revision: null
+commit_message: Add sourced biomap-research datasets
+private: false
+token: null
+
+# Run controls.
+force_download: false
+overwrite_output: false
+stats_threads: 8

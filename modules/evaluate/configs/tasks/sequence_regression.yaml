@@ -1,0 +1,7 @@
+workspace:
+  task_type: sequence_regression
+
+steps:
+  predict:
+    controls:
+      [untrained, random_trunk, random_head, random_both, scrambled_labels, scrambled_sequences, train_mean]

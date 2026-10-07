@@ -1,0 +1,63 @@
+# Override layered on top of config.yaml + a model config + a dataset config
+# to run the default evaluation mode at minimal scale. The smoke-test job
+# explicitly enables tuning and embedding-cache settings for probe variants.
+# Usage:
+#
+#   uv run modules/evaluate/src/run_evaluate.py \
+#     modules/evaluate/configs/config.yaml \
+#     modules/evaluate/configs/models/esm2_35m.yaml \
+#     modules/evaluate/configs/tasks/token_classification.yaml \
+#     modules/evaluate/configs/datasets/ssp_q3.yaml \
+#     modules/evaluate/configs/smoke_test.yaml
+#
+# To exercise variable-length cross-process gathers locally, run:
+#
+#   .venv/bin/accelerate launch --num_processes 2 --cpu \
+#     modules/evaluate/src/run_evaluate.py \
+#     modules/evaluate/configs/config.yaml \
+#     modules/evaluate/configs/models/esm2_35m.yaml \
+#     modules/evaluate/configs/tasks/token_classification.yaml \
+#     modules/evaluate/configs/datasets/ssp_q3.yaml \
+#     modules/evaluate/configs/smoke_test.yaml
+
+workspace:
+  base_path: "./eval/smoke_test"
+
+wandb:
+  enabled: false
+
+steps:
+  mode: evaluate_as_is
+  prepare:
+    # Small batches make differing dynamic-padding widths likely across ranks.
+    batch_size: 2
+    max_length: 64
+    dataloader_num_workers: 0
+    dataloader_persistent_workers: false
+    length_grouped_sampling: false
+    embedding_cache:
+      enabled: false
+      layers: null
+  tune:
+    max_epochs: 1
+    hyperparameter_search:
+      enabled: false
+      n_trials: 2
+      search_pattern: bohb
+      search_space:
+        learning_rate: [1e-4, 5e-5]
+        max_epochs: [1]
+        weight_decay: [1e-4]
+  predict:
+    store_sequences: true
+    controls:
+      [
+        untrained,
+        random_trunk,
+        random_head,
+        random_both,
+        scrambled_labels,
+      ]
+  score:
+    bootstrap_enabled: true
+    n_samples: 5

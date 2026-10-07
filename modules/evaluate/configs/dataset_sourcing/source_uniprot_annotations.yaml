@@ -1,0 +1,85 @@
+# Source residue-level UniProt annotation datasets (human by default).
+
+seed: 1957723
+# Dataset selection: this source has one output per annotation group.
+# - all_datasets: true selects every supported annotation group; datasets is ignored.
+# - all_datasets: false selects the names listed in datasets (one or more).
+# Supported dataset names:
+#   uniprot_secondary_structure
+#   uniprot_post_translational_modification
+#   uniprot_glycosylation
+#   uniprot_phosphorylation
+#   uniprot_lipidation
+#   uniprot_membrane_pass
+#   uniprot_topology
+#   uniprot_peptide
+#   uniprot_functional_sites
+#   uniprot_domains
+#   uniprot_regions
+#   uniprot_structures
+# Example YAML selection for secondary structure only:
+# datasets:
+#   - uniprot_secondary_structure
+# Equivalent CLI override: all_datasets=false datasets=[uniprot_secondary_structure]
+all_datasets: true
+datasets:
+  - uniprot_secondary_structure
+  - uniprot_post_translational_modification
+  - uniprot_glycosylation
+  - uniprot_phosphorylation
+  - uniprot_lipidation
+  - uniprot_membrane_pass
+  - uniprot_topology
+  - uniprot_peptide
+  - uniprot_functional_sites
+  - uniprot_domains
+  - uniprot_regions
+  - uniprot_structures
+
+# Source and preprocessing.
+work_dir: eval_datasets/uniprot_annotations_sourcing
+preprocess: minimal
+max_sequence_length: null
+# null selects all organisms; otherwise use an NCBI Taxonomy ID (human: 9606).
+organism_id: 9606
+# reviewed = Swiss-Prot, unreviewed = TrEMBL, all = both.
+review_status: reviewed
+
+# A feature block is labeled only when its own /evidence qualifier contains
+# ECO:0000269 or ECO:0000305. Secondary-structure features also accept
+# ECO:0007829|PDB:<structure ID>, indicating a PDB-derived assignment.
+# Missing, malformed, and other evidence produces no positive label;
+# ECO identifiers inside /note do not qualify a feature.
+# Proteins with only evidence-rejected candidate features are excluded from the
+# negative pool. Genuinely feature-free proteins may be sampled as negatives.
+# Background residues remain an assumed, not experimentally verified, negative
+# class.
+
+# Splits.
+split_fractions:
+  train: 0.8
+  validation: 0.1
+  test: 0.1
+
+# Splits: optionally add pooled random, stratified, and MMseqs cluster splits.
+create_split_subsets: true
+
+validation_cluster_identity_threshold: 0.3
+validation_cluster_coverage_threshold: 0.8
+validation_cluster_num_threads: 1
+
+# Upload: set repo_owner or repo_id to upload; otherwise artifacts stay local.
+upload_layout: per_dataset_repo
+repo_owner: null
+repo_name_prefix: ""
+repo_id: null
+repo_prefix: uniprot
+revision: null
+commit_message: Add sourced UniProt residue annotation datasets
+private: false
+token: null
+
+# Run controls.
+force_download: false
+overwrite_output: false
+stats_threads: 8

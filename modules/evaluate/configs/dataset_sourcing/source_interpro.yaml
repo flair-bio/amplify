@@ -1,0 +1,59 @@
+# Source protein-level InterPro labels for UniProtKB proteins.
+
+# Dataset selection: all_datasets=true processes all seven categories and takes
+# precedence over datasets. Set it to false to select specific groups below.
+# Available names: interpro_active_site, interpro_binding_site,
+# interpro_conserved_site, interpro_domain, interpro_family,
+# interpro_homologous_superfamily, interpro_repeat.
+# Example CLI selection: all_datasets=false datasets=[interpro_domain]
+seed: 1957723
+all_datasets: true
+datasets:
+  - interpro_active_site
+  - interpro_binding_site
+  - interpro_conserved_site
+  - interpro_domain
+  - interpro_family
+  - interpro_homologous_superfamily
+  - interpro_repeat
+
+# Source and preprocessing.
+work_dir: eval_datasets/interpro_sourcing
+preprocess: minimal
+max_sequence_length: null
+# null selects all organisms; otherwise use an NCBI Taxonomy ID (human: 9606).
+organism_id: 9606
+# reviewed = Swiss-Prot, unreviewed = TrEMBL, all = both.
+review_status: reviewed
+interpro_download_url: https://ftp.ebi.ac.uk/pub/databases/interpro/current_release
+# Minimum number of positive examples required for each retained label.
+min_label_count: 2
+
+# Splits.
+split_fractions:
+  train: 0.8
+  validation: 0.1
+  test: 0.1
+
+# Splits: optionally add pooled random, stratified, and MMseqs cluster splits.
+create_split_subsets: true
+
+validation_cluster_identity_threshold: 0.3
+validation_cluster_coverage_threshold: 0.8
+validation_cluster_num_threads: 1
+
+# Upload: set repo_owner or repo_id to upload; otherwise artifacts stay local.
+upload_layout: per_dataset_repo
+repo_owner: null
+repo_name_prefix: ""
+repo_id: null
+repo_prefix: interpro
+revision: null
+commit_message: Add sourced InterPro annotation datasets
+private: false
+token: null
+
+# Run controls.
+force_download: false
+overwrite_output: false
+stats_threads: 8

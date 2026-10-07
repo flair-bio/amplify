@@ -1,0 +1,6 @@
+workspace:
+  dataset_name: uniprot_membrane_pass
+  dataset_repo_id: swhitfield/uniprot_membrane_pass
+  target_type: categorical
+  label_format: per_token
+  num_labels: 3

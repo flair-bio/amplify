@@ -1,0 +1,6 @@
+workspace:
+  dataset_name: GO_bp
+  dataset_repo_id: swhitfield/uniprot-GO_bp
+  target_type: categorical
+  label_format: multilabel
+  num_labels: 1899

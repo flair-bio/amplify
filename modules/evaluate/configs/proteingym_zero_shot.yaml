@@ -1,0 +1,26 @@
+# ProteinGym zero-shot scoring configuration.
+# Data resolution tries a local HF snapshot, then the configured repo, then data_dir.
+
+model_id: facebook/esm2_t12_35M_UR50D
+data_dir: eval_datasets/proteingym_sourcing/outputs # local fallback dataset
+# Prefer this HF dataset repo before data_dir; null uses data_dir directly.
+data_repo_id: null
+# Force a fresh download before falling back to data_dir.
+force_download: false
+output_dir: eval/proteingym_zero_shot/facebook_esm2_t12_35M_UR50D
+
+batch_size: 16
+max_length: 1024
+max_assays: null # null scores every sourced assay
+
+dtype: float32
+device: null # null auto-selects cuda if available, else cpu
+seed: 1957723
+
+# Add bootstrap uncertainty to summary.json when enabled; resampling adds runtime.
+compute_uncertainty: false
+n_bootstrap: 10000
+
+# Optional reference scorers, written below output_dir/baselines/<name>/.
+# Choices: random | blosum62 | random_init_trunk
+baselines: []

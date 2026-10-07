@@ -1,0 +1,6 @@
+workspace:
+  dataset_name: interpro_homologous_superfamily
+  dataset_repo_id: swhitfield/interpro_homologous_superfamily
+  target_type: categorical
+  label_format: multilabel
+  num_labels: 1515

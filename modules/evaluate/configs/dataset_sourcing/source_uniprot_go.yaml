@@ -1,0 +1,64 @@
+# Source one or more UniProt GO aspect datasets per run.
+# The script auto-loads this file when run from repository root.
+
+# Dataset selection: all_datasets=true processes all three aspects and takes
+# precedence over datasets. Set it to false to select aspects from the list.
+# Available names:
+# molecular_function, biological_process, cellular_component.
+# Example CLI overrides: all_datasets=true or datasets=[molecular_function,biological_process]
+seed: 1957723
+
+all_datasets: true
+datasets:
+  - molecular_function
+  - biological_process
+  - cellular_component
+
+# Source and preprocessing.
+work_dir: eval_datasets/uniprot_go_sourcing
+preprocess: minimal
+# null: minimally preprocess and save the full dataset (no length cutoff).
+# Setting this (e.g. 512) auto-appends "_<n>_cutoff" to dataset_name below,
+# following the dataset naming convention shown below.
+max_sequence_length: null
+
+# null: names are derived per aspect (e.g. GO_mf or GO_mf_512_cutoff).
+# Set explicitly only when exactly one aspect is selected.
+dataset_name: null
+# null selects all organisms; otherwise use an NCBI Taxonomy ID (human: 9606).
+organism_id: 9606
+# reviewed = Swiss-Prot, unreviewed = TrEMBL, all = both.
+review_status: reviewed
+# null: auto-derived from split_fractions below, so the smallest split
+# (test/validation, 10%) gets ~10 expected positives of every kept label
+# (see MIN_POSITIVE_EXAMPLES_PER_SPLIT). Set explicitly to override.
+min_label_count: null
+# Splits: default fractions are 80/10/10.
+split_fractions:
+  train: 0.8
+  validation: 0.1
+  test: 0.1
+
+# Splits: optionally add pooled random, stratified, and MMseqs cluster splits.
+create_split_subsets: true
+
+validation_cluster_identity_threshold: 0.3
+validation_cluster_coverage_threshold: 0.8
+validation_cluster_num_threads: 1
+
+# Upload: per_dataset_repo creates one repository per dataset under repo_owner;
+# single_repo stores the output under repo_prefix/<dataset_name>.
+upload_layout: per_dataset_repo
+
+repo_owner: null
+repo_name_prefix: uniprot-
+repo_id: null
+repo_prefix: uniprot
+revision: null
+commit_message: Add sourced UniProt GO annotation dataset
+private: false
+token: null
+
+force_download: false
+overwrite_output: true
+stats_threads: 8

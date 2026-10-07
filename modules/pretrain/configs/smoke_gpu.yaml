@@ -1,0 +1,48 @@
+# GPU smoke test — overlay on config.yaml. Pass both files together:
+#   run_pretrain.py configs/config.yaml configs/smoke_gpu.yaml
+
+model:
+  hidden_size: 256
+  num_hidden_layers: 4
+  num_attention_heads: 8
+  intermediate_size: 512
+  embedding_init_range: 0.02
+  decoder_init_range: 0.02
+  norm_eps: 1e-5
+  vocab_size: 32
+  pad_token_id: 0
+  bos_token_id: 3
+  eos_token_id: 4
+  max_position_embeddings: 512
+  rope_theta: 10000.0
+  num_labels: 2
+
+scheduler:
+  num_warmup_steps: 10
+  num_training_steps: 150
+
+collator:
+  max_length: 256
+
+dataset:
+  # OAS only (small, from the Hub); the other sources are skipped.
+  sources:
+    bfd:
+      sampling_fraction: 0.0
+    mgnify:
+      sampling_fraction: 0.0
+    uniref:
+      sampling_fraction: 0.0
+
+dataloader:
+  max_tokens: 16384
+  dataloader_num_workers: 4
+
+trainer:
+  max_steps: 150
+  gradient_accumulation_steps: 2
+  output_dir: "smoke_runs/gpu"
+  logging_steps: 10
+  eval_steps: 50
+  save_steps: 50
+  hf_save_steps: 50

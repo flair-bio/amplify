@@ -1,0 +1,6 @@
+workspace:
+  dataset_name: interpro_binding_site
+  dataset_repo_id: swhitfield/interpro_binding_site
+  target_type: categorical
+  label_format: multilabel
+  num_labels: 55

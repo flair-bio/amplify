@@ -1,0 +1,6 @@
+workspace:
+  dataset_name: GO_cc
+  dataset_repo_id: swhitfield/uniprot-GO_cc
+  target_type: categorical
+  label_format: multilabel
+  num_labels: 557

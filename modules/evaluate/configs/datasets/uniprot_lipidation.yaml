@@ -1,0 +1,6 @@
+workspace:
+  dataset_name: uniprot_lipidation
+  dataset_repo_id: swhitfield/uniprot_lipidation
+  target_type: categorical
+  label_format: per_token
+  num_labels: 18

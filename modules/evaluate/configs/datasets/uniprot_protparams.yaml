@@ -1,0 +1,10 @@
+workspace:
+  dataset_name: uniprot_protparams
+  dataset_repo_id: swhitfield/uniprot_protparams
+  target_type: continuous
+  label_format: scalar
+  num_labels: null
+
+steps:
+  prepare:
+    label_column: gravy

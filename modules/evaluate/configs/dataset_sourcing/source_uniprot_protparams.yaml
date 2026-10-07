@@ -1,0 +1,37 @@
+# Source one dataset with ProtParam property columns for UniProtKB proteins.
+seed: 1957723
+
+# Source and preprocessing.
+work_dir: eval_datasets/uniprot_protparams_sourcing
+preprocess: minimal
+# null selects all organisms; otherwise use an NCBI Taxonomy ID (human: 9606).
+organism_id: 9606
+# reviewed = Swiss-Prot, unreviewed = TrEMBL, all = both.
+review_status: reviewed
+max_sequence_length: null
+
+# Canonical evaluate splits.
+split_fractions:
+  train: 0.8
+  validation: 0.1
+  test: 0.1
+
+# Splits: optionally add pooled random, stratified, and MMseqs cluster splits.
+create_split_subsets: true
+
+validation_cluster_identity_threshold: 0.3
+validation_cluster_coverage_threshold: 0.8
+validation_cluster_num_threads: 1
+
+upload_layout: per_dataset_repo
+repo_owner: null
+repo_name_prefix: ""
+repo_id: null
+repo_prefix: uniprot
+commit_message: Add sourced UniProt ProtParam regression dataset
+private: false
+token: null
+
+force_download: false
+overwrite_output: false
+stats_threads: 8

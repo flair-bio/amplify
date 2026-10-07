@@ -1,0 +1,7 @@
+
+workspace:
+  dataset_name: GO_mf
+  dataset_repo_id: swhitfield/uniprot-GO_mf
+  target_type: categorical
+  label_format: multilabel
+  num_labels: 1225

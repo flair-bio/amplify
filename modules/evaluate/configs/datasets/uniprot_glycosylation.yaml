@@ -1,0 +1,6 @@
+workspace:
+  dataset_name: uniprot_glycosylation
+  dataset_repo_id: swhitfield/uniprot_glycosylation
+  target_type: categorical
+  label_format: per_token
+  num_labels: 2

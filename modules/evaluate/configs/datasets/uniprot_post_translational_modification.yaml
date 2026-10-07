@@ -1,0 +1,6 @@
+workspace:
+  dataset_name: uniprot_post_translational_modification
+  dataset_repo_id: swhitfield/uniprot_post_translational_modification
+  target_type: categorical
+  label_format: per_token
+  num_labels: 5
