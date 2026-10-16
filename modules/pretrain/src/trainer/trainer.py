@@ -110,9 +110,8 @@ class WandbConfig(BaseModel):
     id: str | None = Field(
         None,
         description=(
-            "Explicit W&B run id, for deterministic resume. Defaults to a "
-            "slug of `run_name`, so relaunching with the same `run_name` "
-            "(e.g. via `resume_from_checkpoint`) resumes the same W&B run."
+            "Explicit W&B run id for resuming a chosen run. "
+            "If unset, W&B generates a random id."
         ),
     )
     resume: str = Field(

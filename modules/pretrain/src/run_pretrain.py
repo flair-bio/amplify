@@ -2,7 +2,6 @@
 
 import logging
 import os
-import re
 import sys
 from datetime import timedelta
 
@@ -126,12 +125,6 @@ def setup_tracking(config: PretrainConfig, accelerator: Accelerator) -> None:
     wandb_config = config.wandb
     # Consolidates logs and checkpoints under one folder by default.
     wandb_dir = wandb_config.dir or (config.trainer.output_dir / "wandb")
-    # W&B only resumes via a stable `id`, not by matching `name`; default it
-    # to a slug of `run_name` so relaunching (e.g. after preemption) reattaches
-    # to the same W&B run automatically.
-    wandb_id = wandb_config.id
-    if wandb_id is None and wandb_config.run_name:
-        wandb_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", wandb_config.run_name).strip("-")
 
     if accelerator.is_main_process:
         wandb_dir.mkdir(parents=True, exist_ok=True)
@@ -146,7 +139,7 @@ def setup_tracking(config: PretrainConfig, accelerator: Accelerator) -> None:
                 "tags": wandb_config.tags,
                 "mode": wandb_config.mode,
                 "dir": str(wandb_dir),
-                "id": wandb_id,
+                "id": wandb_config.id,
                 "resume": wandb_config.resume,
             }
         },

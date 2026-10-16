@@ -204,5 +204,5 @@ wandb:
   tags: ["350M", "pretrain"]
   mode: offline
   dir: null   # defaults to "<trainer.output_dir>/wandb" if unset
-  id: null    # defaults to a slug of `run_name` if unset, for deterministic resume
+  id: null    # W&B generates a random run ID when unset
   resume: allow
