@@ -1,0 +1,6 @@
+workspace:
+  dataset_name: proteinnet_contact_prediction
+  dataset_repo_id: flair-bio/tape-proteinnet_contact_prediction
+  target_type: categorical
+  label_format: contact_pairs
+  num_labels: null

@@ -1,0 +1,25 @@
+# Source the human calibration dataset. Default input: the HHblits alignments
+# written by run_hhblits.yaml (step 1, run on a cluster). To build from
+# precomputed profile CSVs instead, override:
+#   a3m_dir=null proteome_path=/path/to/proteome.csv consensus_path=/path/to/consensus.csv
+dataset_name: human_calibration
+a3m_dir: eval_datasets/calibration_sourcing/a3m
+proteome_path: null
+consensus_path: null
+# Keep positions whose most frequent homolog residue reaches this frequency.
+min_consensus_freq: 0.70
+# Drop proteins with fewer aligned homologs than this. a3m input only; the
+# CSVs carry no homolog counts.
+min_homologs: 10
+
+work_dir: eval_datasets/calibration_sourcing
+overwrite_output: false
+stats_threads: 8
+
+# Upload: set repo_owner or repo_id to upload; otherwise artifacts stay local.
+upload_layout: per_dataset_repo
+repo_owner: null
+revision: null
+commit_message: Add sourced human calibration dataset
+private: false
+token: null

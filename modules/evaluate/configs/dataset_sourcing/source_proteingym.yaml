@@ -1,0 +1,40 @@
+# One-off ProteinGym sourcing configuration.
+# Run from the repository root and pass this file as a config argument.
+
+base_url: https://marks.hms.harvard.edu/proteingym
+# Release folder: archives live at <base_url>/ProteinGym_<version>/<track>.zip.
+version: v1.3
+# Reference CSV comes from the GitHub main branch; pin a commit in this URL to match `version` exactly.
+reference_base_url: https://raw.githubusercontent.com/OATML-Markslab/ProteinGym/main/reference_files
+# One of: dms_substitutions | dms_indels | clinical_substitutions | clinical_indels
+track: dms_substitutions
+# Keep per-assay outputs and also write a combined table.
+combine_assays: true
+# Seeds the per-assay 80/10/10 splits and pooled subsets.
+seed: 1957723
+# Adds per-assay train/validation/test labels plus pooled random/stratified views
+# (no MMseqs clustering: variants within an assay share one wild type).
+create_split_subsets: true
+# Test gets the remainder: 1 - train_fraction - validation_fraction.
+train_fraction: 0.8
+validation_fraction: 0.1
+
+# <track> is appended at runtime, so outputs land in this path/<track>/outputs.
+work_dir: eval_datasets/proteingym_sourcing
+
+# Upload is skipped unless repo_owner or repo_id is set.
+upload_layout: per_dataset_repo
+repo_owner: null
+repo_name_prefix: proteingym-
+repo_id: null
+# Hub branch to upload to.
+revision: null
+commit_message: Add sourced ProteinGym dataset
+# Published repos are public here; the schema default is true.
+private: false
+
+force_download: false
+# true: existing outputs are deleted and rebuilt on every run.
+overwrite_output: true
+# Threads for SeqKit stats.
+stats_threads: 8

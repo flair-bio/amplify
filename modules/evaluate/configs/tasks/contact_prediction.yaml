@@ -1,0 +1,13 @@
+workspace:
+  task_type: contact_prediction
+  model_kwargs: {}
+
+steps:
+  prepare:
+    embedding_cache:
+      enabled: false
+  tune:
+    head:
+      head_type: mlp
+  predict:
+    controls: [untrained, scrambled_labels, separation_prior]

@@ -1,0 +1,3 @@
+workspace:
+  model_name: amplify-120m
+  model_repo_id: flair-bio/amplify-120m

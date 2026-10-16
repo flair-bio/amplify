@@ -1,0 +1,17 @@
+workspace:
+  task_type: pseudo_perplexity
+
+steps:
+  mode: evaluate_as_is
+  prepare:
+    # Prepare still requires three roles; only the test loader is scored.
+    split:
+      train: test
+      validation: test
+      test: test
+    random_truncate_by_split:
+      train: false
+    embedding_cache:
+      enabled: false
+  predict:
+    controls: ["random_both"]
