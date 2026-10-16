@@ -35,6 +35,7 @@ class AMPLIFYModelConfig(BaseModel):
         qk_norm: Apply per-head normalization to queries and keys before RoPE.
         attention_gate: Apply elementwise sigmoid gating before the attention output projection.
         nonlinear_mlm_head: Add a dense-GELU-norm MLM head transform.
+        layernorm_scaling: Scale block pre-norm outputs by inverse square root of depth.
         intermediate_size: Dimension of the SwiGLU feed-forward inner layer.
         embedding_init_range: Uniform init bound for the token embedding.
         decoder_init_range: Uniform init bound for linear layers.
@@ -59,6 +60,7 @@ class AMPLIFYModelConfig(BaseModel):
     qk_norm: bool = False
     attention_gate: bool = False
     nonlinear_mlm_head: bool = False
+    layernorm_scaling: bool = False
     intermediate_size: int = Field(2560, gt=0)
     embedding_init_range: float = Field(0.02, gt=0.0)
     decoder_init_range: float = Field(0.02, gt=0.0)
@@ -237,8 +239,9 @@ class Attention(nn.Module):
     ``hidden_states`` with the attention residual already added.
     """
 
-    def __init__(self, config: AMPLIFYConfig) -> None:
+    def __init__(self, config: AMPLIFYConfig, norm_scale: float = 1.0) -> None:
         super().__init__()
+        self.norm_scale = norm_scale
         self.num_heads = config.num_attention_heads
         self.head_dim = config.hidden_size // config.num_attention_heads
         self.fa4_attn_fn = get_fa4_varlen_func()
@@ -278,7 +281,7 @@ class Attention(nn.Module):
         batch_size, total_tokens = hidden_states.shape[:2]
         hidden_states_flat = hidden_states.view(-1, self.num_heads * self.head_dim)
         # Pre-norm + QKV projection + optional QK normalization + RoPE.
-        normed = layernorm(hidden_states_flat)
+        normed = layernorm(hidden_states_flat) * self.norm_scale
         qkv = self.qkv_proj(normed).view(total_tokens, 3, self.num_heads, self.head_dim)
         q, k, v = apply_rotary_emb_qkv(qkv, cos, sin, self.q_norm, self.k_norm)
         if q.dtype not in _HALF_DTYPES:
@@ -329,7 +332,7 @@ class Attention(nn.Module):
         """PyTorch SDPA path for padded batches."""
         batch_size, seq_len = hidden_states.shape[:2]
         # Pre-norm before attention.
-        normed = layernorm(hidden_states)
+        normed = layernorm(hidden_states) * self.norm_scale
         # Project to Q, K, V and reshape to (batch, seq, heads, dim).
         qkv = self.qkv_proj(normed).view(
             batch_size, seq_len, 3, self.num_heads, self.head_dim
@@ -394,8 +397,9 @@ class SwiGLU(nn.Module):
     ``hidden_states`` with the FFN residual added.
     """
 
-    def __init__(self, config: AMPLIFYConfig) -> None:
+    def __init__(self, config: AMPLIFYConfig, norm_scale: float = 1.0) -> None:
         super().__init__()
+        self.norm_scale = norm_scale
         self.gate_up_proj = nn.Linear(
             config.hidden_size, 2 * config.intermediate_size, bias=False
         )
@@ -411,7 +415,7 @@ class SwiGLU(nn.Module):
         """Packed path using the same "silu(gate) * up" as the padded path below."""
         batch_size, total_tokens = hidden_states.shape[:2]
         hidden_states_flat = hidden_states.view(-1, hidden_states.shape[-1])
-        normed = layernorm(hidden_states_flat)
+        normed = layernorm(hidden_states_flat) * self.norm_scale
         gate, up = self.gate_up_proj(normed).chunk(2, dim=-1)
         swiglu_out = self.act_fn(gate) * up
         # Fused residual: hidden + swiglu(gate, up) @ down_proj.weight.T
@@ -427,7 +431,8 @@ class SwiGLU(nn.Module):
     ) -> torch.Tensor:
         """Padded path using standard SiLU gating."""
         # Pre-norm + SwiGLU FFN + residual connection.
-        gate, up = self.gate_up_proj(layernorm(hidden_states)).chunk(2, dim=-1)
+        normed = layernorm(hidden_states) * self.norm_scale
+        gate, up = self.gate_up_proj(normed).chunk(2, dim=-1)
         return hidden_states + self.down_proj(self.act_fn(gate) * up)
 
     def forward(
@@ -453,16 +458,17 @@ class EncoderBlock(nn.Module):
         "down_proj.weight": "mlp.down_proj.weight",
     }
 
-    def __init__(self, config: AMPLIFYConfig) -> None:
+    def __init__(self, config: AMPLIFYConfig, layer_idx: int = 0) -> None:
         super().__init__()
+        norm_scale = (layer_idx + 1) ** -0.5 if config.layernorm_scaling else 1.0
         # Pre-normalization layer applied before attention.
         self.input_layernorm = _make_norm(config)
         # Attention module.
-        self.attention = Attention(config)
+        self.attention = Attention(config, norm_scale=norm_scale)
         # Pre-normalization layer applied before FFN.
         self.post_attention_layernorm = _make_norm(config)
         # FFN module.
-        self.mlp = SwiGLU(config)
+        self.mlp = SwiGLU(config, norm_scale=norm_scale)
 
     def _load_from_state_dict(
         self,
@@ -576,7 +582,7 @@ class AMPLIFYModel(AMPLIFYPreTrainedModel):
             config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id
         )
         self.layers = nn.ModuleList(
-            [EncoderBlock(config) for _ in range(config.num_hidden_layers)]
+            [EncoderBlock(config, layer_idx=i) for i in range(config.num_hidden_layers)]
         )
         self.norm = _make_norm(config)
         self.rotary_emb = RotaryEmbedding(config)
