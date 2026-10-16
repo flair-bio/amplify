@@ -9,6 +9,7 @@ model:
   nonlinear_mlm_head: false
   layernorm_scaling: false
   intermediate_size: 2560
+  gaussian_init: false
   embedding_init_range: 0.02
   decoder_init_range: 0.02
   norm_eps: 1e-5

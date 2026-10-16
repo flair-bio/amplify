@@ -17,12 +17,13 @@ class AMPLIFYConfig(PretrainedConfig):
         nonlinear_mlm_head: Add a dense-GELU-norm MLM head transform.
         layernorm_scaling: Scale block pre-norm outputs by inverse square root of depth.
         intermediate_size: Dimension of the SwiGLU feed-forward inner layer.
-        embedding_init_range: Uniform init bound for the token embedding.
-        decoder_init_range: Uniform init bound for linear layers.
+        gaussian_init: Use zero-mean Gaussian initialization for linear and embedding weights.
+        embedding_init_range: Uniform bound or Gaussian standard deviation for token embeddings.
+        decoder_init_range: Uniform bound or Gaussian standard deviation for linear weights.
         norm_eps: Epsilon for the configured normalization layers.
         norm_type: Normalization layer type: ``"RMSNorm"``, ``"CenteredRMSNorm"``,
-            ``"ZeroCenteredRMSNorm"``, or ``"LayerNorm"``. Also applies to enabled QK normalization and the
-            nonlinear MLM head.
+            ``"ZeroCenteredRMSNorm"``, or ``"LayerNorm"``. Also applies to enabled
+            QK normalization and the nonlinear MLM head.
         vocab_size: Number of tokens in the amino-acid vocabulary.
         max_position_embeddings: Maximum context length supported by RoPE.
         rope_theta: Base frequency for RoPE.
@@ -36,6 +37,7 @@ class AMPLIFYConfig(PretrainedConfig):
         num_hidden_layers: int = 32,
         num_attention_heads: int = 15,
         intermediate_size: int = 2560,
+        gaussian_init: bool = False,
         embedding_init_range: float = 0.02,
         decoder_init_range: float = 0.02,
         norm_eps: float = 1e-05,
@@ -49,7 +51,9 @@ class AMPLIFYConfig(PretrainedConfig):
         attention_gate: bool = False,
         nonlinear_mlm_head: bool = False,
         layernorm_scaling: bool = False,
-        norm_type: Literal["RMSNorm", "CenteredRMSNorm", "ZeroCenteredRMSNorm", "LayerNorm"] = "RMSNorm",
+        norm_type: Literal[
+            "RMSNorm", "CenteredRMSNorm", "ZeroCenteredRMSNorm", "LayerNorm"
+        ] = "RMSNorm",
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -67,10 +71,16 @@ class AMPLIFYConfig(PretrainedConfig):
         self.nonlinear_mlm_head = nonlinear_mlm_head
         self.layernorm_scaling = layernorm_scaling
         self.intermediate_size = intermediate_size
+        self.gaussian_init = gaussian_init
         self.embedding_init_range = embedding_init_range
         self.decoder_init_range = decoder_init_range
         self.norm_eps = norm_eps
-        if norm_type not in {"RMSNorm", "CenteredRMSNorm", "ZeroCenteredRMSNorm", "LayerNorm"}:
+        if norm_type not in {
+            "RMSNorm",
+            "CenteredRMSNorm",
+            "ZeroCenteredRMSNorm",
+            "LayerNorm",
+        }:
             raise ValueError(
                 f"Unknown norm_type {norm_type!r}; expected 'RMSNorm', "
                 "'CenteredRMSNorm', 'ZeroCenteredRMSNorm', or 'LayerNorm'."
