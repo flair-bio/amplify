@@ -247,3 +247,69 @@ def test_qk_norm_loads_old_checkpoint_and_trains(norm_type, tmp_path):
     model.save_pretrained(destination)
     restored = modeling.AMPLIFYForMaskedLM.from_pretrained(destination)
     torch.testing.assert_close(model(ids).logits, restored(ids).logits, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_attention_gating_uses_normalized_inputs_before_output_projection(
+    packed, monkeypatch
+):
+    torch.manual_seed(15)
+    config = tiny_config(attention_gate=True)
+    attention = modeling.Attention(config)
+    norm = modeling._make_norm(config)
+    hidden = torch.randn(1, 6, 32, requires_grad=True)
+    cos, sin = modeling.RotaryEmbedding(config)(hidden, torch.arange(6))
+    with torch.no_grad():
+        attention.o_proj.weight.copy_(2 * torch.eye(32))
+        attention.gate_proj.weight.copy_(0.5 * torch.eye(32))
+
+    def kernel(q, k, v, **kwargs):
+        return torch.ones_like(v)
+
+    if packed:
+        attention.fa4_attn_fn = None
+        monkeypatch.setattr(modeling, "varlen_attn", kernel)
+        actual, _ = attention(
+            norm,
+            hidden,
+            None,
+            cos,
+            sin,
+            False,
+            6,
+            torch.tensor([0, 6], dtype=torch.int32),
+        )
+    else:
+        monkeypatch.setattr(modeling, "scaled_dot_product_attention", kernel)
+        actual, _ = attention(
+            norm, hidden, None, cos[None, :, None], sin[None, :, None], False
+        )
+    expected = hidden + 2 * (0.5 * norm(hidden)).sigmoid()
+    torch.testing.assert_close(actual, expected)
+    actual.square().mean().backward()
+    assert torch.isfinite(attention.gate_proj.weight.grad).all()
+    assert attention.gate_proj.weight.grad.abs().sum() > 0
+
+
+def test_attention_gating_trains_and_survives_checkpoint(tmp_path):
+    torch.manual_seed(16)
+    config = modeling.AMPLIFYModelConfig(
+        hidden_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        intermediate_size=64,
+        max_position_embeddings=32,
+        attention_gate=True,
+        qk_norm=True,
+    )
+    model = modeling.AMPLIFYForMaskedLM(config.to_hf_config())
+    ids = torch.randint(1, 32, (2, 8))
+    model(ids, labels=ids).loss.backward()
+    assert_finite_gradients(model)
+    # Exercise the explicit attention implementation as well as SDPA.
+    expected = model(ids).logits
+    torch.testing.assert_close(model(ids, output_attentions=True).logits, expected)
+    model.save_pretrained(tmp_path)
+    restored = modeling.AMPLIFYForMaskedLM.from_pretrained(tmp_path)
+    torch.testing.assert_close(restored(ids).logits, expected, rtol=0, atol=0)
+    assert restored.config.attention_gate is True

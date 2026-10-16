@@ -33,6 +33,7 @@ class AMPLIFYModelConfig(BaseModel):
         num_hidden_layers: Number of transformer encoder layers.
         num_attention_heads: Number of attention heads per layer.
         qk_norm: Apply per-head normalization to queries and keys before RoPE.
+        attention_gate: Apply elementwise sigmoid gating before the attention output projection.
         intermediate_size: Dimension of the SwiGLU feed-forward inner layer.
         embedding_init_range: Uniform init bound for the token embedding.
         decoder_init_range: Uniform init bound for linear layers.
@@ -55,6 +56,7 @@ class AMPLIFYModelConfig(BaseModel):
     num_hidden_layers: int = Field(32, gt=0)
     num_attention_heads: int = Field(15, gt=0)
     qk_norm: bool = False
+    attention_gate: bool = False
     intermediate_size: int = Field(2560, gt=0)
     embedding_init_range: float = Field(0.02, gt=0.0)
     decoder_init_range: float = Field(0.02, gt=0.0)
@@ -251,6 +253,11 @@ class Attention(nn.Module):
             config.hidden_size, config.hidden_size * 3, bias=False
         )
         self.o_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        self.gate_proj = (
+            nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+            if config.attention_gate
+            else None
+        )
 
     # Fast path: packed sequences with optional FlashAttention acceleration.
     def _attn_packed(
@@ -298,6 +305,9 @@ class Attention(nn.Module):
         attn_output = attn_output.to(hidden_states_flat.dtype).view(
             -1, self.num_heads * self.head_dim
         )
+        if self.gate_proj is not None:
+            gate = self.gate_proj(normed).sigmoid()
+            attn_output = attn_output * gate.to(attn_output.dtype)
         # Fused attention residual: hidden + attn_output @ o_proj.weight.T
         hidden_states_flat = torch.addmm(
             hidden_states_flat, attn_output, self.o_proj.weight.t()
@@ -347,6 +357,9 @@ class Attention(nn.Module):
             attn_output = attn_output.transpose(1, 2).reshape(batch_size, seq_len, -1)
             attn_weights = None
 
+        if self.gate_proj is not None:
+            gate = self.gate_proj(normed).sigmoid()
+            attn_output = attn_output * gate.to(attn_output.dtype)
         return hidden_states + self.o_proj(attn_output), attn_weights
 
     def forward(
