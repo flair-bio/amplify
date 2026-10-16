@@ -600,7 +600,7 @@ The optimizer splits parameters into **decay** and **no-decay** groups: 1-D para
 | `tags` | `["350M", "pretrain"]` | Tags attached to the run |
 | `mode` | `offline` | `online`, `offline`, or `disabled`. Defaults to `offline` for nodes without internet access; sync later with `wandb sync <dir>` |
 | `dir` | `null` | Local directory for run data; defaults to `<trainer.output_dir>/wandb` if unset |
-| `id` | `null` | Explicit W&B run id; defaults to a slug of `run_name` for deterministic resume |
+| `id` | `null` | Explicit W&B run ID; W&B generates a random ID when unset |
 | `resume` | `allow` | Resume mode passed to `wandb.init` alongside `id` (`allow`, `must`, `never`, ...) |
 
 ---
@@ -872,7 +872,7 @@ This is the same helper `modules/data`'s Upload step uses; see [`hf_upload.py`](
 
 ### W&B run resumption
 
-Setting the same `wandb.run_name` on a re-launched job (e.g. after a SLURM preemption, via `trainer.resume_from_checkpoint`) does **not** by itself resume the same W&B run. W&B only resumes runs matched by a stable `id`. To make this work transparently, `wandb.id` defaults to a slug of `wandb.run_name`, combined with `wandb.resume: "allow"` (creates the run if the id is new, resumes it if it already exists). Set `wandb.id` explicitly if you need distinct W&B runs under the same `run_name`, or a different resume policy via `wandb.resume` (`"must"`, `"never"`, ...).
+W&B generates a random run ID by default, independently of `wandb.run_name`. Resuming a training checkpoint starts a new W&B run unless `wandb.id` is explicitly set to an existing run ID with `wandb.resume=allow` or `must`.
 
 ---
 

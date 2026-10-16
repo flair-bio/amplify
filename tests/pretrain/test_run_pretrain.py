@@ -16,9 +16,9 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
+import modules.pretrain.src.run_pretrain as run_pretrain
 from modules.core.utils.config_loader import load_config
 from modules.pretrain.src.config import PretrainConfig
-import modules.pretrain.src.run_pretrain as run_pretrain
 
 CONFIGS_DIR = Path(__file__).parents[2] / "modules" / "pretrain" / "configs"
 MAIN_CONFIG = CONFIGS_DIR / "config.yaml"
@@ -52,6 +52,50 @@ def _run(config: PretrainConfig):
         accelerator_cls.return_value = MagicMock()
         run_pretrain.setup_runtime(config)
     return accelerator_cls.call_args.kwargs, set_seed
+
+
+class TestSetupTracking:
+    @pytest.mark.parametrize("run_id", [None, "resume-run-123"])
+    @pytest.mark.parametrize("custom_dir", [False, True])
+    def test_run_id_is_forwarded_without_deriving_it_from_name(
+        self, config, tmp_path, run_id, custom_dir
+    ):
+        config.wandb.enabled = True
+        config.wandb.run_name = "Repeated display name / experiment"
+        config.wandb.id = run_id
+        config.wandb.resume = "must" if run_id else "allow"
+        config.trainer.output_dir = tmp_path / "run"
+        if custom_dir:
+            config.wandb.dir = tmp_path / "tracking"
+        accelerator = MagicMock(is_main_process=True)
+
+        run_pretrain.setup_tracking(config, accelerator)
+
+        accelerator.init_trackers.assert_called_once()
+        kwargs = accelerator.init_trackers.call_args.kwargs
+        tracking = kwargs["init_kwargs"]["wandb"]
+        assert tracking["id"] == run_id
+        assert tracking["name"] == config.wandb.run_name
+        assert tracking["resume"] == config.wandb.resume
+        directory = config.wandb.dir or config.trainer.output_dir / "wandb"
+        assert tracking["dir"] == str(directory)
+        assert directory.is_dir()
+
+    def test_disabled_tracking_does_not_create_directory(self, config, tmp_path):
+        config.wandb.enabled = False
+        config.trainer.output_dir = tmp_path / "run"
+        accelerator = MagicMock()
+        run_pretrain.setup_tracking(config, accelerator)
+        accelerator.init_trackers.assert_not_called()
+        assert not config.trainer.output_dir.exists()
+
+    def test_non_main_process_leaves_directory_creation_to_main(self, config, tmp_path):
+        config.wandb.enabled = True
+        config.trainer.output_dir = tmp_path / "run"
+        accelerator = MagicMock(is_main_process=False)
+        run_pretrain.setup_tracking(config, accelerator)
+        assert not config.trainer.output_dir.exists()
+        accelerator.init_trackers.assert_called_once()
 
 
 class TestSetupRuntime:
@@ -157,9 +201,7 @@ class TestTF32:
     @pytest.mark.parametrize(
         "tf32, expected_precision", [(True, "high"), (False, "highest")]
     )
-    def test_tf32_flag_drives_matmul_precision(
-        self, config, tf32, expected_precision
-    ):
+    def test_tf32_flag_drives_matmul_precision(self, config, tf32, expected_precision):
         config.trainer.tf32 = tf32
         _run(config)
 
