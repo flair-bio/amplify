@@ -357,3 +357,87 @@ def test_nonlinear_head_initializes_when_loading_linear_checkpoint(norm_type, tm
     assert torch.isfinite(output.loss)
     output.loss.backward()
     assert_finite_gradients(model)
+
+
+@pytest.mark.parametrize("norm_type", NORM_TYPES)
+@pytest.mark.parametrize("packed", [False, True])
+def test_depth_scaling_reaches_attention_gate_and_mlp(norm_type, packed, monkeypatch):
+    torch.manual_seed(18)
+    config = tiny_config(
+        num_hidden_layers=3,
+        norm_type=norm_type,
+        qk_norm=True,
+        attention_gate=True,
+        layernorm_scaling=True,
+    )
+    model = modeling.AMPLIFYModel(config)
+    captured = {}
+
+    def capture(name):
+        def hook(module, args):
+            captured[name] = args[0].detach().clone()
+
+        return hook
+
+    def capture_module_input(name):
+        def hook(module, args):
+            captured[name] = args[1].detach().clone()
+
+        return hook
+
+    for i, layer in enumerate(model.layers):
+        layer.attention.register_forward_pre_hook(
+            capture_module_input((i, "attention_input"))
+        )
+        layer.mlp.register_forward_pre_hook(capture_module_input((i, "mlp_input")))
+        layer.attention.qkv_proj.register_forward_pre_hook(capture((i, "qkv")))
+        layer.attention.gate_proj.register_forward_pre_hook(capture((i, "gate")))
+        layer.mlp.gate_up_proj.register_forward_pre_hook(capture((i, "mlp")))
+        if packed:
+            layer.attention.fa4_attn_fn = None
+
+    if packed:
+        monkeypatch.setattr(
+            modeling, "varlen_attn", lambda q, k, v, **kwargs: torch.zeros_like(v)
+        )
+    ids = torch.tensor([[3, 6, 7, 8, 9, 4]])
+    if packed:
+        # Exercise packed blocks with a CPU kernel substitute; the public
+        # model entrypoint correctly requires CUDA for packed execution.
+        hidden = model.embed_tokens(ids)
+        cos, sin = model.rotary_emb(hidden, torch.arange(6))
+        for layer in model.layers:
+            hidden, _ = layer(
+                hidden,
+                None,
+                cos,
+                sin,
+                False,
+                max_seqlen=6,
+                cu_seqlens=torch.tensor([0, 6], dtype=torch.int32),
+            )
+    else:
+        model(ids)
+    for i, layer in enumerate(model.layers):
+        scale = (i + 1) ** -0.5
+        assert layer.attention.norm_scale == pytest.approx(scale)
+        assert layer.mlp.norm_scale == pytest.approx(scale)
+        attention_input = captured[(i, "attention_input")]
+        mlp_input = captured[(i, "mlp_input")]
+        if packed:
+            attention_input = attention_input.flatten(0, 1)
+            mlp_input = mlp_input.flatten(0, 1)
+        torch.testing.assert_close(
+            captured[(i, "qkv")], layer.input_layernorm(attention_input) * scale
+        )
+        torch.testing.assert_close(captured[(i, "gate")], captured[(i, "qkv")])
+        torch.testing.assert_close(
+            captured[(i, "mlp")], layer.post_attention_layernorm(mlp_input) * scale
+        )
+
+
+def test_depth_scaling_is_disabled_by_default():
+    model = modeling.AMPLIFYModel(tiny_config())
+    for layer in model.layers:
+        assert layer.attention.norm_scale == 1.0
+        assert layer.mlp.norm_scale == 1.0

@@ -483,6 +483,7 @@ The tokenizer is **character-level**: one token per amino acid, plus special tok
 | `qk_norm` | `false` | Per-head normalization using `norm_type` on queries and keys before RoPE |
 | `attention_gate` | `false` | Elementwise sigmoid gating from pre-normalized hidden states before the attention output projection |
 | `nonlinear_mlm_head` | `false` | Dense → GELU → normalization using `norm_type` → vocabulary projection; inner width is `hidden_size` |
+| `layernorm_scaling` | `false` | Scale both block pre-norm outputs by `1/sqrt(layer_idx + 1)` using the zero-based block index |
 | `intermediate_size` | `2560` | SwiGLU inner dimension |
 | `max_position_embeddings` | `2048` | Maximum context length supported by RoPE |
 | `rope_theta` | `10000.0` | RoPE base frequency |

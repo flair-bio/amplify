@@ -15,6 +15,7 @@ class AMPLIFYConfig(PretrainedConfig):
         qk_norm: Apply per-head normalization to queries and keys before RoPE.
         attention_gate: Apply elementwise sigmoid gating before the attention output projection.
         nonlinear_mlm_head: Add a dense-GELU-norm MLM head transform.
+        layernorm_scaling: Scale block pre-norm outputs by inverse square root of depth.
         intermediate_size: Dimension of the SwiGLU feed-forward inner layer.
         embedding_init_range: Uniform init bound for the token embedding.
         decoder_init_range: Uniform init bound for linear layers.
@@ -47,9 +48,8 @@ class AMPLIFYConfig(PretrainedConfig):
         qk_norm: bool = False,
         attention_gate: bool = False,
         nonlinear_mlm_head: bool = False,
-        norm_type: Literal[
-            "RMSNorm", "CenteredRMSNorm", "ZeroCenteredRMSNorm", "LayerNorm"
-        ] = "RMSNorm",
+        layernorm_scaling: bool = False,
+        norm_type: Literal["RMSNorm", "CenteredRMSNorm", "ZeroCenteredRMSNorm", "LayerNorm"] = "RMSNorm",
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -65,16 +65,12 @@ class AMPLIFYConfig(PretrainedConfig):
         self.qk_norm = qk_norm
         self.attention_gate = attention_gate
         self.nonlinear_mlm_head = nonlinear_mlm_head
+        self.layernorm_scaling = layernorm_scaling
         self.intermediate_size = intermediate_size
         self.embedding_init_range = embedding_init_range
         self.decoder_init_range = decoder_init_range
         self.norm_eps = norm_eps
-        if norm_type not in {
-            "RMSNorm",
-            "CenteredRMSNorm",
-            "ZeroCenteredRMSNorm",
-            "LayerNorm",
-        }:
+        if norm_type not in {"RMSNorm", "CenteredRMSNorm", "ZeroCenteredRMSNorm", "LayerNorm"}:
             raise ValueError(
                 f"Unknown norm_type {norm_type!r}; expected 'RMSNorm', "
                 "'CenteredRMSNorm', 'ZeroCenteredRMSNorm', or 'LayerNorm'."
