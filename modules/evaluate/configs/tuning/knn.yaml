@@ -1,0 +1,15 @@
+# KNN probe over frozen-trunk embeddings. Layer after config.yaml, a model
+# config, and a dataset config.
+# Built-in search space for the frozen-trunk KNN probe.
+steps:
+  mode: tune_probe
+  prepare:
+    embedding_cache:
+      enabled: true
+      pooling: mean
+      layers: [-1]
+  tune:
+    head:
+      head_type: knn
+      search_space:
+        n_neighbors: [1, 3, 5, 10, 20]

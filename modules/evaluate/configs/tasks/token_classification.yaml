@@ -1,0 +1,10 @@
+workspace:
+  task_type: token_classification
+
+steps:
+  prepare:
+    embedding_cache:
+      enabled: true # RAM-only per-residue features; disable when host memory is insufficient
+  predict:
+    controls:
+      [untrained, random_trunk, random_head, random_both, scrambled_labels]

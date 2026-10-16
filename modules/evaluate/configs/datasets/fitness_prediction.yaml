@@ -1,0 +1,6 @@
+workspace:
+  dataset_name: fitness_prediction
+  dataset_repo_id: flair-bio/biomap-research-fitness_prediction
+  target_type: continuous
+  label_format: scalar
+  num_labels: null

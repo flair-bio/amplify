@@ -1,0 +1,6 @@
+workspace:
+  dataset_name: temperature_stability
+  dataset_repo_id: flair-bio/biomap-research-temperature_stability
+  target_type: categorical
+  label_format: scalar
+  num_labels: 2

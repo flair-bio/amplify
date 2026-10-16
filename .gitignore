@@ -1,0 +1,48 @@
+# Environment & IDE
+.env
+*.vscode/
+.venv/
+
+# Python cache
+__pycache__/
+
+# Python build/dist artifacts
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# System Files
+.DS_Store
+
+# Python Cache
+__pycache__/
+
+# Local datasets & pretraining run artifacts (large, machine-local)
+data_subsets/
+checkpoints/
+wandb/
+smoke_runs/
+
+# eval artifacts
+eval/
+logs/evaluate/
+modules/evaluate/eval_datasets/
+downloaded_datasets/
+eval_datasets/
+# Deprecated v0 modules
+modules_v0/
+
+# Machine-specific launch/cache scripts (SLURM paths, accounts)
+modules/pretrain/scripts/
