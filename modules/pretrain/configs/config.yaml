@@ -6,6 +6,7 @@ model:
   num_attention_heads: 15      # head_dim = 64
   qk_norm: false
   attention_gate: false
+  nonlinear_mlm_head: false
   intermediate_size: 2560
   embedding_init_range: 0.02
   decoder_init_range: 0.02

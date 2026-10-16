@@ -313,3 +313,47 @@ def test_attention_gating_trains_and_survives_checkpoint(tmp_path):
     restored = modeling.AMPLIFYForMaskedLM.from_pretrained(tmp_path)
     torch.testing.assert_close(restored(ids).logits, expected, rtol=0, atol=0)
     assert restored.config.attention_gate is True
+
+
+@pytest.mark.parametrize("norm_type", NORM_TYPES)
+def test_nonlinear_mlm_head_trains_and_round_trips(norm_type, tmp_path):
+    torch.manual_seed(17)
+    config = tiny_config(
+        norm_type=norm_type, nonlinear_mlm_head=True, attention_gate=True, qk_norm=True
+    )
+    model = modeling.AMPLIFYForMaskedLM(config)
+    expected_type = (
+        nn.LayerNorm if norm_type == "LayerNorm" else getattr(modeling, norm_type)
+    )
+    assert type(model.lm_head[2]) is expected_type
+    ids = torch.randint(1, 32, (2, 8))
+    labels = ids.clone()
+    labels[:, 0] = -100
+    output = model(ids, labels=labels)
+    assert output.logits.shape == (2, 8, 32)
+    assert torch.isfinite(output.loss)
+    output.loss.backward()
+    assert_finite_gradients(model)
+    model.save_pretrained(tmp_path)
+    restored = modeling.AMPLIFYForMaskedLM.from_pretrained(tmp_path)
+    assert restored.config.nonlinear_mlm_head is True
+    torch.testing.assert_close(restored(ids).logits, output.logits, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("norm_type", NORM_TYPES)
+def test_nonlinear_head_initializes_when_loading_linear_checkpoint(norm_type, tmp_path):
+    modeling.AMPLIFYForMaskedLM(tiny_config(norm_type=norm_type)).save_pretrained(
+        tmp_path
+    )
+    model = modeling.AMPLIFYForMaskedLM.from_pretrained(
+        tmp_path, nonlinear_mlm_head=True
+    )
+    gain = 0.0 if norm_type == "ZeroCenteredRMSNorm" else 1.0
+    norm = model.lm_head[2]
+    torch.testing.assert_close(norm.weight, torch.full_like(norm.weight, gain))
+    if getattr(norm, "bias", None) is not None:
+        torch.testing.assert_close(norm.bias, torch.zeros_like(norm.bias))
+    output = model(torch.tensor([[3, 6, 7, 4]]), labels=torch.tensor([[3, 6, 7, 4]]))
+    assert torch.isfinite(output.loss)
+    output.loss.backward()
+    assert_finite_gradients(model)

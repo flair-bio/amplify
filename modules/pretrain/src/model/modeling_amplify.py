@@ -34,13 +34,14 @@ class AMPLIFYModelConfig(BaseModel):
         num_attention_heads: Number of attention heads per layer.
         qk_norm: Apply per-head normalization to queries and keys before RoPE.
         attention_gate: Apply elementwise sigmoid gating before the attention output projection.
+        nonlinear_mlm_head: Add a dense-GELU-norm MLM head transform.
         intermediate_size: Dimension of the SwiGLU feed-forward inner layer.
         embedding_init_range: Uniform init bound for the token embedding.
         decoder_init_range: Uniform init bound for linear layers.
         norm_eps: Epsilon for the configured normalization layers.
         norm_type: Normalization layer type: ``"RMSNorm"``, ``"CenteredRMSNorm"``,
-            ``"ZeroCenteredRMSNorm"``, or ``"LayerNorm"``. Also applies to QK
-            normalization when enabled.
+            ``"ZeroCenteredRMSNorm"``, or ``"LayerNorm"``. Also applies to enabled QK normalization and the
+            nonlinear MLM head.
         vocab_size: Number of tokens in the amino-acid vocabulary.
         pad_token_id: Index of the padding token.
         bos_token_id: Index of the beginning-of-sequence token.
@@ -57,6 +58,7 @@ class AMPLIFYModelConfig(BaseModel):
     num_attention_heads: int = Field(15, gt=0)
     qk_norm: bool = False
     attention_gate: bool = False
+    nonlinear_mlm_head: bool = False
     intermediate_size: int = Field(2560, gt=0)
     embedding_init_range: float = Field(0.02, gt=0.0)
     decoder_init_range: float = Field(0.02, gt=0.0)
@@ -729,7 +731,16 @@ class AMPLIFYForMaskedLM(AMPLIFYPreTrainedModel):
     def __init__(self, config: AMPLIFYConfig, **kwargs: Any) -> None:
         super().__init__(config)
         self.amplify = AMPLIFYModel(config)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size)
+        self.lm_head = (
+            nn.Sequential(
+                nn.Linear(config.hidden_size, config.hidden_size),
+                nn.GELU(),
+                _make_norm(config),
+                nn.Linear(config.hidden_size, config.vocab_size),
+            )
+            if config.nonlinear_mlm_head
+            else nn.Linear(config.hidden_size, config.vocab_size)
+        )
         self.post_init()
 
     def forward(
