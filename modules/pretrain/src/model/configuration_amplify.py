@@ -13,6 +13,7 @@ class AMPLIFYConfig(PretrainedConfig):
         num_hidden_layers: Number of transformer encoder layers.
         num_attention_heads: Number of attention heads per layer.
         qk_norm: Apply per-head normalization to queries and keys before RoPE.
+        attention_gate: Apply elementwise sigmoid gating before the attention output projection.
         intermediate_size: Dimension of the SwiGLU feed-forward inner layer.
         embedding_init_range: Uniform init bound for the token embedding.
         decoder_init_range: Uniform init bound for linear layers.
@@ -43,9 +44,8 @@ class AMPLIFYConfig(PretrainedConfig):
         max_position_embeddings: int = 2048,
         rope_theta: float = 10000.0,
         qk_norm: bool = False,
-        norm_type: Literal[
-            "RMSNorm", "CenteredRMSNorm", "ZeroCenteredRMSNorm", "LayerNorm"
-        ] = "RMSNorm",
+        attention_gate: bool = False,
+        norm_type: Literal["RMSNorm", "CenteredRMSNorm", "ZeroCenteredRMSNorm", "LayerNorm"] = "RMSNorm",
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -59,16 +59,12 @@ class AMPLIFYConfig(PretrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         self.qk_norm = qk_norm
+        self.attention_gate = attention_gate
         self.intermediate_size = intermediate_size
         self.embedding_init_range = embedding_init_range
         self.decoder_init_range = decoder_init_range
         self.norm_eps = norm_eps
-        if norm_type not in {
-            "RMSNorm",
-            "CenteredRMSNorm",
-            "ZeroCenteredRMSNorm",
-            "LayerNorm",
-        }:
+        if norm_type not in {"RMSNorm", "CenteredRMSNorm", "ZeroCenteredRMSNorm", "LayerNorm"}:
             raise ValueError(
                 f"Unknown norm_type {norm_type!r}; expected 'RMSNorm', "
                 "'CenteredRMSNorm', 'ZeroCenteredRMSNorm', or 'LayerNorm'."

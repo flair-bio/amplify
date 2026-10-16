@@ -481,6 +481,7 @@ The tokenizer is **character-level**: one token per amino acid, plus special tok
 | `num_hidden_layers` | `32` | Encoder blocks |
 | `num_attention_heads` | `15` | Attention heads |
 | `qk_norm` | `false` | Per-head normalization using `norm_type` on queries and keys before RoPE |
+| `attention_gate` | `false` | Elementwise sigmoid gating from pre-normalized hidden states before the attention output projection |
 | `intermediate_size` | `2560` | SwiGLU inner dimension |
 | `max_position_embeddings` | `2048` | Maximum context length supported by RoPE |
 | `rope_theta` | `10000.0` | RoPE base frequency |
