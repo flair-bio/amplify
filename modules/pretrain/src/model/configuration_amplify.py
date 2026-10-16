@@ -1,6 +1,6 @@
 """Hugging Face config class for AMPLIFY."""
 
-from typing import Any
+from typing import Any, Literal
 
 from transformers import PretrainedConfig
 
@@ -15,7 +15,9 @@ class AMPLIFYConfig(PretrainedConfig):
         intermediate_size: Dimension of the SwiGLU feed-forward inner layer.
         embedding_init_range: Uniform init bound for the token embedding.
         decoder_init_range: Uniform init bound for linear layers.
-        norm_eps: Epsilon for RMSNorm layers.
+        norm_eps: Epsilon for the configured normalization layers.
+        norm_type: Normalization layer type: ``"RMSNorm"``, ``"CenteredRMSNorm"``,
+            ``"ZeroCenteredRMSNorm"``, or ``"LayerNorm"``.
         vocab_size: Number of tokens in the amino-acid vocabulary.
         max_position_embeddings: Maximum context length supported by RoPE.
         rope_theta: Base frequency for RoPE.
@@ -38,8 +40,11 @@ class AMPLIFYConfig(PretrainedConfig):
         eos_token_id: int = 4,
         max_position_embeddings: int = 2048,
         rope_theta: float = 10000.0,
+        norm_type: Literal[
+            "RMSNorm", "CenteredRMSNorm", "ZeroCenteredRMSNorm", "LayerNorm"
+        ] = "RMSNorm",
         **kwargs: Any,
-    ):
+    ) -> None:
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
@@ -54,5 +59,16 @@ class AMPLIFYConfig(PretrainedConfig):
         self.embedding_init_range = embedding_init_range
         self.decoder_init_range = decoder_init_range
         self.norm_eps = norm_eps
+        if norm_type not in {
+            "RMSNorm",
+            "CenteredRMSNorm",
+            "ZeroCenteredRMSNorm",
+            "LayerNorm",
+        }:
+            raise ValueError(
+                f"Unknown norm_type {norm_type!r}; expected 'RMSNorm', "
+                "'CenteredRMSNorm', 'ZeroCenteredRMSNorm', or 'LayerNorm'."
+            )
+        self.norm_type = norm_type
         self.max_position_embeddings = max_position_embeddings
         self.rope_theta = rope_theta
