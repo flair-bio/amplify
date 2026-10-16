@@ -441,3 +441,152 @@ def test_depth_scaling_is_disabled_by_default():
     for layer in model.layers:
         assert layer.attention.norm_scale == 1.0
         assert layer.mlp.norm_scale == 1.0
+
+
+@pytest.mark.parametrize("gaussian", [False, True])
+def test_initialization_distribution_and_bias_bounds(gaussian):
+    torch.manual_seed(19)
+    config = tiny_config(
+        gaussian_init=gaussian, decoder_init_range=0.07, embedding_init_range=0.12
+    )
+    model = modeling.AMPLIFYForMaskedLM(config)
+    linear = nn.Linear(160, 200)
+    embedding = nn.Embedding(1000, 32)
+    model._init_weights(linear)
+    model._init_weights(embedding)
+    for weight, scale in ((linear.weight, 0.07), (embedding.weight, 0.12)):
+        expected_std = scale if gaussian else scale / (3**0.5)
+        assert weight.mean().item() == pytest.approx(0, abs=scale * 0.025)
+        assert weight.std().item() == pytest.approx(expected_std, rel=0.04)
+        if gaussian:
+            assert (weight.abs() > scale).any()
+        else:
+            assert weight.abs().max() <= scale
+    # Changing weight initialization must not change the bias policy.
+    assert linear.bias.abs().max() <= 160**-0.5
+    assert linear.bias.abs().max() > 0
+
+
+@pytest.mark.parametrize("norm_type", NORM_TYPES)
+def test_combined_variants_train_in_mixed_precision_and_round_trip(norm_type, tmp_path):
+    torch.manual_seed(20)
+    flags = dict(
+        qk_norm=True,
+        attention_gate=True,
+        nonlinear_mlm_head=True,
+        layernorm_scaling=True,
+        gaussian_init=True,
+    )
+    config = modeling.AMPLIFYModelConfig(
+        hidden_size=32,
+        num_hidden_layers=3,
+        num_attention_heads=4,
+        intermediate_size=64,
+        max_position_embeddings=32,
+        vocab_size=41,
+        norm_type=norm_type,
+        **flags,
+    )
+    model = modeling.AMPLIFYForMaskedLM(config.to_hf_config())
+    optimizer = get_optimizer(
+        model,
+        OptimizerConfig(
+            type="AdamW",
+            lr=0.001,
+            betas=(0.9, 0.95),
+            eps=1e-8,
+            weight_decay=0.1,
+            fused=False,
+        ),
+    )
+    ids = torch.randint(1, 41, (2, 8))
+    for _ in range(3):
+        optimizer.zero_grad()
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            loss = model(ids, labels=ids).loss
+        assert torch.isfinite(loss)
+        loss.backward()
+        assert_finite_gradients(model)
+        optimizer.step()
+    expected = model(ids).logits
+    assert expected.shape == (2, 8, 41)
+    model.save_pretrained(tmp_path)
+    restored = modeling.AMPLIFYForMaskedLM.from_pretrained(tmp_path)
+    for flag, value in flags.items():
+        assert getattr(restored.config, flag) == value
+    for i, layer in enumerate(restored.amplify.layers):
+        assert layer.attention.norm_scale == pytest.approx((i + 1) ** -0.5)
+    torch.testing.assert_close(restored(ids).logits, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="Packed attention requires CUDA"
+)
+@pytest.mark.parametrize("norm_type", NORM_TYPES)
+def test_combined_variants_packed_cuda_parity_and_gradients(norm_type):
+    torch.manual_seed(21)
+    model = (
+        modeling.AMPLIFYForMaskedLM(
+            tiny_config(
+                hidden_size=64,
+                intermediate_size=128,
+                vocab_size=41,
+                norm_type=norm_type,
+                qk_norm=True,
+                attention_gate=True,
+                nonlinear_mlm_head=True,
+                layernorm_scaling=True,
+                gaussian_init=True,
+            )
+        )
+        .to("cuda", dtype=torch.bfloat16)
+        .eval()
+    )
+    ids = torch.randint(1, 41, (1, 20), device="cuda")
+    positions = torch.cat((torch.arange(8), torch.arange(12))).to("cuda")
+    cu_seqlens = torch.tensor([0, 8, 20], device="cuda", dtype=torch.int32)
+    padded_ids = torch.zeros(2, 12, device="cuda", dtype=torch.long)
+    padded_ids[0, :8] = ids[0, :8]
+    padded_ids[1] = ids[0, 8:]
+    mask = torch.zeros_like(padded_ids, dtype=torch.bool)
+    mask[0, :8] = True
+    mask[1] = True
+    with torch.no_grad():
+        packed = model(
+            ids, position_ids=positions, cu_seqlens=cu_seqlens, max_seqlen=12
+        ).logits
+        padded = model(padded_ids, attention_mask=mask).logits
+    torch.testing.assert_close(packed[0, :8], padded[0, :8], atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(packed[0, 8:], padded[1], atol=2e-2, rtol=2e-2)
+    loss = model(
+        ids, labels=ids, position_ids=positions, cu_seqlens=cu_seqlens, max_seqlen=12
+    ).loss
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert_finite_gradients(model)
+
+
+def test_legacy_config_keeps_optional_features_disabled():
+    config = AMPLIFYConfig.from_dict(
+        dict(
+            hidden_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            intermediate_size=64,
+        )
+    )
+    assert config.norm_type == "RMSNorm"
+    for flag in (
+        "qk_norm",
+        "attention_gate",
+        "nonlinear_mlm_head",
+        "layernorm_scaling",
+        "gaussian_init",
+    ):
+        assert getattr(config, flag) is False
+    model = modeling.AMPLIFYForMaskedLM(config)
+    assert isinstance(model.lm_head, nn.Linear)
+    for layer in model.amplify.layers:
+        assert isinstance(layer.attention.q_norm, nn.Identity)
+        assert isinstance(layer.attention.k_norm, nn.Identity)
+        assert layer.attention.gate_proj is None

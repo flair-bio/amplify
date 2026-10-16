@@ -37,12 +37,13 @@ class AMPLIFYModelConfig(BaseModel):
         nonlinear_mlm_head: Add a dense-GELU-norm MLM head transform.
         layernorm_scaling: Scale block pre-norm outputs by inverse square root of depth.
         intermediate_size: Dimension of the SwiGLU feed-forward inner layer.
-        embedding_init_range: Uniform init bound for the token embedding.
-        decoder_init_range: Uniform init bound for linear layers.
+        gaussian_init: Use zero-mean Gaussian initialization for linear and embedding weights.
+        embedding_init_range: Uniform bound or Gaussian standard deviation for token embeddings.
+        decoder_init_range: Uniform bound or Gaussian standard deviation for linear weights.
         norm_eps: Epsilon for the configured normalization layers.
         norm_type: Normalization layer type: ``"RMSNorm"``, ``"CenteredRMSNorm"``,
-            ``"ZeroCenteredRMSNorm"``, or ``"LayerNorm"``. Also applies to enabled QK normalization and the
-            nonlinear MLM head.
+            ``"ZeroCenteredRMSNorm"``, or ``"LayerNorm"``. Also applies to enabled
+            QK normalization and the nonlinear MLM head.
         vocab_size: Number of tokens in the amino-acid vocabulary.
         pad_token_id: Index of the padding token.
         bos_token_id: Index of the beginning-of-sequence token.
@@ -62,6 +63,7 @@ class AMPLIFYModelConfig(BaseModel):
     nonlinear_mlm_head: bool = False
     layernorm_scaling: bool = False
     intermediate_size: int = Field(2560, gt=0)
+    gaussian_init: bool = False
     embedding_init_range: float = Field(0.02, gt=0.0)
     decoder_init_range: float = Field(0.02, gt=0.0)
     norm_eps: float = Field(1e-5, gt=0.0)
@@ -539,11 +541,16 @@ class AMPLIFYPreTrainedModel(PreTrainedModel):
     def _init_weights(self, module: nn.Module) -> None:
         """Initialize projections, embeddings, and non-persistent buffers."""
         if isinstance(module, nn.Linear):
-            nn.init.uniform_(
-                module.weight,
-                -self.config.decoder_init_range,
-                self.config.decoder_init_range,
-            )
+            if self.config.gaussian_init:
+                nn.init.normal_(
+                    module.weight, mean=0.0, std=self.config.decoder_init_range
+                )
+            else:
+                nn.init.uniform_(
+                    module.weight,
+                    -self.config.decoder_init_range,
+                    self.config.decoder_init_range,
+                )
             if module.bias is not None:
                 # `from_pretrained` fills checkpoint-missing params via this hook
                 # only; skipping bias left task heads on uninitialised memory.
@@ -551,11 +558,16 @@ class AMPLIFYPreTrainedModel(PreTrainedModel):
                 bound = 1.0 / math.sqrt(fan_in) if fan_in > 0 else 0.0
                 nn.init.uniform_(module.bias, -bound, bound)
         elif isinstance(module, nn.Embedding):
-            nn.init.uniform_(
-                module.weight,
-                -self.config.embedding_init_range,
-                self.config.embedding_init_range,
-            )
+            if self.config.gaussian_init:
+                nn.init.normal_(
+                    module.weight, mean=0.0, std=self.config.embedding_init_range
+                )
+            else:
+                nn.init.uniform_(
+                    module.weight,
+                    -self.config.embedding_init_range,
+                    self.config.embedding_init_range,
+                )
         elif isinstance(module, ZeroCenteredRMSNorm):
             nn.init.zeros_(module.weight)
         elif isinstance(module, RMSNorm):

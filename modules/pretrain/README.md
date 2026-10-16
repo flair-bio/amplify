@@ -490,7 +490,8 @@ The tokenizer is **character-level**: one token per amino acid, plus special tok
 | `vocab_size` | `32` | Must match the tokenizer vocabulary |
 | `norm_type` | `RMSNorm` | Encoder, enabled QK normalization, and nonlinear MLM head: `RMSNorm`, `CenteredRMSNorm` (mean-centered, no bias), `ZeroCenteredRMSNorm` (gain `1 + weight`, zero-initialized offset), or `LayerNorm` |
 | `norm_eps` | `1e-5` | Epsilon for the configured normalization |
-| `embedding_init_range` / `decoder_init_range` | `0.02` | Uniform init bounds |
+| `gaussian_init` | `false` | Use zero-mean Gaussian initialization for linear weights and token embeddings |
+| `embedding_init_range` / `decoder_init_range` | `0.02` | Uniform bounds, or standard deviations when `gaussian_init=true` |
 
 Model sizes of the shipped configs (QK normalization disabled):
 
@@ -510,7 +511,7 @@ The model has two attention paths, selected by the collator's `packing` flag: **
 
 **Purpose:** Build the optimizer with correct parameter grouping and the learning-rate schedule.
 
-The optimizer splits parameters into **decay** and **no-decay** groups: 1-D parameters (biases, norm weights) and embeddings are excluded from weight decay, except `ZeroCenteredRMSNorm` gain offsets, which are decayed toward zero (unit gain).
+The optimizer splits parameters into **decay** and **no-decay** groups: 1-D parameters (biases, norm weights) and embeddings are excluded from weight decay, except `ZeroCenteredRMSNorm` gain offsets, which receive weight decay toward zero (effective gain one).
 
 **Key config fields (`optimizer`):**
 
