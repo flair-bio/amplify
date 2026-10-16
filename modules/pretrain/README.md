@@ -469,7 +469,7 @@ dataset.sources.custom.cluster_column=cluster_rep_at_30
 
 ## Model & Tokenizer
 
-**Purpose:** The AMPLIFY encoder — a BERT-style bidirectional transformer with modern components: **RMSNorm**, **rotary position embeddings (RoPE)**, and a **SwiGLU** feed-forward block. It is a standard HF `PreTrainedModel`, split across `configuration_amplify.py` and `modeling_amplify.py` following HF conventions, with MLM, sequence-classification, and token-classification heads.
+**Purpose:** The AMPLIFY encoder — a BERT-style bidirectional transformer with configurable RMSNorm, CenteredRMSNorm, ZeroCenteredRMSNorm, or LayerNorm, **rotary position embeddings (RoPE)**, and a **SwiGLU** feed-forward block. It is a standard HF `PreTrainedModel`, split across `configuration_amplify.py` and `modeling_amplify.py` following HF conventions, with MLM, sequence-classification, and token-classification heads.
 
 The tokenizer is **character-level**: one token per amino acid, plus special tokens. Ambiguous residues (`X`, `B`, `O`, `U`, `Z`, `J`) are removed by default.
 
@@ -484,7 +484,8 @@ The tokenizer is **character-level**: one token per amino acid, plus special tok
 | `max_position_embeddings` | `2048` | Maximum context length supported by RoPE |
 | `rope_theta` | `10000.0` | RoPE base frequency |
 | `vocab_size` | `32` | Must match the tokenizer vocabulary |
-| `norm_eps` | `1e-5` | RMSNorm epsilon |
+| `norm_type` | `RMSNorm` | Encoder normalization: `RMSNorm`, `CenteredRMSNorm` (mean-centered, no bias), `ZeroCenteredRMSNorm` (gain `1 + weight`, zero-initialized offset), or `LayerNorm` |
+| `norm_eps` | `1e-5` | Epsilon for the configured normalization |
 | `embedding_init_range` / `decoder_init_range` | `0.02` | Uniform init bounds |
 
 Model sizes of the shipped configs:
@@ -505,7 +506,7 @@ The model has two attention paths, selected by the collator's `packing` flag: **
 
 **Purpose:** Build the optimizer with correct parameter grouping and the learning-rate schedule.
 
-The optimizer splits parameters into **decay** and **no-decay** groups: 1-D parameters (biases, norm weights) and embeddings are excluded from weight decay, which is standard practice for transformer pretraining.
+The optimizer splits parameters into **decay** and **no-decay** groups: 1-D parameters (biases, norm weights) and embeddings are excluded from weight decay, except `ZeroCenteredRMSNorm` gain offsets, which are decayed toward zero (unit gain).
 
 **Key config fields (`optimizer`):**
 

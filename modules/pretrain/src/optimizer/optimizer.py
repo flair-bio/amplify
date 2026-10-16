@@ -5,6 +5,8 @@ from typing import Any, Literal
 import torch
 from pydantic import BaseModel, ConfigDict, Field
 
+from modules.pretrain.src.model.modeling_amplify import ZeroCenteredRMSNorm
+
 
 class OptimizerConfig(BaseModel):
     """Strict optimizer config (``extra="forbid"`` turns YAML typos into errors)."""
@@ -52,7 +54,7 @@ class OptimizerConfig(BaseModel):
 def get_optimizer(
     model: torch.nn.Module, config: OptimizerConfig
 ) -> torch.optim.Optimizer:
-    """Create the optimizer, without weight decay on 1D params and embeddings.
+    """Exclude embeddings and 1D params from decay, except ZeroCenteredRMSNorm gains.
 
     Raises ``ImportError`` if an external optimizer library is missing, and
     ``RuntimeError`` if ``fused`` is requested without CUDA.
@@ -60,8 +62,14 @@ def get_optimizer(
     decay_params: list[torch.nn.Parameter] = []
     no_decay_params: list[torch.nn.Parameter] = []
 
+    decay_norm_weights = {
+        id(module.weight)
+        for module in model.modules()
+        if isinstance(module, ZeroCenteredRMSNorm)
+    }
+
     # Separation logic:
-    # 1. 1D tensors bypass weight decay (Biases, LayerNorm scales).
+    # 1. 1D tensors bypass weight decay, except zero-centered norm gain offsets.
     # 2. String matching explicitly protects Embeddings (which are 2D but suffer from weight decay).
     for name, param in model.named_parameters():
         if not param.requires_grad:
@@ -69,7 +77,7 @@ def get_optimizer(
 
         name_lower = name.lower()
         if (
-            param.dim() < 2
+            (param.dim() < 2 and id(param) not in decay_norm_weights)
             or "embed" in name_lower
             or "position_embeddings" in name_lower
         ):

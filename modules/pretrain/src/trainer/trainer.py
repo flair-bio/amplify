@@ -211,7 +211,7 @@ class TrainerConfig(BaseModel):
         False,
         description=(
             "Compile the model with `torch.compile` (inductor backend), "
-            "fusing RMSNorm/SwiGLU/rotary elementwise chains. Adds 1-3 min "
+            "fusing normalization/SwiGLU/rotary elementwise chains. Adds 1-3 min "
             "one-time warmup; see `compile_dynamic` with token-budget "
             "batching."
         ),

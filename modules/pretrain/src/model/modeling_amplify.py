@@ -1,7 +1,7 @@
 """AMPLIFY model: encoder, task heads, and HF integration."""
 
 import math
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple, Type, Union
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field
@@ -35,7 +35,9 @@ class AMPLIFYModelConfig(BaseModel):
         intermediate_size: Dimension of the SwiGLU feed-forward inner layer.
         embedding_init_range: Uniform init bound for the token embedding.
         decoder_init_range: Uniform init bound for linear layers.
-        norm_eps: Epsilon for RMSNorm layers.
+        norm_eps: Epsilon for the configured normalization layers.
+        norm_type: Normalization layer type: ``"RMSNorm"``, ``"CenteredRMSNorm"``,
+            ``"ZeroCenteredRMSNorm"``, or ``"LayerNorm"``.
         vocab_size: Number of tokens in the amino-acid vocabulary.
         pad_token_id: Index of the padding token.
         bos_token_id: Index of the beginning-of-sequence token.
@@ -54,6 +56,9 @@ class AMPLIFYModelConfig(BaseModel):
     embedding_init_range: float = Field(0.02, gt=0.0)
     decoder_init_range: float = Field(0.02, gt=0.0)
     norm_eps: float = Field(1e-5, gt=0.0)
+    norm_type: Literal[
+        "RMSNorm", "CenteredRMSNorm", "ZeroCenteredRMSNorm", "LayerNorm"
+    ] = "RMSNorm"
     vocab_size: int = Field(32, gt=0)
     pad_token_id: int = 0
     bos_token_id: int = 3
@@ -89,6 +94,50 @@ class RMSNorm(nn.Module):
         return torch.nn.functional.rms_norm(
             x, self.weight.shape, self.weight.to(x.dtype), self.eps
         )
+
+
+class CenteredRMSNorm(RMSNorm):
+    """RMS normalization after subtracting each token's feature mean.
+
+    Like RMSNorm, this uses a learned scale without an additive bias. Centering
+    makes its normalization equivalent to LayerNorm without LayerNorm's bias.
+    """
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Use the LayerNorm kernel to center and rescale without a bias."""
+        return torch.nn.functional.layer_norm(
+            x, self.weight.shape, self.weight.to(x.dtype), None, self.eps
+        )
+
+
+class ZeroCenteredRMSNorm(RMSNorm):
+    """RMSNorm with a zero-initialized gain offset applied as ``1 + weight``."""
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
+        super().__init__(hidden_size, eps)
+        nn.init.zeros_(self.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Normalize and apply the gain in FP32, then restore the input dtype."""
+        return torch.nn.functional.rms_norm(
+            x.float(), self.weight.shape, 1.0 + self.weight.float(), self.eps
+        ).to(x.dtype)
+
+
+def _make_norm(config: AMPLIFYConfig) -> nn.Module:
+    """Construct the configured normalization layer."""
+    if config.norm_type == "RMSNorm":
+        return RMSNorm(config.hidden_size, config.norm_eps)
+    if config.norm_type == "CenteredRMSNorm":
+        return CenteredRMSNorm(config.hidden_size, config.norm_eps)
+    if config.norm_type == "ZeroCenteredRMSNorm":
+        return ZeroCenteredRMSNorm(config.hidden_size, config.norm_eps)
+    if config.norm_type == "LayerNorm":
+        return nn.LayerNorm(config.hidden_size, eps=config.norm_eps)
+    raise ValueError(
+        f"Unknown norm_type {config.norm_type!r}; expected 'RMSNorm', "
+        "'CenteredRMSNorm', 'ZeroCenteredRMSNorm', or 'LayerNorm'."
+    )
 
 
 class RotaryEmbedding(nn.Module):
@@ -372,11 +421,11 @@ class EncoderBlock(nn.Module):
     def __init__(self, config: AMPLIFYConfig) -> None:
         super().__init__()
         # Pre-normalization layer applied before attention.
-        self.input_layernorm = RMSNorm(config.hidden_size, config.norm_eps)
+        self.input_layernorm = _make_norm(config)
         # Attention module.
         self.attention = Attention(config)
         # Pre-normalization layer applied before FFN.
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, config.norm_eps)
+        self.post_attention_layernorm = _make_norm(config)
         # FFN module.
         self.mlp = SwiGLU(config)
 
@@ -447,7 +496,7 @@ class AMPLIFYPreTrainedModel(PreTrainedModel):
     base_model_prefix = "amplify"
 
     def _init_weights(self, module: nn.Module) -> None:
-        """Initialize linear layers and embeddings with uniform weights."""
+        """Initialize projections, embeddings, and non-persistent buffers."""
         if isinstance(module, nn.Linear):
             nn.init.uniform_(
                 module.weight,
@@ -466,6 +515,12 @@ class AMPLIFYPreTrainedModel(PreTrainedModel):
                 -self.config.embedding_init_range,
                 self.config.embedding_init_range,
             )
+        elif isinstance(module, ZeroCenteredRMSNorm):
+            nn.init.zeros_(module.weight)
+        elif isinstance(module, RMSNorm):
+            nn.init.ones_(module.weight)
+        elif isinstance(module, nn.LayerNorm):
+            module.reset_parameters()
         elif isinstance(module, RotaryEmbedding):
             # RoPE tables are non-persistent buffers, so they are absent from the
             # checkpoint and `from_pretrained` reallocates them as uninitialised
@@ -488,7 +543,7 @@ class AMPLIFYModel(AMPLIFYPreTrainedModel):
         self.layers = nn.ModuleList(
             [EncoderBlock(config) for _ in range(config.num_hidden_layers)]
         )
-        self.norm = RMSNorm(config.hidden_size, config.norm_eps)
+        self.norm = _make_norm(config)
         self.rotary_emb = RotaryEmbedding(config)
         self.post_init()
 
@@ -618,7 +673,7 @@ class AMPLIFYModel(AMPLIFYPreTrainedModel):
             if all_attentions is not None:
                 all_attentions.append(attn_weights)
 
-        # Final layer norm.
+        # Final normalization uses the same norm type as the encoder blocks.
         hidden_states = self.norm(hidden_states)
 
         if all_hidden_states is not None:
