@@ -12,12 +12,14 @@ class AMPLIFYConfig(PretrainedConfig):
         hidden_size: Dimension of hidden representations.
         num_hidden_layers: Number of transformer encoder layers.
         num_attention_heads: Number of attention heads per layer.
+        qk_norm: Apply per-head normalization to queries and keys before RoPE.
         intermediate_size: Dimension of the SwiGLU feed-forward inner layer.
         embedding_init_range: Uniform init bound for the token embedding.
         decoder_init_range: Uniform init bound for linear layers.
         norm_eps: Epsilon for the configured normalization layers.
         norm_type: Normalization layer type: ``"RMSNorm"``, ``"CenteredRMSNorm"``,
-            ``"ZeroCenteredRMSNorm"``, or ``"LayerNorm"``.
+            ``"ZeroCenteredRMSNorm"``, or ``"LayerNorm"``. Also applies to QK
+            normalization when enabled.
         vocab_size: Number of tokens in the amino-acid vocabulary.
         max_position_embeddings: Maximum context length supported by RoPE.
         rope_theta: Base frequency for RoPE.
@@ -40,6 +42,7 @@ class AMPLIFYConfig(PretrainedConfig):
         eos_token_id: int = 4,
         max_position_embeddings: int = 2048,
         rope_theta: float = 10000.0,
+        qk_norm: bool = False,
         norm_type: Literal[
             "RMSNorm", "CenteredRMSNorm", "ZeroCenteredRMSNorm", "LayerNorm"
         ] = "RMSNorm",
@@ -55,6 +58,7 @@ class AMPLIFYConfig(PretrainedConfig):
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
+        self.qk_norm = qk_norm
         self.intermediate_size = intermediate_size
         self.embedding_init_range = embedding_init_range
         self.decoder_init_range = decoder_init_range
