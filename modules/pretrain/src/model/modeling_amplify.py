@@ -32,12 +32,14 @@ class AMPLIFYModelConfig(BaseModel):
         hidden_size: Dimension of hidden representations.
         num_hidden_layers: Number of transformer encoder layers.
         num_attention_heads: Number of attention heads per layer.
+        qk_norm: Apply per-head normalization to queries and keys before RoPE.
         intermediate_size: Dimension of the SwiGLU feed-forward inner layer.
         embedding_init_range: Uniform init bound for the token embedding.
         decoder_init_range: Uniform init bound for linear layers.
         norm_eps: Epsilon for the configured normalization layers.
         norm_type: Normalization layer type: ``"RMSNorm"``, ``"CenteredRMSNorm"``,
-            ``"ZeroCenteredRMSNorm"``, or ``"LayerNorm"``.
+            ``"ZeroCenteredRMSNorm"``, or ``"LayerNorm"``. Also applies to QK
+            normalization when enabled.
         vocab_size: Number of tokens in the amino-acid vocabulary.
         pad_token_id: Index of the padding token.
         bos_token_id: Index of the beginning-of-sequence token.
@@ -52,6 +54,7 @@ class AMPLIFYModelConfig(BaseModel):
     hidden_size: int = Field(960, gt=0)
     num_hidden_layers: int = Field(32, gt=0)
     num_attention_heads: int = Field(15, gt=0)
+    qk_norm: bool = False
     intermediate_size: int = Field(2560, gt=0)
     embedding_init_range: float = Field(0.02, gt=0.0)
     decoder_init_range: float = Field(0.02, gt=0.0)
@@ -124,16 +127,17 @@ class ZeroCenteredRMSNorm(RMSNorm):
         ).to(x.dtype)
 
 
-def _make_norm(config: AMPLIFYConfig) -> nn.Module:
-    """Construct the configured normalization layer."""
+def _make_norm(config: AMPLIFYConfig, hidden_size: Optional[int] = None) -> nn.Module:
+    """Construct the configured norm over hidden_size (default: model width)."""
+    hidden_size = config.hidden_size if hidden_size is None else hidden_size
     if config.norm_type == "RMSNorm":
-        return RMSNorm(config.hidden_size, config.norm_eps)
+        return RMSNorm(hidden_size, config.norm_eps)
     if config.norm_type == "CenteredRMSNorm":
-        return CenteredRMSNorm(config.hidden_size, config.norm_eps)
+        return CenteredRMSNorm(hidden_size, config.norm_eps)
     if config.norm_type == "ZeroCenteredRMSNorm":
-        return ZeroCenteredRMSNorm(config.hidden_size, config.norm_eps)
+        return ZeroCenteredRMSNorm(hidden_size, config.norm_eps)
     if config.norm_type == "LayerNorm":
-        return nn.LayerNorm(config.hidden_size, eps=config.norm_eps)
+        return nn.LayerNorm(hidden_size, eps=config.norm_eps)
     raise ValueError(
         f"Unknown norm_type {config.norm_type!r}; expected 'RMSNorm', "
         "'CenteredRMSNorm', 'ZeroCenteredRMSNorm', or 'LayerNorm'."
@@ -202,10 +206,18 @@ class RotaryQKV(NamedTuple):
 
 
 def apply_rotary_emb_qkv(
-    qkv: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    qkv: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    q_norm: Optional[nn.Module] = None,
+    k_norm: Optional[nn.Module] = None,
 ) -> RotaryQKV:
-    """RoPE for the packed path: returns rotated q/k and v as-is."""
+    """Optionally normalize q/k before packed RoPE; leave v unchanged."""
     q, k, v = qkv.unbind(1)
+    if q_norm is not None:
+        q = q_norm(q)
+    if k_norm is not None:
+        k = k_norm(k)
     cos, sin = cos.unsqueeze(-2).to(q.dtype), sin.unsqueeze(-2).to(q.dtype)
     return RotaryQKV(
         q=apply_rotary_emb(q, cos, sin), k=apply_rotary_emb(k, cos, sin), v=v
@@ -226,6 +238,13 @@ class Attention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.head_dim = config.hidden_size // config.num_attention_heads
         self.fa4_attn_fn = get_fa4_varlen_func()
+        # Separate query/key norms over head_dim, shared across heads.
+        self.q_norm = (
+            _make_norm(config, self.head_dim) if config.qk_norm else nn.Identity()
+        )
+        self.k_norm = (
+            _make_norm(config, self.head_dim) if config.qk_norm else nn.Identity()
+        )
 
         # Multi-head attention projections (query, key, value combined + output).
         self.qkv_proj = nn.Linear(
@@ -249,10 +268,10 @@ class Attention(nn.Module):
         )
         batch_size, total_tokens = hidden_states.shape[:2]
         hidden_states_flat = hidden_states.view(-1, self.num_heads * self.head_dim)
-        # Pre-norm + QKV projection + RoPE.
+        # Pre-norm + QKV projection + optional QK normalization + RoPE.
         normed = layernorm(hidden_states_flat)
         qkv = self.qkv_proj(normed).view(total_tokens, 3, self.num_heads, self.head_dim)
-        q, k, v = apply_rotary_emb_qkv(qkv, cos, sin)
+        q, k, v = apply_rotary_emb_qkv(qkv, cos, sin, self.q_norm, self.k_norm)
         if q.dtype not in _HALF_DTYPES:
             q, k, v = q.bfloat16(), k.bfloat16(), v.bfloat16()
         if self.fa4_attn_fn is None:
@@ -304,6 +323,7 @@ class Attention(nn.Module):
             batch_size, seq_len, 3, self.num_heads, self.head_dim
         )
         q, k, v = qkv.unbind(2)
+        q, k = self.q_norm(q), self.k_norm(k)
         # Apply rotary position embeddings, then transpose to (batch, heads, seq, dim).
         q = apply_rotary_emb(q, cos, sin).transpose(1, 2)
         k = apply_rotary_emb(k, cos, sin).transpose(1, 2)

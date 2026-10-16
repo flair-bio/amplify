@@ -166,3 +166,84 @@ def test_norm_optimizer_groups_and_decay():
     optimizer.step()
     torch.testing.assert_close(offset, torch.full_like(offset, 0.49))
     torch.testing.assert_close(model["RMSNorm"].weight, torch.ones(32))
+
+
+@pytest.mark.parametrize("norm_type", NORM_TYPES)
+@pytest.mark.parametrize("packed", [False, True])
+def test_qk_norm_precedes_rope_and_preserves_values(norm_type, packed, monkeypatch):
+    torch.manual_seed(14)
+    config = tiny_config(norm_type=norm_type, qk_norm=True)
+    attention = modeling.Attention(config)
+    norm = modeling._make_norm(config)
+    expected_type = (
+        nn.LayerNorm if norm_type == "LayerNorm" else getattr(modeling, norm_type)
+    )
+    assert type(attention.q_norm) is expected_type
+    assert type(attention.k_norm) is expected_type
+    assert attention.q_norm.weight.shape == (8,)
+    assert attention.q_norm.weight is not attention.k_norm.weight
+    with torch.no_grad():
+        attention.q_norm.weight.add_(0.25)
+        attention.k_norm.weight.sub_(0.125)
+    hidden = torch.randn(1, 6, 32)
+    cos, sin = modeling.RotaryEmbedding(config)(hidden, torch.arange(6))
+    qkv = attention.qkv_proj(norm(hidden)).view(6, 3, 4, 8)
+    raw_q, raw_k, raw_v = qkv.unbind(1)
+    expected_q = modeling.apply_rotary_emb(
+        attention.q_norm(raw_q), cos[:, None], sin[:, None]
+    )
+    expected_k = modeling.apply_rotary_emb(
+        attention.k_norm(raw_k), cos[:, None], sin[:, None]
+    )
+    captured = {}
+
+    def kernel(q, k, v, **kwargs):
+        captured.update(q=q, k=k, v=v)
+        return torch.zeros_like(v)
+
+    if packed:
+        attention.fa4_attn_fn = None
+        monkeypatch.setattr(modeling, "varlen_attn", kernel)
+        attention(
+            norm,
+            hidden,
+            None,
+            cos,
+            sin,
+            False,
+            6,
+            torch.tensor([0, 6], dtype=torch.int32),
+        )
+        expected_q, expected_k, raw_v = (
+            t.bfloat16() for t in (expected_q, expected_k, raw_v)
+        )
+    else:
+        monkeypatch.setattr(modeling, "scaled_dot_product_attention", kernel)
+        attention(norm, hidden, None, cos[None, :, None], sin[None, :, None], False)
+        expected_q, expected_k, raw_v = (
+            t.transpose(0, 1)[None] for t in (expected_q, expected_k, raw_v)
+        )
+    torch.testing.assert_close(captured["q"], expected_q)
+    torch.testing.assert_close(captured["k"], expected_k)
+    torch.testing.assert_close(captured["v"], raw_v)
+
+
+@pytest.mark.parametrize("norm_type", NORM_TYPES)
+def test_qk_norm_loads_old_checkpoint_and_trains(norm_type, tmp_path):
+    modeling.AMPLIFYForMaskedLM(tiny_config()).save_pretrained(tmp_path)
+    model = modeling.AMPLIFYForMaskedLM.from_pretrained(
+        tmp_path, qk_norm=True, norm_type=norm_type
+    )
+    gain = 0.0 if norm_type == "ZeroCenteredRMSNorm" else 1.0
+    for layer in model.amplify.layers:
+        for norm in (layer.attention.q_norm, layer.attention.k_norm):
+            torch.testing.assert_close(norm.weight, torch.full_like(norm.weight, gain))
+    ids = torch.randint(1, 32, (2, 8))
+    loss = model(ids, labels=ids).loss
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert_finite_gradients(model)
+    destination = tmp_path / "with_qk_norm"
+    model.save_pretrained(destination)
+    restored = modeling.AMPLIFYForMaskedLM.from_pretrained(destination)
+    torch.testing.assert_close(model(ids).logits, restored(ids).logits, rtol=0, atol=0)
