@@ -1,11 +1,12 @@
-"""Entry point for ProteinGym supervised scoring: pool frozen-trunk embeddings
-per variant, fit a linear probe per CV fold (official or custom), and report
-out-of-fold Spearman (DMS) / AUC (clinical) per assay plus the ProteinGym
-aggregation.
+"""Entry point for ProteinGym supervised scoring with frozen-trunk embeddings
+and linear or MLP probes.
 
-Deliberately separate from run_evaluate.py's tune_probe pipeline: ProteinGym's
-protocol is fixed per-assay CV folds with out-of-fold scoring, not a single
-train/validation/test split.
+Fit one probe per assay using official or generated CV folds, or a sourced
+train/test holdout (``split=seeded``). Report held-out Spearman (DMS) or AUC
+(clinical), with track-specific ProteinGym aggregation.
+
+Uses ProteinGym variant tables and the shared assay driver instead of
+run_evaluate.py's Prepare/Tune/Predict/Score pipeline.
 
 Usage::
 

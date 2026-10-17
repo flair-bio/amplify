@@ -2,10 +2,10 @@
 or indels (dispatched per assay from the sourced ``is_indel`` reference flag).
 
 Deliberately separate from run_evaluate.py's Prepare/Tune/Predict/Score
-pipeline: there's no training, no held-out split, and the official ProteinGym
-metric aggregation
-(mean over UniProt IDs, then over function categories) doesn't fit
-ScoreStep's per-example bootstrap contract.
+pipeline: zero-shot scoring needs no training or held-out split. The shared
+assay driver applies track-specific aggregation: protein/function means for
+DMS, mean per-gene AUC for clinical substitutions, and pooled AUC for clinical
+indels.
 
 Usage::
 
