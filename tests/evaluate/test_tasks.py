@@ -323,3 +323,29 @@ def test_missing_dataset_contract_warns_at_class_definition():
             auto_model_class = object
             metrics = {"accuracy": lambda values, labels, average: 1.0}
             default_metric_names = ("accuracy",)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.parametrize("empty", [False, True])
+def test_pseudo_perplexity_preserves_masked_log_probabilities(dtype, strided, empty):
+    generator = torch.Generator().manual_seed(17)
+    if strided:
+        logits = torch.randn(3, 7, 5, generator=generator).to(dtype).transpose(1, 2)
+    else:
+        logits = torch.randn(3, 5, 7, generator=generator).to(dtype)
+    labels = torch.full(logits.shape[:2], -100, dtype=torch.long)
+    if not empty:
+        # Include the sequence boundaries and a row with only ignored positions.
+        labels[0, 0] = 1
+        labels[0, -1] = 4
+        labels[2, 1] = 3
+    scored = labels != -100
+    target_ids = labels[scored]
+    expected = logits.log_softmax(dim=-1)[scored][
+        torch.arange(target_ids.numel()), target_ids
+    ]
+
+    actual = get_task("pseudo_perplexity").extract_predictions(logits, labels=labels)
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
