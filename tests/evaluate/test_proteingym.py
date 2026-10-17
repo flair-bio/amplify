@@ -1302,3 +1302,64 @@ def test_indel_batching_preserves_context_scores(batch_size, max_length):
     actual = score_assay_indel(*args, batch_size=batch_size, **kwargs)
 
     np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("is_indel", [False, True])
+def test_zero_shot_preserves_ambiguous_residues(monkeypatch, tmp_path, is_indel):
+    from modules.evaluate.src import run_proteingym_zero_shot as entrypoint
+    from modules.evaluate.src.proteingym.config import ProteinGymZeroShotConfig
+    from modules.pretrain.src.model.tokenizer import ProteinTokenizer, TokenizerConfig
+    from .conftest import VOCAB
+
+    tokenizer = ProteinTokenizer(
+        TokenizerConfig(
+            vocab=[*VOCAB, "U"],
+            pad_token="<pad>",
+            unk_token="<unk>",
+            mask_token="<mask>",
+            bos_token="<bos>",
+            eos_token="<eos>",
+            ambiguous_tokens=["U", "<unk>"],
+            remove_ambiguous=True,
+        )
+    )
+    model = _ContextMaskedLM(len(tokenizer))
+    row = {"target_seq": "AUCUD", "is_indel": is_indel}
+    assay = pl.DataFrame(
+        {"mutant": ["C3A", "D5C"], "mutated_sequence": ["AUUCUD", "AUCD"]}
+    )
+    # Reference policy: retain each residue, including the two U tokens.
+    tokenizer.remove_ambiguous = False
+    expected = entrypoint._score_assay_model(
+        model, tokenizer, torch.device("cpu"), 1, None, row, assay
+    )
+    tokenizer.remove_ambiguous = True
+    assert len(tokenizer(row["target_seq"])["input_ids"]) == 5  # BOS + ACD + EOS
+
+    monkeypatch.setattr(
+        entrypoint.AutoTokenizer, "from_pretrained", lambda *a, **k: tokenizer
+    )
+    monkeypatch.setattr(
+        entrypoint.AutoModelForMaskedLM, "from_pretrained", lambda *a, **k: model
+    )
+
+    def score_one_assay(data_dir, output_dir, max_assays, score_assay, **kwargs):
+        scores = score_assay(row, assay)
+        np.testing.assert_array_equal(scores, expected)
+        assert np.isfinite(scores).all()
+        return {"scores": scores}
+
+    monkeypatch.setattr(entrypoint, "run_assay_loop", score_one_assay)
+    entrypoint.run(
+        ProteinGymZeroShotConfig(
+            model_id="offline",
+            data_dir=tmp_path,
+            output_dir=tmp_path / "out",
+            device="cpu",
+            max_length=None,
+            batch_size=2,
+        )
+    )
+    assert not tokenizer.remove_ambiguous
+    assert not tokenizer.init_kwargs["remove_ambiguous"]
+    assert len(tokenizer(row["target_seq"])["input_ids"]) == 7

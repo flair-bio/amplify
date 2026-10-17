@@ -127,6 +127,13 @@ def run(config: ProteinGymZeroShotConfig) -> dict[str, object]:
     )
 
     tokenizer = AutoTokenizer.from_pretrained(config.model_id, trust_remote_code=True)
+    if getattr(tokenizer, "remove_ambiguous", False):
+        logger.info(
+            "Disabling ambiguous-residue removal for ProteinGym scoring "
+            "to preserve source residue coordinates."
+        )
+        tokenizer.remove_ambiguous = False
+        tokenizer.init_kwargs["remove_ambiguous"] = False
     model = (
         AutoModelForMaskedLM.from_pretrained(
             config.model_id,
