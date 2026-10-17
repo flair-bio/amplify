@@ -32,6 +32,7 @@ from modules.evaluate.src.proteingym.baselines import (
 )
 from modules.evaluate.src.proteingym.masked_marginal import (
     _optimal_window,
+    _sequence_log_likelihood,
     parse_mutant,
     score_assay_indel,
     score_assay_masked_marginal,
@@ -68,6 +69,7 @@ class _FakeTokenizer:
         truncation=False,
         max_length=None,
         add_special_tokens=True,
+        return_special_tokens_mask=False,
     ):
         sequences = [sequence] if isinstance(sequence, str) else sequence
         # Reserve one slot for CLS when truncating so callers can't overrun max_length.
@@ -82,10 +84,13 @@ class _FakeTokenizer:
         for row, ids in enumerate(encoded):
             input_ids[row, : len(ids)] = torch.tensor(ids)
             attention_mask[row, : len(ids)] = 1
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-        }
+        output = {"input_ids": input_ids, "attention_mask": attention_mask}
+        if return_special_tokens_mask:
+            special_mask = attention_mask == 0
+            if add_special_tokens:
+                special_mask[:, 0] = True
+            output["special_tokens_mask"] = special_mask.long()
+        return output
 
 
 class _FakeMaskedLM(nn.Module):
@@ -540,6 +545,7 @@ class _FakeBatchTokenizer:
         truncation=False,
         max_length=None,
         add_special_tokens=True,
+        return_special_tokens_mask=False,
     ):
         if isinstance(sequences, str):
             sequences = [sequences]
@@ -554,7 +560,13 @@ class _FakeBatchTokenizer:
         for row, ids in enumerate(encoded):
             input_ids[row, : len(ids)] = torch.tensor(ids)
             attention_mask[row, : len(ids)] = 1
-        return {"input_ids": input_ids, "attention_mask": attention_mask}
+        output = {"input_ids": input_ids, "attention_mask": attention_mask}
+        if return_special_tokens_mask:
+            special_mask = attention_mask == 0
+            if add_special_tokens:
+                special_mask[:, 0] = True
+            output["special_tokens_mask"] = special_mask.long()
+        return output
 
 
 def test_score_assay_indel_matches_closed_form():
@@ -1363,3 +1375,84 @@ def test_zero_shot_preserves_ambiguous_residues(monkeypatch, tmp_path, is_indel)
     assert not tokenizer.remove_ambiguous
     assert not tokenizer.init_kwargs["remove_ambiguous"]
     assert len(tokenizer(row["target_seq"])["input_ids"]) == 7
+
+
+@pytest.mark.parametrize("batch_size", [1, 4, 16])
+def test_indel_truncation_preserves_specials_and_scores_a_fixed_prefix(
+    model_family, batch_size
+):
+    tokenizer = model_family.tokenizer
+    # U is an unknown token for the AMPLIFY fixture and a residue token for ESM.
+    sequence = "AUCDEFGHIKLMNPQRSTVWY"
+    prefix = sequence[:6]
+    model = _ContextMaskedLM(len(tokenizer))
+    encoding = tokenizer([prefix], return_tensors="pt", padding=True)
+    original = encoding["input_ids"]
+    expected = 0.0
+    for position in range(1, 7):
+        masked = original.clone()
+        masked[0, position] = tokenizer.mask_token_id
+        logits = model(masked, encoding["attention_mask"]).logits
+        expected += logits[0, position].float().log_softmax(-1)[
+            original[0, position]
+        ].item()
+
+    class RecordingModel(_ContextMaskedLM):
+        def __init__(self):
+            super().__init__(len(tokenizer))
+            self.inputs = []
+
+        def forward(self, input_ids, attention_mask=None):
+            self.inputs.append(input_ids.clone())
+            return super().forward(input_ids, attention_mask)
+
+    for seed in (0, 1):
+        np.random.seed(seed)
+        recorder = RecordingModel()
+        actual = _sequence_log_likelihood(
+            recorder,
+            tokenizer,
+            [sequence],
+            torch.device("cpu"),
+            batch_size,
+            max_length=8,
+        )
+        np.testing.assert_array_equal(actual, [expected])
+        inputs = torch.cat(recorder.inputs)
+        assert inputs.shape == (6, 8)
+        torch.testing.assert_close(inputs[:, 0], original[:, 0].expand(6))
+        torch.testing.assert_close(inputs[:, -1], original[:, -1].expand(6))
+        rows, positions = torch.where(inputs == tokenizer.mask_token_id)
+        torch.testing.assert_close(rows, torch.arange(6))
+        torch.testing.assert_close(positions, torch.arange(1, 7))
+        restored = inputs.clone()
+        restored[rows, positions] = original[0, positions]
+        torch.testing.assert_close(restored, original.expand(6, -1))
+
+
+def test_indel_likelihood_rejects_removed_residues(protein_tokenizer):
+    protein_tokenizer.remove_ambiguous = True
+    protein_tokenizer.ambiguous_token_ids = [protein_tokenizer.unk_token_id]
+    model = _ContextMaskedLM(len(protein_tokenizer))
+    with pytest.raises(ValueError, match="one token per residue"):
+        _sequence_log_likelihood(
+            model,
+            protein_tokenizer,
+            ["AUCD"],
+            torch.device("cpu"),
+            batch_size=2,
+            max_length=8,
+        )
+
+
+def test_indel_likelihood_requires_room_for_residues(model_family):
+    tokenizer = model_family.tokenizer
+    with pytest.raises(ValueError, match="too small"):
+        _sequence_log_likelihood(
+            _ContextMaskedLM(len(tokenizer)),
+            tokenizer,
+            ["AC"],
+            torch.device("cpu"),
+            batch_size=2,
+            max_length=2,
+        )

@@ -181,10 +181,12 @@ def _sequence_log_likelihood(
     max_length: int | None,
 ) -> np.ndarray:
     """Sum of log p(token | context with that position masked), over every
-    position: a true masked pseudo-log-likelihood (MPLL) sweep. Unlike a
+    retained residue: a true masked pseudo-log-likelihood (MPLL) sweep. Unlike a
     single unmasked forward pass, self-attention never sees a position's own
     token when that position is scored, at the cost of one forward pass per
-    (sequence, position-batch) instead of one per sequence."""
+    (sequence, position-batch) instead of one per sequence. Long inputs use a
+    deterministic prefix crop, retaining added special tokens as context only.
+    """
     mask_id = tokenizer.mask_token_id
     scores = np.zeros(len(sequences), dtype=np.float64)
     for seq_index, sequence in enumerate(sequences):
@@ -192,18 +194,35 @@ def _sequence_log_likelihood(
             [sequence],
             return_tensors="pt",
             padding=True,
-            truncation=max_length is not None,
-            max_length=max_length,
+            truncation=False,
+            return_special_tokens_mask=True,
         )
-        input_ids = encoding["input_ids"].to(device)
+        input_ids = encoding["input_ids"]
         attention_mask = encoding.get("attention_mask")
+        residue_mask = encoding["special_tokens_mask"][0] == 0
+        residue_indices = residue_mask.nonzero().flatten().tolist()
+        if len(residue_indices) != len(sequence):
+            raise ValueError("ProteinGym scoring requires one token per residue")
+
+        if max_length is not None and input_ids.shape[1] > max_length:
+            max_residues = max_length - int((~residue_mask).sum())
+            if max_residues < 1:
+                raise ValueError(
+                    "max_length is too small to contain a residue and special tokens"
+                )
+            # Crop residues explicitly: custom tokenizers may crop randomly or
+            # preserve EOS at a position occupied by a residue before truncation.
+            keep = ~residue_mask
+            keep[residue_indices[:max_residues]] = True
+            input_ids = input_ids[:, keep]
+            residue_mask = residue_mask[keep]
+            if attention_mask is not None:
+                attention_mask = attention_mask[:, keep]
+            residue_indices = residue_mask.nonzero().flatten().tolist()
+
+        input_ids = input_ids.to(device)
         if attention_mask is not None:
             attention_mask = attention_mask.to(device)
-        residue_indices = [
-            position
-            for position in _residue_token_indices(tokenizer, sequence)
-            if position < input_ids.shape[1]
-        ]
 
         total = 0.0
         for start in range(0, len(residue_indices), batch_size):
@@ -237,7 +256,7 @@ def score_assay_indel(
 ) -> np.ndarray:
     """Zero-shot score for indels: masked-marginal's position-alignment
     assumption breaks once mutant length differs from wild-type, so this
-    scores each full sequence's masked pseudo-log-likelihood independently
+    scores each sequence's masked pseudo-log-likelihood independently
     and takes the mutant-minus-wildtype difference."""
     log_likelihoods = _sequence_log_likelihood(
         model,
