@@ -63,10 +63,9 @@ class ProteinGymSupervisedConfig(BaseModel):
     output_dir: Path
     # Official fold columns are sourced with the assay; "seeded" uses the
     # persisted train/validation/test split generated during sourcing.
-    # "official_average" runs all three official fold columns per assay and
-    # averages the resulting metric equally, matching the official supervised
-    # leaderboard protocol (performance_DMS_supervised_benchmarks.py) instead
-    # of reporting a single fold scheme.
+    # "official_average" averages all three official DMS schemes for
+    # substitutions and uses only fold_random_5 for indels, matching
+    # performance_DMS_supervised_benchmarks.py.
     split: Literal[
         "fold_random_5",
         "fold_modulo_5",

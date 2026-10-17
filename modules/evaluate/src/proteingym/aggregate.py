@@ -1,8 +1,12 @@
 """Per-assay metrics (Spearman/NDCG/Top_recall for continuous DMS scores,
-ROC-AUC/MCC for binary labels) and the official ProteinGym hierarchical
-aggregation: mean across assays within a UniProt ID, then mean across
-UniProt IDs within a function category, then mean across categories (each
-weighted equally)."""
+ROC-AUC/MCC for binary labels) and hierarchical DMS aggregation.
+
+DMS metrics are averaged across assays within each protein/function pair,
+then across proteins within each function, then equally across functions.
+Clinical substitutions use one gene per ID and a single Clinical category,
+reducing this to an equal mean of per-gene AUCs. Clinical indel pooling is
+handled by the shared assay driver.
+"""
 
 from __future__ import annotations
 
