@@ -231,11 +231,8 @@ class TuneStep:
 
         if not isinstance(prepared.model, nn.Module):
             raise TypeError("Torch probe tuning requires a torch.nn.Module model.")
-        model = prepared.model
-
-        # PrepareStep creates an embedding probe for cached representations.
-        # Rebuild it here when the selected MLP width differs from that probe's
-        # default; the cached embeddings themselves remain unchanged.
+        # PrepareStep creates a linear probe for cached representations.
+        # Rebuild it with the configured MLP width; cached embeddings remain unchanged.
         if self.config.head.head_type == "mlp" and isinstance(
             prepared.model, EmbeddingProbeHead
         ):
@@ -246,10 +243,9 @@ class TuneStep:
                 probe_hidden_size=self.config.head.hidden_size,
             ).to(accelerator.device)
 
-        cached_probe = self._cached_embedding_split(
-            prepared.train_dataloader, accelerator.device
-        )
-        if cached_probe is None and not self.train_trunk:
+        model = prepared.model
+        cached_probe = find_embedding_dataset(prepared.train_dataloader) is not None
+        if not cached_probe and not self.train_trunk:
             logger.warning(
                 "Embedding cache is unavailable; tuning head_type='%s' "
                 "without it will recompute frozen-trunk representations "

@@ -645,3 +645,48 @@ def test_cached_probe_batch_size_honors_loader_and_override(
     assert [
         call.kwargs["inputs_embeds"].shape[0] for call in forward.call_args_list
     ] == val_batch_sizes
+
+
+def test_cached_mlp_checkpoint_reloads_trained_head(
+    monkeypatch, tmp_path, model_family
+):
+    prepared = _run_prepare(
+        monkeypatch,
+        tmp_path,
+        "sequence_classification",
+        model_family,
+        embedding_cache=EmbeddingCacheConfig(enabled=True),
+    )
+    workspace = _make_workspace(tmp_path, "sequence_classification")
+    step = TuneStep(
+        TuneConfig(
+            head=HeadConfig(head_type="mlp", hidden_size=7),
+            learning_rate=1e-2,
+            max_epochs=1,
+            warmup_ratio=0,
+            early_stopping_patience=None,
+        )
+    )
+
+    trained = step.run(workspace, prepared, accelerator=Accelerator(cpu=True))
+
+    metadata = json.loads((workspace.model_path / "probe_head_config.json").read_text())
+    assert metadata["probe_hidden_size"] == 7
+    reloaded = EmbeddingProbeHead(
+        metadata["embedding_size"],
+        metadata["num_labels"],
+        metadata["task_type"],
+        probe_hidden_size=metadata["probe_hidden_size"],
+    )
+    state = torch.load(workspace.model_path / "probe_head.pt", weights_only=True)
+    reloaded.load_state_dict(state, strict=True)
+    for name, tensor in trained.model.state_dict().items():
+        torch.testing.assert_close(state[name], tensor)
+    features, _ = step._cached_embedding_split(
+        prepared.val_dataloader, torch.device("cpu")
+    )
+    with torch.inference_mode():
+        torch.testing.assert_close(
+            reloaded(inputs_embeds=features).logits,
+            trained.model(inputs_embeds=features).logits,
+        )
