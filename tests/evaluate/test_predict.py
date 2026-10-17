@@ -78,7 +78,7 @@ def test_online_layerwise_cli_branch(monkeypatch, tmp_path, model_family):
             },
         }
     )
-    monkeypatch.setattr(run_evaluate, "load_and_parse", lambda **kwargs: config)
+    monkeypatch.setattr(run_evaluate, "load_evaluation_config", lambda **kwargs: config)
     monkeypatch.setattr(
         run_evaluate, "Accelerator", lambda **kwargs: Accelerator(cpu=True)
     )

@@ -1,4 +1,5 @@
 workspace:
+  default_task_type: token_classification
   dataset_name: uniprot_membrane_pass
   dataset_repo_id: flair-bio/uniprot_membrane_pass
   target_type: categorical

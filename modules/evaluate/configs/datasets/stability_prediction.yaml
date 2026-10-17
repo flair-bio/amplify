@@ -1,4 +1,5 @@
 workspace:
+  default_task_type: sequence_regression
   dataset_name: stability_prediction
   dataset_repo_id: flair-bio/biomap-research-stability_prediction
   target_type: continuous

@@ -1,4 +1,5 @@
 workspace:
+  default_task_type: sequence_regression
   dataset_name: optimal_temperature
   dataset_repo_id: flair-bio/biomap-research-optimal_temperature
   target_type: continuous

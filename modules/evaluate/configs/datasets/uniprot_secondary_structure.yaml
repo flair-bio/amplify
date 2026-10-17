@@ -1,4 +1,5 @@
 workspace:
+  default_task_type: token_classification
   dataset_name: uniprot_secondary_structure
   dataset_repo_id: flair-bio/uniprot_secondary_structure
   target_type: categorical

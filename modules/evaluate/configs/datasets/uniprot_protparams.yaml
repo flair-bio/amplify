@@ -1,4 +1,5 @@
 workspace:
+  default_task_type: sequence_regression
   dataset_name: uniprot_protparams
   dataset_repo_id: flair-bio/uniprot_protparams
   target_type: continuous

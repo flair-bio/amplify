@@ -1,4 +1,5 @@
 workspace:
+  default_task_type: sequence_multilabel_classification
   dataset_name: interpro_domain
   dataset_repo_id: flair-bio/interpro_domain
   target_type: categorical
