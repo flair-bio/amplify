@@ -38,6 +38,7 @@ from modules.evaluate.src.model.heads import (
 from modules.evaluate.src.model.layerwise import LayerwiseProbeModel
 from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
 from modules.evaluate.src.tasks import get_task
+from modules.evaluate.src.tasks.token_classification import IGNORE_INDEX
 from modules.evaluate.src.utils.controls import RANDOMIZED_TRUNK_CONTROLS
 from modules.evaluate.src.utils.embed import (
     find_embedding_dataset,
@@ -142,6 +143,13 @@ class TuneConfig(BaseModel):
             "Set to null to use the batch size created by PrepareStep."
         ),
     )
+    standardize_features: bool = Field(
+        True,
+        description=(
+            "Standardize ordinary cached MLP/torch_linear probe features with "
+            "training statistics. Layerwise probes use their own setting."
+        ),
+    )
     early_stopping_patience: int | None = Field(
         5,
         description=(
@@ -244,7 +252,22 @@ class TuneStep:
             ).to(accelerator.device)
 
         model = prepared.model
-        cached_probe = find_embedding_dataset(prepared.train_dataloader) is not None
+        embedding_dataset = find_embedding_dataset(prepared.train_dataloader)
+        cached_probe = embedding_dataset is not None
+        if cached_probe and isinstance(model, EmbeddingProbeHead):
+            features = embedding_dataset.embeddings
+            if self.config.standardize_features:
+                if workspace.task_type == "token_classification":
+                    valid = torch.as_tensor(embedding_dataset.labels) != IGNORE_INDEX
+                    if not valid.all():
+                        features = features[valid]
+                logger.info(
+                    "Standardizing cached probe features using %d training rows.",
+                    features.shape[0],
+                )
+            model.fit_standardization(
+                features, enabled=self.config.standardize_features
+            )
         if not cached_probe and not self.train_trunk:
             logger.warning(
                 "Embedding cache is unavailable; tuning head_type='%s' "
@@ -851,6 +874,7 @@ class TuneStep:
                     best_hparams,
                     embedding_size=unwrapped_model.embedding_size,
                     probe_hidden_size=unwrapped_model.probe_hidden_size,
+                    standardize_features=unwrapped_model.standardize_features,
                     num_labels=unwrapped_model.num_labels,
                     task_type=unwrapped_model.task_type,
                 )

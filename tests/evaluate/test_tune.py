@@ -672,11 +672,13 @@ def test_cached_mlp_checkpoint_reloads_trained_head(
 
     metadata = json.loads((workspace.model_path / "probe_head_config.json").read_text())
     assert metadata["probe_hidden_size"] == 7
+    assert metadata["standardize_features"] is True
     reloaded = EmbeddingProbeHead(
         metadata["embedding_size"],
         metadata["num_labels"],
         metadata["task_type"],
         probe_hidden_size=metadata["probe_hidden_size"],
+        standardize_features=metadata["standardize_features"],
     )
     state = torch.load(workspace.model_path / "probe_head.pt", weights_only=True)
     reloaded.load_state_dict(state, strict=True)
