@@ -322,5 +322,5 @@ def test_mlp_width_overlay_validates_supported_configuration(override):
 
     search = config.steps.tune.hyperparameter_search
     assert search.enabled
-    assert search.n_trials == 24
+    assert search.n_trials == 50
     assert search.search_space.hidden_size == _WIDTHS

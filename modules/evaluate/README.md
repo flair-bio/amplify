@@ -457,7 +457,7 @@ dataloaders.
 
 `configs/tuning/mlp.yaml` searches hidden widths `[128, 256, 512, 1024]`
 and probe batch sizes `[8, 16, 32, 64, 128]` jointly with learning rate, weight
-decay, and epochs in 24 trials total. BOHB and random search cover each width
+decay, and epochs in 50 trials total. BOHB and random search cover each width
 and batch size in the initial trials when the budget permits; grid search
 evaluates every combination. Width and batch-size search require cached MLP
 probes. Probe batches contain sequences for sequence tasks and individual
