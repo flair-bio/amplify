@@ -6,6 +6,7 @@ import pytest
 import torch
 from pydantic import ValidationError
 from torch import nn
+from transformers import AutoModelForMaskedLM
 
 from modules.pretrain.src.model.configuration_amplify import AMPLIFYConfig
 from modules.pretrain.src.optimizer.optimizer import OptimizerConfig, get_optimizer
@@ -166,6 +167,57 @@ def test_norm_optimizer_groups_and_decay():
     optimizer.step()
     torch.testing.assert_close(offset, torch.full_like(offset, 0.49))
     torch.testing.assert_close(model["RMSNorm"].weight, torch.ones(32))
+
+
+@pytest.mark.parametrize("norm_type", NORM_TYPES)
+def test_norm_optimizer_decay_survives_hf_auto_loading(norm_type, tmp_path):
+    config = tiny_config(norm_type=norm_type, qk_norm=True, nonlinear_mlm_head=True)
+    config.auto_map = modeling.register_amplify_auto_classes()
+    model = modeling.AMPLIFYForMaskedLM(config)
+    model.save_pretrained(tmp_path)
+    restored = AutoModelForMaskedLM.from_pretrained(
+        tmp_path, trust_remote_code=True, local_files_only=True
+    )
+    assert type(restored) is not type(model)
+    expected_decay = 0.2 if norm_type == "ZeroCenteredRMSNorm" else 0.0
+    for candidate in (model, restored):
+        optimizer = get_optimizer(
+            candidate,
+            OptimizerConfig(
+                type="AdamW",
+                lr=0.1,
+                betas=(0.9, 0.95),
+                eps=1e-8,
+                weight_decay=0.2,
+                fused=False,
+            ),
+        )
+        decay_by_param = {
+            id(param): group["weight_decay"]
+            for group in optimizer.param_groups
+            for param in group["params"]
+        }
+        norms = [
+            module
+            for module in candidate.modules()
+            if type(module).__name__ in NORM_TYPES
+        ]
+        assert len(norms) == 10  # Block pre-norms, QK norms, final and MLM head norms.
+        for norm in norms:
+            assert decay_by_param[id(norm.weight)] == expected_decay
+            if getattr(norm, "bias", None) is not None:
+                assert decay_by_param[id(norm.bias)] == 0.0
+            if norm_type == "ZeroCenteredRMSNorm":
+                with torch.no_grad():
+                    norm.weight.fill_(0.5)
+        for parameter in candidate.parameters():
+            parameter.grad = torch.zeros_like(parameter)
+        optimizer.step()
+        for norm in norms:
+            expected = 0.49 if norm_type == "ZeroCenteredRMSNorm" else 1.0
+            torch.testing.assert_close(
+                norm.weight, torch.full_like(norm.weight, expected)
+            )
 
 
 @pytest.mark.parametrize("norm_type", NORM_TYPES)
