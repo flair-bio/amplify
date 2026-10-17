@@ -438,14 +438,19 @@ dataloaders.
 | `hyperparameter_search.direction` | `null` | `maximize` or `minimize` the target metric; inferred from the metric when omitted |
 | `hyperparameter_search.metric` | `null` | Task-specific default metric unless overridden |
 | `hyperparameter_search.search_pattern` | `bohb` | `bohb` (Optuna TPE sampler with median pruning), `random`, or `grid` |
-| `hyperparameter_search.search_space.*` | see [`configs/config.yaml`](configs/config.yaml) | Candidate values for `learning_rate`, `max_epochs`, and `weight_decay`; probe batch size is configured separately with `steps.tune.batch_size` |
+| `hyperparameter_search.search_space.*` | see [`configs/config.yaml`](configs/config.yaml) | Candidate values for `learning_rate`, `max_epochs`, and `weight_decay`; optional cached-MLP dimensions are listed below |
 | `hyperparameter_search.search_space.hidden_size` | `null` | Optional hidden widths for cached MLP probes; `null` keeps the fixed `head.hidden_size` |
+| `hyperparameter_search.search_space.batch_size` | `null` | Optional cached MLP training batch sizes; `null` keeps `steps.tune.batch_size` or the prepared loader size |
 
 `configs/tuning/mlp.yaml` searches hidden widths `[128, 256, 512, 1024]`
-jointly with learning rate, weight decay, and epochs in 24 trials total. BOHB
-and random search cover every width before further sampling when the trial
-budget permits; grid search evaluates every combination. Width search requires
-cached MLP probes.
+and probe batch sizes `[8, 16, 32, 64, 128]` jointly with learning rate, weight
+decay, and epochs in 24 trials total. BOHB and random search cover each width
+and batch size in the initial trials when the budget permits; grid search
+evaluates every combination. Width and batch-size search require cached MLP
+probes. Probe batches contain sequences for sequence tasks and individual
+residues for token tasks. Each trial uses its batch size for training,
+validation, and the optimizer schedule; the selected batch is saved with the
+winning hyperparameters.
 Candidates reuse training-only feature standardization and are selected by the
 validation metric. The winning architecture and weights are retained for test
 prediction and saved together. With no width search configured, the fixed

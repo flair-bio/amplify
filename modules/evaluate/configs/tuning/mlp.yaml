@@ -13,10 +13,11 @@ steps:
       hidden_size: 1024 # fixed width when hyperparameter search is disabled
     hyperparameter_search:
       enabled: true
-      n_trials: 24 # total trials across all widths
+      n_trials: 24 # total trials across all widths and batch sizes
       search_pattern: bohb
       search_space:
         hidden_size: [128, 256, 512, 1024]
+        batch_size: [8, 16, 32, 64, 128]
         learning_rate: [1e-3, 5e-4, 1e-4]
         max_epochs: [10, 20, 40]
         weight_decay: [1e-4, 1e-3]

@@ -150,7 +150,10 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
     search_config = steps.tune.hyperparameter_search
     if (
         search_config.enabled
-        and search_config.search_space.hidden_size is not None
+        and (
+            search_config.search_space.hidden_size is not None
+            or search_config.search_space.batch_size is not None
+        )
         and (
             steps.mode != "tune_probe"
             or steps.tune.head.head_type != "mlp"
@@ -158,8 +161,13 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
             or steps.layerwise.enabled
         )
     ):
+        dimension = (
+            "hidden_size"
+            if search_config.search_space.hidden_size is not None
+            else "batch_size"
+        )
         raise ValueError(
-            "hidden_size search requires a cached MLP probe in tune_probe mode."
+            f"{dimension} search requires a cached MLP probe in tune_probe mode."
         )
     if search_config.enabled and search_config.direction == "maximize":
         # An explicit 'maximize' for a lower-is-better metric would select the

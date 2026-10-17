@@ -88,6 +88,11 @@ class HyperparameterSearchSpaceConfig(BaseModel):
     learning_rate: list[float] = [5e-4, 1e-4, 5e-5, 1e-5]
     max_epochs: list[int] = [5, 10, 20]
     weight_decay: list[float] = [0.0, 1e-4, 1e-3]
+    batch_size: list[PositiveInt] | None = Field(
+        None,
+        min_length=1,
+        description="Optional training batch sizes for cached MLP probes; null keeps tune.batch_size.",
+    )
     hidden_size: list[PositiveInt] | None = Field(
         None,
         min_length=1,
@@ -237,7 +242,10 @@ class TuneStep:
         search = self.config.hyperparameter_search
         if (
             search.enabled
-            and search.search_space.hidden_size is not None
+            and (
+                search.search_space.hidden_size is not None
+                or search.search_space.batch_size is not None
+            )
             and (
                 self.train_trunk
                 or self.config.head.head_type != "mlp"
@@ -245,8 +253,13 @@ class TuneStep:
                 or find_embedding_dataset(prepared.train_dataloader) is None
             )
         ):
+            dimension = (
+                "hidden_size"
+                if search.search_space.hidden_size is not None
+                else "batch_size"
+            )
             raise ValueError(
-                "hidden_size search requires a cached MLP probe in tune_probe mode."
+                f"{dimension} search requires a cached MLP probe in tune_probe mode."
             )
         if isinstance(prepared.model, LayerwiseProbeModel):
             return self._run_layerwise(workspace, prepared, accelerator, seed, controls)
@@ -638,7 +651,13 @@ class TuneStep:
                     module.reset_parameters()
             self._train(workspace, prepared, accelerator, best_hparams)
             scores.append(
-                self._evaluate_validation(workspace, prepared, accelerator, metric_name)
+                self._evaluate_validation(
+                    workspace,
+                    prepared,
+                    accelerator,
+                    metric_name,
+                    batch_size=best_hparams.get("batch_size"),
+                )
             )
         load_checkpoint_state(model, canonical_state)
         self._log_seed_variance(metric_name, scores)
@@ -1010,7 +1029,7 @@ class TuneStep:
             extra_kwargs=self.config.optimizer_kwargs,
         )
         max_epochs = hparams["max_epochs"]
-        batch_size = self._cached_batch_size(train_dataloader)
+        batch_size = hparams.get("batch_size") or self._cached_batch_size(train_dataloader)
         steps_per_epoch = (
             math.ceil(cached_train[0].shape[0] / batch_size)
             if cached_train is not None
@@ -1120,7 +1139,12 @@ class TuneStep:
                     continue
                 assert metric_name is not None
                 score = self._evaluate_validation(
-                    workspace, prepared, accelerator, metric_name
+                    workspace,
+                    prepared,
+                    accelerator,
+                    metric_name,
+                    cached_val=cached_val,
+                    batch_size=hparams.get("batch_size"),
                 )
                 last_epoch_score = score
                 self._set_train_mode(model, accelerator)
@@ -1199,6 +1223,9 @@ class TuneStep:
         prepared: PreparedArtifacts,
         accelerator: Accelerator,
         metric_name: str,
+        *,
+        cached_val: tuple[torch.Tensor, torch.Tensor] | None = None,
+        batch_size: int | None = None,
     ) -> float:
         if prepared.val_dataloader is None:
             raise ValueError(
@@ -1214,7 +1241,7 @@ class TuneStep:
             predictions_tensors: list[torch.Tensor] = []
             probabilities_tensors: list[torch.Tensor] = []
             with torch.inference_mode():
-                batch_size = self._cached_batch_size(prepared.val_dataloader)
+                batch_size = batch_size or self._cached_batch_size(prepared.val_dataloader)
                 for batch in self._cached_batches(
                     cached_val, batch_size, shuffle=False
                 ):
@@ -1262,6 +1289,18 @@ class TuneStep:
         )
         return scores[metric_name]
 
+    def _probe_search_starters(self) -> list[tuple[int | None, int | None]]:
+        """Initial width/batch pairs that cover each configured value."""
+        space = self.config.hyperparameter_search.search_space
+        if space.hidden_size is None and space.batch_size is None:
+            return []
+        widths = space.hidden_size or [None]
+        batches = space.batch_size or [None]
+        return [
+            (widths[index % len(widths)], batches[index % len(batches)])
+            for index in range(max(len(widths), len(batches)))
+        ]
+
     def _generate_candidates(
         self,
         search_pattern: Literal["bohb", "random", "grid"],
@@ -1276,6 +1315,7 @@ class TuneStep:
                 space.weight_decay,
                 space.max_epochs,
                 space.hidden_size or [None],
+                space.batch_size or [None],
             )
         )
 
@@ -1299,15 +1339,20 @@ class TuneStep:
                     n_trials,
                     len(combos),
                 )
-            if space.hidden_size is None:
+            if space.hidden_size is None and space.batch_size is None:
                 candidates = sample_candidates(combos, n_trials, seed)
             else:
                 shuffled = sample_candidates(combos, len(combos), seed)
-                # Cover each width before spending the remaining trial budget.
-                first_by_width = {}
-                for candidate in shuffled:
-                    first_by_width.setdefault(candidate[3], candidate)
-                starters = list(first_by_width.values())
+                starters = [
+                    (
+                        space.learning_rate[0],
+                        space.weight_decay[0],
+                        space.max_epochs[0],
+                        width,
+                        batch,
+                    )
+                    for width, batch in self._probe_search_starters()
+                ]
                 candidates = (
                     starters + [item for item in shuffled if item not in starters]
                 )[:n_trials]
@@ -1319,8 +1364,9 @@ class TuneStep:
                 "max_epochs": max_epochs,
                 "seed": seed,
                 **({"hidden_size": hidden_size} if hidden_size is not None else {}),
+                **({"batch_size": batch_size} if batch_size is not None else {}),
             }
-            for lr, wd, max_epochs, hidden_size in candidates
+            for lr, wd, max_epochs, hidden_size, batch_size in candidates
         ]
 
     def _search_hyperparameters(
@@ -1399,7 +1445,11 @@ class TuneStep:
                 if training_score is not None:
                     return training_score
                 return self._evaluate_validation(
-                    workspace, prepared, accelerator, metric_name
+                    workspace,
+                    prepared,
+                    accelerator,
+                    metric_name,
+                    batch_size=hparams.get("batch_size"),
                 )
             finally:
                 # Runs on every trial outcome, including a pruned trial
@@ -1479,10 +1529,15 @@ class TuneStep:
                     }
                 else:
                     hparams = None
-                if hparams is not None and space.hidden_size is not None:
-                    hparams["hidden_size"] = trial.suggest_categorical(
-                        "hidden_size", space.hidden_size
-                    )
+                if hparams is not None:
+                    if space.hidden_size is not None:
+                        hparams["hidden_size"] = trial.suggest_categorical(
+                            "hidden_size", space.hidden_size
+                        )
+                    if space.batch_size is not None:
+                        hparams["batch_size"] = trial.suggest_categorical(
+                            "batch_size", space.batch_size
+                        )
                 if (
                     self._cached_embedding_split(
                         prepared.train_dataloader, accelerator.device
@@ -1500,18 +1555,18 @@ class TuneStep:
                 return score
 
             study = create_optuna_study(direction, seed, search_config.n_trials)
-            if space.hidden_size is not None:
-                # These initial trials count toward n_trials and compare widths
-                # with the same training settings before adaptive sampling.
-                for hidden_size in space.hidden_size:
-                    study.enqueue_trial(
-                        {
-                            "hidden_size": hidden_size,
-                            "learning_rate": space.learning_rate[0],
-                            "weight_decay": space.weight_decay[0],
-                            "max_epochs": space.max_epochs[0],
-                        }
-                    )
+            # Initial trials cover each width and batch within n_trials.
+            for hidden_size, batch_size in self._probe_search_starters():
+                params = {
+                    "learning_rate": space.learning_rate[0],
+                    "weight_decay": space.weight_decay[0],
+                    "max_epochs": space.max_epochs[0],
+                }
+                if hidden_size is not None:
+                    params["hidden_size"] = hidden_size
+                if batch_size is not None:
+                    params["batch_size"] = batch_size
+                study.enqueue_trial(params)
             study.optimize(objective, n_trials=search_config.n_trials)
 
         logger.info(
