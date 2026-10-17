@@ -642,3 +642,37 @@ def test_legacy_config_keeps_optional_features_disabled():
         assert isinstance(layer.attention.q_norm, nn.Identity)
         assert isinstance(layer.attention.k_norm, nn.Identity)
         assert layer.attention.gate_proj is None
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        (32, 2, 4, 64, 0.02, 0.02, 1e-5, 32),
+        (48, 3, 6, 96, 0.03, 0.04, 1e-6, 41, 0, 1, 2, 128, 20000.0),
+    ],
+)
+def test_legacy_positional_config_matches_keyword_config(args):
+    # Preserve the public constructor's original positional argument order.
+    fields = (
+        "hidden_size",
+        "num_hidden_layers",
+        "num_attention_heads",
+        "intermediate_size",
+        "embedding_init_range",
+        "decoder_init_range",
+        "norm_eps",
+        "vocab_size",
+        "pad_token_id",
+        "bos_token_id",
+        "eos_token_id",
+        "max_position_embeddings",
+        "rope_theta",
+    )
+    expected = AMPLIFYConfig(**dict(zip(fields, args)))
+    actual = AMPLIFYConfig(*args)
+    assert actual.to_dict() == expected.to_dict()
+    assert actual.gaussian_init is False
+    # New options remain available alongside legacy positional arguments.
+    gaussian = AMPLIFYConfig(*args, gaussian_init=True)
+    expected.gaussian_init = True
+    assert gaussian.to_dict() == expected.to_dict()
