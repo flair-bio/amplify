@@ -1227,3 +1227,45 @@ def test_contact_score_cache_preserves_outputs_and_avoids_recomputation(
         assert (
             metric.call_count == contact_predict_output.predictions.height * conditions
         )
+
+
+@pytest.mark.parametrize(
+    "task_name",
+    [
+        "sequence_classification",
+        "sequence_multilabel_classification",
+        "token_classification",
+    ],
+)
+@pytest.mark.parametrize("average", ["macro", "weighted"])
+def test_classification_scoring_preserves_list_metrics(task_name, average):
+    task = get_task(task_name)
+    rng = np.random.default_rng(17)
+    probabilities = None
+    if task_name == "sequence_multilabel_classification":
+        labels = rng.integers(0, 2, size=(12, 4)).tolist()
+        probabilities = rng.random((12, 4)).tolist()
+        predictions = (np.asarray(probabilities) > 0.5).astype(int).tolist()
+    elif task_name == "token_classification":
+        labels = [[0, 2], [], [1, 2, 0], [2]]
+        predictions = [[0, 1], [], [2, 2, 0], [0]]
+    else:
+        labels = [0, 2, 1, 0, 1, 2]
+        probabilities = rng.random((len(labels), 3))
+        probabilities /= probabilities.sum(axis=1, keepdims=True)
+        predictions = probabilities.argmax(axis=1).tolist()
+        probabilities = probabilities.tolist()
+
+    metric_names = task.default_metrics()
+    expected = task.compute_metrics(
+        task.flatten_for_metrics(predictions),
+        task.flatten_for_metrics(labels),
+        metric_names,
+        average,
+        probabilities,
+    )
+    actual = full_scores(
+        task, predictions, labels, probabilities, metric_names, average
+    )
+
+    assert actual == expected
