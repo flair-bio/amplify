@@ -1081,3 +1081,49 @@ def test_supervised_continuous_regression_is_unchanged(
     assert summary["overall"] == pytest.approx(1.0)
     scores = pl.read_parquet(tmp_path / "out/assay_scores.parquet")
     assert scores["metric"][0] == "spearman"
+
+
+class _ContextMaskedLM(_FakeMaskedLM):
+    """Vary logits with the masked context and position to catch indexing errors."""
+
+    def forward(self, input_ids, attention_mask=None):
+        output = super().forward(input_ids, attention_mask)
+        positions = torch.arange(input_ids.shape[1]).view(1, -1, 1)
+        context = input_ids.sum(dim=1).view(-1, 1, 1)
+        output.logits = torch.sin(
+            output.logits * 0.11 + positions * 0.07 + context * 0.03
+        )
+        return output
+
+
+@pytest.mark.parametrize("batch_size", [2, 4, 16])
+@pytest.mark.parametrize("max_length", [None, 4])
+def test_masked_marginal_batching_preserves_context_scores(batch_size, max_length):
+    tokenizer = _FakeTokenizer()
+    model = _ContextMaskedLM(tokenizer.vocab_size)
+    args = (
+        model,
+        tokenizer,
+        "ACDEFGH",
+        ["A1C", "C2A", "E4G", "H7A", "A1C:H7A", "G100A"],
+    )
+    kwargs = {"device": torch.device("cpu"), "max_length": max_length}
+
+    expected = score_assay_masked_marginal(*args, batch_size=1, **kwargs)
+    actual = score_assay_masked_marginal(*args, batch_size=batch_size, **kwargs)
+
+    np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("batch_size", [2, 4, 16])
+@pytest.mark.parametrize("max_length", [None, 4])
+def test_indel_batching_preserves_context_scores(batch_size, max_length):
+    tokenizer = _FakeBatchTokenizer()
+    model = _ContextMaskedLM(tokenizer.vocab_size)
+    args = (model, tokenizer, "ACDEFGH", ["ACDEFGHH", "ACDE", "A"])
+    kwargs = {"device": torch.device("cpu"), "max_length": max_length}
+
+    expected = score_assay_indel(*args, batch_size=1, **kwargs)
+    actual = score_assay_indel(*args, batch_size=batch_size, **kwargs)
+
+    np.testing.assert_array_equal(actual, expected)
