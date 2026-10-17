@@ -137,14 +137,13 @@ def score_assay_masked_marginal(
             _residue_token_indices(tokenizer, sequence)[p - 1 - lo]
             for p, (lo, _), sequence in zip(batch_positions, windows, window_sequences)
         ]
-        for row, local_index in enumerate(local_indices):
-            batch_input[row, local_index] = mask_id
+        rows = torch.arange(len(batch_positions), device=batch_input.device)
+        batch_input[rows, local_indices] = mask_id
         batch_attention = encoding.get("attention_mask")
         if batch_attention is not None:
             batch_attention = batch_attention.to(device)
 
         logits = model(input_ids=batch_input, attention_mask=batch_attention).logits
-        rows = torch.arange(len(batch_positions), device=logits.device)
         masked_log_probs = torch.log_softmax(
             logits[rows, local_indices].float(), dim=-1
         ).cpu()
@@ -211,16 +210,15 @@ def _sequence_log_likelihood(
         total = 0.0
         for start in range(0, len(residue_indices), batch_size):
             positions = residue_indices[start : start + batch_size]
-            batch_input = input_ids.repeat(len(positions), 1).clone()
-            for row, position in enumerate(positions):
-                batch_input[row, position] = mask_id
+            batch_input = input_ids.repeat(len(positions), 1)
+            rows = torch.arange(len(positions), device=batch_input.device)
+            batch_input[rows, positions] = mask_id
             batch_attention = (
                 attention_mask.repeat(len(positions), 1)
                 if attention_mask is not None
                 else None
             )
             logits = model(input_ids=batch_input, attention_mask=batch_attention).logits
-            rows = torch.arange(len(positions), device=logits.device)
             log_probs = torch.log_softmax(logits[rows, positions].float(), dim=-1)
             token_log_probs = log_probs[rows, input_ids[0, positions]].cpu().tolist()
             # Preserve sequential accumulation while transferring once per batch.
