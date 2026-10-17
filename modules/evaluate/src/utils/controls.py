@@ -349,15 +349,15 @@ class ControlBuilder:
         if sequences is not None:
             control_data["sequence"] = sequences
 
-        if using_embeddings and get_task(workspace.task_type).is_ragged:
-            # Ragged embedding-cache rows repeat the same id once per valid
-            # token (see _run_embedding_control_inference), so join(on="id")
-            # would cross-join every id's duplicates instead of aligning row
-            # by row. Both sides iterate the same underlying dataset in the
-            # same fixed order, so align positionally instead, with an
-            # explicit order check since a silent misalignment here would
-            # corrupt every downstream metric.
-            control_ids = pl.Series("id", ids)
+        control_df = pl.DataFrame(control_data)
+        if (
+            predictions_df["id"].n_unique() < predictions_df.height
+            or control_df["id"].n_unique() < control_df.height
+        ):
+            # Masked-residue and ragged-cache rows repeat source ids. Joining
+            # on those ids would multiply rows, so require the same fixed
+            # test-set order before aligning predictions positionally.
+            control_ids = control_df["id"]
             if (
                 control_ids.len() != predictions_df.height
                 or (control_ids != predictions_df["id"]).any()
@@ -365,16 +365,14 @@ class ControlBuilder:
                 raise RuntimeError(
                     f"Control '{control}' produced {control_ids.len()} rows in "
                     f"a different order/count than the {predictions_df.height} "
-                    "test rows; ragged controls must iterate the test set in "
+                    "test rows; controls with repeated ids must iterate the test set in "
                     "the same order as the trained model's predictions."
                 )
-            aligned = predictions_df.select("id").with_columns(
-                pl.DataFrame(control_data).drop("id")
-            )
+            aligned = predictions_df.select("id").with_columns(control_df.drop("id"))
             return aligned, None
 
         aligned = predictions_df.select("id").join(
-            pl.DataFrame(control_data), on="id", how="left", maintain_order="left"
+            control_df, on="id", how="left", maintain_order="left", validate="1:1"
         )
         if aligned["prediction"].null_count() > 0:
             raise RuntimeError(
