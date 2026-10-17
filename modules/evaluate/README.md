@@ -382,7 +382,7 @@ dataloaders.
 | `head.search_space` | `{}` | Classical-estimator dimensions; candidates are selected on the validation split, and the winning estimator is used for test prediction after fitting on `train` only |
 | `metric_aggregation` | `weighted` | Averaging used for validation metric selection; automatically follows `steps.score.metric_aggregation` unless set explicitly; supports `micro`, `macro`, `weighted`, or `samples` |
 | `learning_rate` | `1e-4` | Used when `hyperparameter_search.enabled=false` |
-| `weight_decay` | `1e-4` | Used when `hyperparameter_search.enabled=false` |
+| `weight_decay` | `1e-4` | Used when `hyperparameter_search.enabled=false`; applies to matrices and `ZeroCenteredRMSNorm` gain offsets. Other one-dimensional parameters are excluded |
 | `max_epochs` | `10` | Maximum training epochs; used when `hyperparameter_search.enabled=false` |
 | `warmup_ratio` | `0.06` | Fraction of total training steps used for LR warmup |
 | `max_grad_norm` | `1.0` | Gradient clipping norm |

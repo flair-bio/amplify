@@ -24,6 +24,7 @@ from modules.evaluate.src.utils.hpo import (
     checkpoint_state,
     resolve_search_direction,
     sample_candidates,
+    split_decay_parameters,
 )
 from modules.evaluate.src.utils.embed import EmbeddingDataset
 
@@ -98,6 +99,72 @@ def test_checkpoint_state_is_independent_cpu_copy() -> None:
     with torch.no_grad():
         model.weight.add_(1)
     assert not torch.equal(checkpoint["weight"], model.weight.cpu())
+
+
+@pytest.mark.parametrize(
+    "norm_type", ["RMSNorm", "CenteredRMSNorm", "ZeroCenteredRMSNorm", "LayerNorm"]
+)
+@pytest.mark.parametrize("load_checkpoint", [False, True])
+def test_finetuning_norm_weight_decay(norm_type, load_checkpoint, tmp_path):
+    from transformers import AutoModelForSequenceClassification
+    from modules.pretrain.src.model.configuration_amplify import AMPLIFYConfig
+    from modules.pretrain.src.model.modeling_amplify import (
+        AMPLIFYForSequenceClassification,
+        register_amplify_auto_classes,
+    )
+
+    config = AMPLIFYConfig(
+        hidden_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        intermediate_size=64,
+        max_position_embeddings=32,
+        norm_type=norm_type,
+        qk_norm=True,
+    )
+    model = AMPLIFYForSequenceClassification(config)
+    if load_checkpoint:
+        config.auto_map = register_amplify_auto_classes()
+        model.save_pretrained(tmp_path)
+        model = AutoModelForSequenceClassification.from_pretrained(
+            tmp_path, trust_remote_code=True, local_files_only=True
+        )
+    frozen = model.amplify.layers[0].input_layernorm.weight
+    frozen.requires_grad_(False)
+    groups = split_decay_parameters(model, 0.2)
+    decay_by_param = {
+        id(param): group["weight_decay"]
+        for group in groups
+        for param in group["params"]
+    }
+    assert len(decay_by_param) == sum(len(group["params"]) for group in groups)
+    assert set(decay_by_param) == {id(p) for p in model.parameters() if p.requires_grad}
+    assert id(frozen) not in decay_by_param
+    assert decay_by_param[id(model.classifier.weight)] == 0.2
+    assert decay_by_param[id(model.classifier.bias)] == 0.0
+    assert decay_by_param[id(model.amplify.embed_tokens.weight)] == 0.2
+    norms = [module for module in model.modules() if type(module).__name__ == norm_type]
+    assert len(norms) == 9  # Block pre-norms, QK norms and final encoder norm.
+    for norm in norms:
+        if norm.weight.requires_grad:
+            expected_decay = 0.2 if norm_type == "ZeroCenteredRMSNorm" else 0.0
+            assert decay_by_param[id(norm.weight)] == expected_decay
+        if getattr(norm, "bias", None) is not None:
+            assert decay_by_param[id(norm.bias)] == 0.0
+        if norm_type == "ZeroCenteredRMSNorm":
+            with torch.no_grad():
+                norm.weight.fill_(0.5)
+    optimizer = torch.optim.AdamW(groups, lr=0.1)
+    for parameter in model.parameters():
+        if parameter.requires_grad:
+            parameter.grad = torch.zeros_like(parameter)
+    optimizer.step()
+    for norm in norms:
+        if norm_type == "ZeroCenteredRMSNorm":
+            expected = 0.49 if norm.weight.requires_grad else 0.5
+        else:
+            expected = 1.0
+        torch.testing.assert_close(norm.weight, torch.full_like(norm.weight, expected))
 
 
 def test_random_candidates_are_unique_and_bounded_by_grid() -> None:
