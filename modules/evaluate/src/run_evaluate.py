@@ -2,6 +2,7 @@ import logging
 import sys
 from typing import Any, cast
 
+import torch
 from accelerate import Accelerator
 
 from modules.core.utils.config_loader import load_and_parse
@@ -64,6 +65,10 @@ def main() -> None:
     config = load_and_parse(
         path=config_paths, model_cls=EvaluationConfig, overrides=overrides or None
     )
+    torch.set_float32_matmul_precision("high" if config.tf32 else "highest")
+    torch.backends.cuda.matmul.allow_tf32 = config.tf32
+    torch.backends.cudnn.allow_tf32 = config.tf32
+    logger.info("CUDA TF32 allowed: %s", config.tf32)
     accelerator = Accelerator(
         gradient_accumulation_steps=config.steps.tune.accumulation_steps
     )

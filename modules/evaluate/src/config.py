@@ -87,6 +87,7 @@ class EvaluationConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     seed: int = 710019
+    tf32: bool = True
 
     workspace: EvaluationWorkspaceConfig
     wandb: WandbConfig = Field(default_factory=WandbConfig)

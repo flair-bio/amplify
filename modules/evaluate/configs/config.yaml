@@ -1,4 +1,5 @@
 seed: 710019
+tf32: true # allow TensorFloat-32 for CUDA FP32 operations; false restores full FP32
 
 workspace:
   dataset_name: base_dataset

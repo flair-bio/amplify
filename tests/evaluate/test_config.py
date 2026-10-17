@@ -61,7 +61,7 @@ class TestEvaluationConfig:
         assert config.cross_validation.pool_roles == ["train", "validation"]
         assert "cross_validation" not in config.steps.model_dump()
 
-    def test_feature_extraction_defaults_to_full_precision(self):
+    def test_feature_extraction_defaults_to_float32_dtype(self):
         assert LayerwiseConfig().autocast_dtype == "float32"
         assert EmbeddingCacheConfig().autocast_dtype == "float32"
         assert EmbeddingCacheConfig().dtype == "float32"
