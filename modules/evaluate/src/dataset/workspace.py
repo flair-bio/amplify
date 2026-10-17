@@ -42,6 +42,9 @@ class EvaluationWorkspaceConfig(BaseModel):
         default_factory=dict
     )  # extra task.build_model() kwargs, e.g. {"rank": 64} for contact_prediction
     base_path: str = "./eval"  # base path where the EvaluationWorkspace is stored
+    output_dir: Path | None = (
+        None  # explicit model-level output directory; dataset folders are added beneath it
+    )
     tmp_path: str | None = None  # temporary path for intermediate files
 
     @field_validator("task_type")
@@ -103,8 +106,12 @@ class EvaluationWorkspace:
             else self.model_name.replace("/", "_")
         )
 
-        base = Path(config.base_path)
-        workspace_root = base / model_save_name / dataset_save_name
+        model_output_dir = (
+            config.output_dir
+            if config.output_dir is not None
+            else Path(config.base_path) / model_save_name
+        )
+        workspace_root = model_output_dir / dataset_save_name
         self.tmp_path = (
             Path(config.tmp_path) if config.tmp_path else workspace_root / "tmp"
         )
