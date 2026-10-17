@@ -5,8 +5,6 @@ from typing import Any, Literal
 import torch
 from pydantic import BaseModel, ConfigDict, Field
 
-from modules.pretrain.src.model.modeling_amplify import ZeroCenteredRMSNorm
-
 
 class OptimizerConfig(BaseModel):
     """Strict optimizer config (``extra="forbid"`` turns YAML typos into errors)."""
@@ -62,10 +60,12 @@ def get_optimizer(
     decay_params: list[torch.nn.Parameter] = []
     no_decay_params: list[torch.nn.Parameter] = []
 
+    # HF loads checkpoint classes into a separate module. Match the norm's
+    # class name across its MRO so copies and subclasses keep the decay policy.
     decay_norm_weights = {
         id(module.weight)
         for module in model.modules()
-        if isinstance(module, ZeroCenteredRMSNorm)
+        if any(cls.__name__ == "ZeroCenteredRMSNorm" for cls in type(module).__mro__)
     }
 
     # Separation logic:
