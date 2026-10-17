@@ -258,6 +258,7 @@ Append these overrides to any launch command, or put them in an overlay YAML.
 | Classical probe on cached embeddings | Add `modules/evaluate/configs/tuning/random_forest.yaml` after the dataset overlay |
 | Disable control conditions | `steps.predict.controls=[]` |
 | Write results elsewhere | `workspace.base_path=/path/to/eval` |
+| Set the model output directory independently of its checkpoint path | `workspace.output_dir=/path/to/eval/01_baseline_checkpoint_100000` |
 
 ### New dataset, task, or model overlay
 
