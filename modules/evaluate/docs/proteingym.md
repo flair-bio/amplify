@@ -118,6 +118,12 @@ each source residue retains its token and coordinate. Tokenizers that cannot
 represent one token per residue raise an error rather than silently shifting
 mutation positions.
 
+For indels, sequences longer than `max_length` use the leftmost residues that
+fit alongside the tokenizer's added special tokens. The crop is deterministic;
+BOS/CLS and EOS remain context and are never scored as residues. This limits
+indel scoring to the retained prefix, rather than a full-sequence sliding-window
+pseudo-likelihood.
+
 The zero-shot runner can also score reference baselines with
 `baselines: [random, blosum62, random_init_trunk]`. `blosum62` is a simple
 substitution-only matrix baseline, not ProteinGym's official MSA-derived
