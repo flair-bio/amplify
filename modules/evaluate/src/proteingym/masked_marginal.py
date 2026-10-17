@@ -70,9 +70,7 @@ def _residue_token_indices(
         "input_ids"
     ][0].tolist()
     if len(residue_ids) != len(sequence):
-        raise ValueError(
-            "ProteinGym substitution scoring requires one token per residue"
-        )
+        raise ValueError("ProteinGym scoring requires one token per residue")
     for start in range(len(full_ids) - len(residue_ids) + 1):
         if full_ids[start : start + len(residue_ids)] == residue_ids:
             return list(range(start, start + len(residue_ids)))

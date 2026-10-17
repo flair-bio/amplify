@@ -113,6 +113,11 @@ uv run modules/evaluate/src/run_proteingym_zero_shot.py \
     model_id=flair-bio/amplify-120m
 ```
 
+The zero-shot runner disables ambiguous-residue removal (for example, `U`) so
+each source residue retains its token and coordinate. Tokenizers that cannot
+represent one token per residue raise an error rather than silently shifting
+mutation positions.
+
 The zero-shot runner can also score reference baselines with
 `baselines: [random, blosum62, random_init_trunk]`. `blosum62` is a simple
 substitution-only matrix baseline, not ProteinGym's official MSA-derived
