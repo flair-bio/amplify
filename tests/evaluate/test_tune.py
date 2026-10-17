@@ -6,6 +6,7 @@ import pytest
 import torch
 from accelerate import Accelerator
 from torch import nn
+from torch.utils.data import DataLoader
 
 from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
 from modules.evaluate.src.config import LayerwiseConfig
@@ -19,8 +20,10 @@ from modules.evaluate.src.steps.tune import (
     _improves,
 )
 from modules.evaluate.src.utils.embed import EmbeddingCache, EmbeddingCacheConfig
-from modules.evaluate.src.model.heads import HeadConfig
+from modules.evaluate.src.model.heads import EmbeddingProbeHead, HeadConfig
 from modules.evaluate.src.utils.hpo import (
+    build_optimizer,
+    build_scheduler,
     checkpoint_state,
     resolve_search_direction,
     sample_candidates,
@@ -575,3 +578,70 @@ def test_cached_training_features_are_transferred_only_when_training(
 
     assert result is prepared
     prepare_split.assert_called_once_with(prepared.train_dataloader, accelerator.device)
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize(
+    "batch_size, train_batch_sizes, val_batch_sizes",
+    [(None, [4, 4, 3], [5, 5, 1]), (3, [3, 3, 3, 2], [3, 3, 3, 2])],
+)
+def test_cached_probe_batch_size_honors_loader_and_override(
+    monkeypatch, wrapped, batch_size, train_batch_sizes, val_batch_sizes
+):
+    accelerator = Accelerator(cpu=True)
+    dataset = EmbeddingDataset(
+        torch.randn(11, 4), list(range(11)), torch.arange(11) % 2
+    )
+    train_loader = DataLoader(dataset, batch_size=4)
+    val_loader = DataLoader(dataset, batch_size=5)
+    if wrapped:
+        train_loader, val_loader = accelerator.prepare(train_loader, val_loader)
+        assert train_loader.batch_size is None
+        assert train_loader.batch_sampler.batch_size == 4
+    model = EmbeddingProbeHead(4, 2, "sequence_classification")
+    prepared = PreparedArtifacts(
+        model=model,
+        tokenizer=MagicMock(),
+        train_dataloader=train_loader,
+        val_dataloader=val_loader,
+        test_dataloader=None,
+    )
+    step = TuneStep(
+        TuneConfig(
+            batch_size=batch_size,
+            max_epochs=2,
+            early_stopping_patience=None,
+            save_best_model=False,
+        )
+    )
+    optimizer_steps = []
+
+    def track_optimizer(*args, **kwargs):
+        optimizer = build_optimizer(*args, **kwargs)
+        optimizer.register_step_post_hook(lambda *args: optimizer_steps.append(None))
+        return optimizer
+
+    scheduler = MagicMock(wraps=build_scheduler)
+    forward = MagicMock(wraps=model.forward)
+    monkeypatch.setattr(
+        "modules.evaluate.src.steps.tune.build_optimizer", track_optimizer
+    )
+    monkeypatch.setattr("modules.evaluate.src.steps.tune.build_scheduler", scheduler)
+    monkeypatch.setattr(model, "forward", forward)
+    workspace = MagicMock(task_type="sequence_classification")
+    hparams = {"learning_rate": 1e-3, "weight_decay": 0.0, "max_epochs": 2}
+
+    step._train(workspace, prepared, accelerator, hparams)
+
+    assert [
+        call.kwargs["inputs_embeds"].shape[0] for call in forward.call_args_list
+    ] == train_batch_sizes * 2
+    expected_steps = len(train_batch_sizes) * 2
+    assert len(optimizer_steps) == expected_steps
+    assert scheduler.call_args.kwargs["num_training_steps"] == expected_steps
+
+    forward.reset_mock()
+    step._evaluate_validation(workspace, prepared, accelerator, "f1")
+    assert [
+        call.kwargs["inputs_embeds"].shape[0] for call in forward.call_args_list
+    ] == val_batch_sizes
