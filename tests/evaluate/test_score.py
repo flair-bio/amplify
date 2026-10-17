@@ -65,12 +65,21 @@ from .conftest import ModelFamily, build_raw_dataset_dict, build_tiny_model
 
 
 @pytest.mark.parametrize("average", ["macro", "weighted"])
-def test_multiclass_auc_resampling_matches_sklearn(average: str) -> None:
+@pytest.mark.parametrize("score_type", ["continuous", "tied", "constant"])
+def test_multiclass_auc_resampling_matches_sklearn(average: str, score_type: str) -> None:
     rng = np.random.default_rng(0)
     labels = np.repeat([0, 2, 4], [36, 18, 6])
-    probabilities = rng.uniform(0.1, 1.0, size=(len(labels), 6))
+    shape = (len(labels), 6)
+    if score_type == "continuous":
+        probabilities = rng.uniform(0.1, 1.0, size=shape)
+        control_probabilities = rng.uniform(0.1, 1.0, size=shape)
+    elif score_type == "tied":
+        probabilities = rng.integers(1, 4, size=shape).astype(float)
+        control_probabilities = rng.integers(1, 4, size=shape).astype(float)
+    else:
+        probabilities = np.ones(shape)
+        control_probabilities = np.ones(shape)
     probabilities /= probabilities.sum(axis=1, keepdims=True)
-    control_probabilities = rng.uniform(0.1, 1.0, size=probabilities.shape)
     control_probabilities /= control_probabilities.sum(axis=1, keepdims=True)
     predictions = probabilities.argmax(axis=1)
     control_predictions = control_probabilities.argmax(axis=1)

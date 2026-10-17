@@ -230,6 +230,25 @@ def spearman(predictions: Any, labels: Any, average: str) -> float:
     return float(spearmanr(predictions, labels)[0])
 
 
+def _binary_roc_auc(
+    probabilities: np.ndarray, labels: np.ndarray, sample_weight: np.ndarray | None = None
+) -> float:
+    """Weighted fraction of positive/negative pairs ranked correctly, ties half.
+
+    Inputs are finite scores, boolean labels containing both classes, and
+    positive weights, as established by the multiclass caller below.
+    """
+    order = np.argsort(probabilities, kind="stable")
+    sorted_probabilities = probabilities[order]
+    sorted_labels = labels[order]
+    weights = np.ones(len(labels)) if sample_weight is None else sample_weight[order]
+    group_starts = np.r_[0, np.flatnonzero(np.diff(sorted_probabilities)) + 1]
+    positives = np.add.reduceat(weights * sorted_labels, group_starts)
+    negatives = np.add.reduceat(weights * ~sorted_labels, group_starts)
+    concordant_pairs = positives * (np.cumsum(negatives) - 0.5 * negatives)
+    return float(concordant_pairs.sum() / (positives.sum() * negatives.sum()))
+
+
 def roc_auc(probabilities: Sequence, labels: Sequence, average: str) -> float:
     """ROC-AUC from per-class probabilities, binary or multi-class (one-vs-one).
 
@@ -275,17 +294,15 @@ def roc_auc(probabilities: Sequence, labels: Sequence, average: str) -> float:
         class_probabilities = observed_probs[:, column]
 
         # Equal total weight per class recovers the mean over class pairs.
-        class_balanced_auc = roc_auc_score(
-            binary_labels,
-            class_probabilities,
-            sample_weight=sample_weights,
+        class_balanced_auc = _binary_roc_auc(
+            class_probabilities, binary_labels, sample_weights
         )
         if average == "macro":
             auc_sum += class_balanced_auc
             continue
 
         # Weighted OVO weights each pair by its combined class support.
-        unweighted_auc = roc_auc_score(binary_labels, class_probabilities)
+        unweighted_auc = _binary_roc_auc(class_probabilities, binary_labels)
         class_count = class_counts[column]
         auc_sum += class_count * class_balanced_auc + (
             num_examples - class_count

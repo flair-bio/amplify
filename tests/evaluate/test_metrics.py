@@ -10,6 +10,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 
 from modules.evaluate.src.metrics.metrics import (
     UndefinedMetricError,
+    _binary_roc_auc,
     _mcc_score,
     average_precision,
     multilabel_mcc,
@@ -47,6 +48,25 @@ def test_multiclass_auc_with_three_observed_classes_and_one_missing():
         [0.1, 0.1, 0.7, 0.1],
     ]
     assert roc_auc(probabilities, [0, 1, 2, 0, 1, 2], "weighted") == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("score_type", ["continuous", "tied", "constant"])
+@pytest.mark.parametrize("weighted", [False, True])
+def test_binary_roc_auc_matches_sklearn(score_type: str, weighted: bool) -> None:
+    rng = np.random.default_rng(710019)
+    labels = np.repeat([False, True], [53, 7])
+    if score_type == "continuous":
+        probabilities = rng.uniform(size=len(labels))
+    elif score_type == "tied":
+        probabilities = rng.integers(0, 4, size=len(labels)).astype(float)
+    else:
+        probabilities = np.ones(len(labels))
+    weights = rng.uniform(0.01, 1.0, size=len(labels)) if weighted else None
+
+    expected = roc_auc_score(labels, probabilities, sample_weight=weights)
+    assert _binary_roc_auc(probabilities, labels, weights) == pytest.approx(
+        expected, rel=1e-12, abs=1e-12
+    )
 
 
 @pytest.mark.parametrize("average", ["macro", "weighted"])
