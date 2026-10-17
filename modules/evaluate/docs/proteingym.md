@@ -113,6 +113,11 @@ uv run modules/evaluate/src/run_proteingym_zero_shot.py \
     model_id=flair-bio/amplify-120m
 ```
 
+Both ProteinGym runners enable TF32 for CUDA FP32 operations by default
+(`tf32: true`), matching the standard evaluation runner. Append `tf32=false` to
+disable it. This controls internal CUDA computation independently of `dtype`;
+TF32 retains FP32 tensors but can change numerical scores.
+
 The zero-shot runner disables ambiguous-residue removal (for example, `U`) so
 each source residue retains its token and coordinate. Tokenizers that cannot
 represent one token per residue raise an error rather than silently shifting

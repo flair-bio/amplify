@@ -95,7 +95,7 @@ class EmbeddingCacheConfig(BaseModel):
         "float32",
         description=(
             "Precision used inside the frozen-trunk forward pass. float32 "
-            "disables autocast; reduced precision is opt-in."
+            "disables autocast; float16/bfloat16 autocast is opt-in."
         ),
     )
     normalize_before_pooling: bool = Field(
@@ -282,7 +282,8 @@ def embedding_cache_key(
     """Content hash identifying a cached embedding tensor.
 
     Every setting that changes the embedding's content is folded into the key,
-    so changing pooling or max_length cannot silently reuse stale features.
+    so changing pooling, max_length, or float32 backend precision cannot
+    silently reuse stale features.
 
     ``model_id``/``dataset_id`` alone only identify a Hub *repository*, not
     its content: since Hub revisions default to a mutable "main" branch, a
@@ -311,6 +312,8 @@ def embedding_cache_key(
             "model_fingerprint": model_fingerprint,
             "dataset_fingerprint": dataset_fingerprint,
             "autocast_dtype": autocast_dtype,
+            "float32_matmul_precision": torch.get_float32_matmul_precision(),
+            "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
             "normalize_before_pooling": normalize_before_pooling,
             "input_transform": input_transform,
             "packed": packed,

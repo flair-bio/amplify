@@ -539,6 +539,27 @@ class TestEmbeddingCacheKey:
             **{**deterministic_kwargs, "seed": 42}
         ) == embedding_cache_key(**{**deterministic_kwargs, "seed": 710019})
 
+    def test_matmul_precision_has_separate_cache_keys(self):
+        original = torch.get_float32_matmul_precision()
+        try:
+            keys = []
+            for precision in ("highest", "high", "medium"):
+                torch.set_float32_matmul_precision(precision)
+                keys.append(embedding_cache_key(**self._BASE_KWARGS))
+            assert len(set(keys)) == 3
+        finally:
+            torch.set_float32_matmul_precision(original)
+
+    def test_cudnn_tf32_has_separate_cache_keys(self):
+        original = torch.backends.cudnn.allow_tf32
+        try:
+            torch.backends.cudnn.allow_tf32 = False
+            disabled = embedding_cache_key(**self._BASE_KWARGS)
+            torch.backends.cudnn.allow_tf32 = True
+            assert embedding_cache_key(**self._BASE_KWARGS) != disabled
+        finally:
+            torch.backends.cudnn.allow_tf32 = original
+
     def test_packed_embeddings_have_separate_cache_key(self):
         assert embedding_cache_key(**self._BASE_KWARGS) != embedding_cache_key(
             **self._BASE_KWARGS, packed=True

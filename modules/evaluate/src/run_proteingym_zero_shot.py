@@ -122,6 +122,10 @@ def _run_baseline(
 
 def run(config: ProteinGymZeroShotConfig) -> dict[str, object]:
     seed_everything(config.seed)
+    torch.set_float32_matmul_precision("high" if config.tf32 else "highest")
+    torch.backends.cuda.matmul.allow_tf32 = config.tf32
+    torch.backends.cudnn.allow_tf32 = config.tf32
+    logger.info("CUDA TF32 allowed: %s", config.tf32)
     device = torch.device(
         config.device or ("cuda" if torch.cuda.is_available() else "cpu")
     )

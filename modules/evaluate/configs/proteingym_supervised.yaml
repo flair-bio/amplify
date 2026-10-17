@@ -25,6 +25,7 @@ max_length: 1024
 max_assays: null # null evaluates every sourced assay
 
 dtype: float32
+tf32: true # allow TensorFloat-32 for CUDA FP32 operations; false restores full FP32
 device: null # null selects CUDA when available, otherwise CPU
 seed: 1957723
 # Add a bootstrap standard error to summary.json when enabled.

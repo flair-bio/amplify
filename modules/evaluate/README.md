@@ -191,6 +191,15 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
     steps.score.n_samples=1000
 ```
 
+CUDA evaluation enables TensorFloat-32 by default with top-level `tf32: true`,
+matching pretraining's `trainer.tf32` convention. Append `tf32=false` to any
+standard or ProteinGym evaluation command to disable it. This controls CUDA
+FP32 matrix multiplication and cuDNN; tensor dtypes and autocast settings are
+configured separately. The setting applies to inference and probe training.
+TF32 can change numerical scores while speeding up evaluation; see [PyTorch's precision documentation](https://docs.pytorch.org/docs/2.14/generated/torch.set_float32_matmul_precision.html).
+Embedding cache keys include backend precision, so changing this setting
+recomputes embeddings instead of reusing outputs from another precision.
+
 ### Running many combinations
 
 There is no sweep driver: each invocation handles one (model, dataset, head) combination.
@@ -253,6 +262,7 @@ Append these overrides to any launch command, or put them in an overlay YAML.
 | Skip tuning and score the checkpoint as-is | `steps.mode=evaluate_as_is steps.prepare.embedding_cache.enabled=false`. For supervised tasks the head comes from the checkpoint; a pretrained-only checkpoint gets a randomly initialized head, so use this for fine-tuned checkpoints or zero-shot tasks |
 | Fine-tune the trunk and native MLP head | `steps.mode=finetune steps.prepare.embedding_cache.enabled=false`, or append `configs/tuning/mlp_finetuning.yaml` |
 | Bootstrap confidence intervals and control tests | `steps.score.bootstrap_enabled=true` |
+| Disable TF32 for CUDA FP32 operations | `tf32=false` (default: `tf32=true`) |
 | Use a generated split instead of the default | `steps.prepare.split.name=stratified` (see [Named benchmark splits](#named-benchmark-splits)) |
 | K-fold cross-validated probe scores | `cross_validation.enabled=true` (see [Cross-validation](#cross-validation)) |
 | Classical probe on cached embeddings | Add `modules/evaluate/configs/tuning/random_forest.yaml` after the dataset overlay |
@@ -273,6 +283,7 @@ All config classes are Pydantic models composed into a single `EvaluationConfig`
 
 ```
 EvaluationConfig
+├── tf32:      bool (default: true)
 ├── workspace: EvaluationWorkspaceConfig
 ├── wandb:     WandbConfig
 ├── cross_validation: CrossValidationConfig
@@ -630,7 +641,8 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
 - Features are standardized with train-split statistics
   (`steps.layerwise.standardize_features=false` disables this); regression
   targets are standardized too.
-- Extraction runs in float32; reduced precision is opt-in.
+- Extraction uses float32 tensors by default; float16/bfloat16 autocast is opt-in.
+  CUDA FP32 computation follows the top-level `tf32` setting.
 
 **Training.** All heads share `steps.tune` optimizer settings and
 `learning_rate`; each layer keeps its own best validation epoch, saved in its

@@ -31,6 +31,7 @@ class ProteinGymZeroShotConfig(BaseModel):
     max_length: int | None = 1024
     max_assays: int | None = Field(default=None, gt=0)
     dtype: ProteinGymDtype = "float32"
+    tf32: bool = True
     device: str | None = None
     seed: int = 1957723
     # Bootstrap SE of the aggregate score (see proteingym/aggregate.py); off by
@@ -92,6 +93,7 @@ class ProteinGymSupervisedConfig(BaseModel):
     max_length: int | None = 1024
     max_assays: int | None = Field(default=None, gt=0)
     dtype: ProteinGymDtype = "float32"
+    tf32: bool = True
     device: str | None = None
     seed: int = 1957723
     compute_uncertainty: bool = False
