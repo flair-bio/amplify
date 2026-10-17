@@ -1,4 +1,5 @@
 workspace:
+  default_task_type: token_classification
   dataset_name: uniprot_post_translational_modification
   dataset_repo_id: flair-bio/uniprot_post_translational_modification
   target_type: categorical

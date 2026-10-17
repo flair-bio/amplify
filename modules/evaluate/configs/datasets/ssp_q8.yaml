@@ -1,4 +1,5 @@
 workspace:
+  default_task_type: token_classification
   dataset_name: ssp_q8
   dataset_repo_id: flair-bio/biomap-research-ssp_q8
   target_type: categorical

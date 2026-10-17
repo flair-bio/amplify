@@ -1,4 +1,5 @@
 workspace:
+  default_task_type: contact_prediction
   dataset_name: contact_prediction_binary
   dataset_repo_id: flair-bio/biomap-research-contact_prediction_binary
   target_type: categorical

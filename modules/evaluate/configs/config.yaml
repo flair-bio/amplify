@@ -6,7 +6,8 @@ workspace:
   dataset_repo_id: null
   model_name: base_model
   model_repo_id: null
-  task_type: null
+  task_type: null # explicit task overlays override the dataset default
+  default_task_type: null # dataset default; run_evaluate loads its task overlay
   target_type: null # categorical or continuous
   label_format: null # scalar, per_token, multilabel, or contact_pairs
   num_labels: null # number of classes for *_classification tasks; unused (forced to 1) for sequence_regression

@@ -31,6 +31,7 @@ class EvaluationWorkspaceConfig(BaseModel):
         None  # path to HuggingFace model repo e.g. flair-bio/amplify-120m
     )
     task_type: TaskType
+    default_task_type: TaskType | None = None  # dataset default evaluation method
     target_type: Literal["categorical", "continuous"]
     label_format: Literal[
         "scalar", "per_token", "multilabel", "contact_pairs", "consensus_profile"
@@ -54,6 +55,13 @@ class EvaluationWorkspaceConfig(BaseModel):
             raise ValueError(
                 f"Unknown task_type '{value}'. Available: {available_tasks()}."
             )
+        return value
+
+    @field_validator("default_task_type")
+    @classmethod
+    def _validate_default_task_type(cls, value: str | None) -> str | None:
+        if value is not None:
+            cls._validate_task_type(value)
         return value
 
     @model_validator(mode="after")

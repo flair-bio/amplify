@@ -178,7 +178,32 @@ instead of `run_evaluate.py`; see the [ProteinGym guide](docs/proteingym.md).
 | `configs/tuning/*.yaml` | One probe/HPO overlay per `steps.tune.head.head_type` |
 | `configs/accelerate/*.yaml` | `accelerate launch` configs (e.g. single-process local runs) |
 
-The entry point is `modules/evaluate/src/run_evaluate.py`. It takes one or more YAML files, merged left-to-right (later files win), followed by optional `key=value` overrides:
+Dataset overlays declare `workspace.default_task_type`, for example
+`sequence_multilabel_classification` in `datasets/GO_bp.yaml`. When no task
+YAML is supplied, `run_evaluate.py` automatically inserts the corresponding
+`configs/tasks/<default_task_type>.yaml` immediately before the dataset overlay.
+This loads the task's training mode, embedding cache settings, and control
+conditions as well as its task type. Dataset settings, later overlays, and CLI
+overrides can still customize those defaults:
+
+```bash
+uv run accelerate launch modules/evaluate/src/run_evaluate.py \
+    modules/evaluate/configs/config.yaml \
+    modules/evaluate/configs/models/amplify_120m.yaml \
+    modules/evaluate/configs/datasets/GO_bp.yaml
+```
+
+An explicit task YAML takes precedence over the dataset default, in either
+order. This allows a contact dataset to run both `contact_prediction` and
+`categorical_jacobian`, or `uniprot_protparams` to run regression and
+`pseudo_perplexity`. Without an explicit task YAML, a CLI
+`workspace.task_type=...` selects a different task overlay. The baseline Slurm
+launcher accepts dataset-only rows plus an optional task column for extra
+methods; ProteinGym rows select their separate runner explicitly.
+
+The entry point is `modules/evaluate/src/run_evaluate.py`. Explicit YAML files
+are merged left-to-right (later files win), followed by optional `key=value`
+overrides:
 
 ```bash
 uv run accelerate launch modules/evaluate/src/run_evaluate.py \
@@ -274,7 +299,8 @@ Append these overrides to any launch command, or put them in an overlay YAML.
 
 Copy an existing file under `configs/datasets/`, `configs/tasks/`, or
 `configs/models/`. Dataset overlays set the source, target type, label format,
-and class count. Task overlays set `task_type` and task behavior. Task-specific
+class count, and `workspace.default_task_type`. Task overlays set the effective
+`task_type` and task behavior. Task-specific
 builder parameters belong in `workspace.model_kwargs`.
 
 ### Config schema

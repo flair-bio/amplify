@@ -5,11 +5,10 @@ from typing import Any, cast
 import torch
 from accelerate import Accelerator
 
-from modules.core.utils.config_loader import load_and_parse
-from modules.evaluate.src.config import EvaluationConfig
 from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.runners import cross_validation
 from modules.evaluate.src.runners.pipeline import run_pipeline
+from modules.evaluate.src.utils.config_loader import load_evaluation_config
 from modules.evaluate.src.utils.seed import seed_everything
 
 logging.basicConfig(
@@ -37,6 +36,8 @@ def main() -> None:
     One or more YAML files may be supplied; later files override earlier ones
     for shared keys.  Any ``key=value`` arguments (containing ``=``) are
     treated as OmegaConf dotlist overrides applied after YAML merging.
+    Without an explicit task overlay, workspace.default_task_type in the
+    dataset selects its task overlay; workspace.task_type can override it.
 
     Examples::
 
@@ -62,9 +63,7 @@ def main() -> None:
 
     logger.info("=== Starting Evaluation Pipeline ===")
 
-    config = load_and_parse(
-        path=config_paths, model_cls=EvaluationConfig, overrides=overrides or None
-    )
+    config = load_evaluation_config(path=config_paths, overrides=overrides or None)
     torch.set_float32_matmul_precision("high" if config.tf32 else "highest")
     torch.backends.cuda.matmul.allow_tf32 = config.tf32
     torch.backends.cudnn.allow_tf32 = config.tf32
