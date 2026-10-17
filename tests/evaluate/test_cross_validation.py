@@ -63,12 +63,12 @@ def raw_dataset(regression=False):
     )
 
 
-def plan(dataset=None, **kwargs):
+def plan(dataset=None, regression=False, **kwargs):
     return make_fold_plan(
-        raw_dataset() if dataset is None else dataset,
+        raw_dataset(regression=regression) if dataset is None else dataset,
         CrossValidationConfig(n_splits=3, inner_validation_fraction=0.25, **kwargs),
         DatasetSplitConfig(),
-        task_type="sequence_classification",
+        task_type="sequence_regression" if regression else "sequence_classification",
         sequence_column="sequence",
         label_column="targets",
         id_column="id",
@@ -261,6 +261,65 @@ def test_invalid_labels_groups_and_rare_classes():
     dataset["train"] = Dataset.from_dict(rows)
     with pytest.raises(ValueError, match="non-null"):
         plan(dataset, strategy="group_kfold", group_column="cluster")
+
+
+def test_regression_numeric_strings_produce_the_same_folds_as_numbers():
+    numeric = raw_dataset(regression=True)
+    strings = DatasetDict(
+        {
+            split: Dataset.from_dict(
+                {**data.to_dict(), "targets": [str(value) for value in data["targets"]]}
+            )
+            for split, data in numeric.items()
+        }
+    )
+    expected = plan(numeric, regression=True, strategy="kfold")
+    actual = plan(strings, regression=True, strategy="kfold")
+
+    assert actual.folds == expected.folds
+    assert actual.assignments.equals(expected.assignments)
+    assert actual.fingerprint == expected.fingerprint
+    assert sorted(index for fold in actual.folds for index in fold.test) == list(
+        range(100)
+    )
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        None,
+        True,
+        False,
+        "",
+        "invalid",
+        "nan",
+        "inf",
+        "-inf",
+        "1e309",
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        [1.0],
+    ],
+)
+def test_regression_rejects_invalid_or_nonfinite_labels(label):
+    dataset = raw_dataset(regression=True)
+    rows = dataset["train"].to_dict()
+    rows["targets"] = [label] * len(rows["targets"])
+    dataset["train"] = Dataset.from_dict(rows)
+
+    with pytest.raises(ValueError, match="finite scalars"):
+        plan(dataset, regression=True, strategy="kfold", pool_roles=["train"])
+
+
+def test_classification_still_rejects_numeric_string_labels():
+    dataset = raw_dataset()
+    rows = dataset["train"].to_dict()
+    rows["targets"] = [str(value) for value in rows["targets"]]
+    dataset["train"] = Dataset.from_dict(rows)
+
+    with pytest.raises(ValueError, match="finite scalars"):
+        plan(dataset, pool_roles=["train"])
 
 
 def test_missing_inner_class_fails_before_training():

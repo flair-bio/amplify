@@ -263,6 +263,17 @@ def make_fold_plan(
     pool, provenance = _build_pool(dataset, config, split_config, columns, id_column)
 
     sequences, label_list = pool[sequence_column], pool[label_column]
+    if not classification:
+        # Match regression collation; keep booleans for the existing validation.
+        try:
+            label_list = [
+                label if isinstance(label, bool) else float(label)
+                for label in label_list
+            ]
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(
+                f"Cross-validation labels must be finite scalars: {error}"
+            ) from error
     group_list = pool[config.group_column] if config.group_column else None
     _validate_pool(config, sequences, label_list, group_list, classification)
     labels = np.asarray(label_list)
