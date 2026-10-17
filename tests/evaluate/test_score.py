@@ -51,6 +51,197 @@ from modules.evaluate.src.utils.io import write_parquet
 from .conftest import ModelFamily, build_raw_dataset_dict, build_tiny_model
 
 
+@pytest.mark.parametrize("average", ["macro", "weighted"])
+@pytest.mark.parametrize("score_type", ["continuous", "tied", "constant"])
+def test_multiclass_auc_resampling_matches_sklearn(average: str, score_type: str) -> None:
+    rng = np.random.default_rng(0)
+    labels = np.repeat([0, 2, 4], [36, 18, 6])
+    shape = (len(labels), 6)
+    if score_type == "continuous":
+        probabilities = rng.uniform(0.1, 1.0, size=shape)
+        control_probabilities = rng.uniform(0.1, 1.0, size=shape)
+    elif score_type == "tied":
+        probabilities = rng.integers(1, 4, size=shape).astype(float)
+        control_probabilities = rng.integers(1, 4, size=shape).astype(float)
+    else:
+        probabilities = np.ones(shape)
+        control_probabilities = np.ones(shape)
+    probabilities /= probabilities.sum(axis=1, keepdims=True)
+    control_probabilities /= control_probabilities.sum(axis=1, keepdims=True)
+    predictions = probabilities.argmax(axis=1)
+    control_predictions = control_probabilities.argmax(axis=1)
+
+    def reference_auc(probabilities, labels, average):
+        observed_classes = np.unique(labels)
+        if len(observed_classes) == 2:
+            return float(
+                roc_auc_score(
+                    labels, probabilities[:, observed_classes[1]], average=average
+                )
+            )
+        observed_probs = probabilities[:, observed_classes]
+        observed_probs = observed_probs / observed_probs.sum(axis=1, keepdims=True)
+        return float(
+            roc_auc_score(
+                labels,
+                observed_probs,
+                multi_class="ovo",
+                average=average,
+                labels=observed_classes,
+            )
+        )
+
+    def evaluate(metric):
+        task = get_task("sequence_classification")
+        task.metrics = {"roc_auc": metric}
+        rng = np.random.default_rng(710019)
+        resampled_scores = []
+        for _ in range(20):
+            indices = bootstrap_indices(len(labels), None, rng)
+            scores = full_scores(
+                task,
+                predictions[indices],
+                labels[indices],
+                probabilities[indices],
+                ["roc_auc"],
+                average,
+            )
+            resampled_scores.append(scores["roc_auc"])
+        observed_scores = full_scores(
+            task, predictions, labels, probabilities, ["roc_auc"], average
+        )
+        p_values = permutation_p_values(
+            task,
+            observed_trained=observed_scores,
+            trained_predictions=predictions,
+            trained_labels=labels,
+            trained_probabilities=probabilities,
+            control_predictions=control_predictions,
+            control_labels=labels,
+            control_probabilities=control_probabilities,
+            metric_names=["roc_auc"],
+            n_permutations=32,
+            rng=rng,
+            average=average,
+        )
+        return ci_stats(np.asarray(resampled_scores), 0.025, 0.975), p_values
+
+    expected_ci, expected_p_values = evaluate(reference_auc)
+    actual_ci, actual_p_values = evaluate(roc_auc)
+    assert actual_ci == pytest.approx(expected_ci, rel=1e-12, abs=1e-12)
+    assert actual_p_values == expected_p_values
+
+
+@pytest.mark.parametrize("average", ["macro", "weighted"])
+def test_multilabel_average_precision_resampling_matches_sklearn(average: str) -> None:
+    rng = np.random.default_rng(0)
+    labels = (rng.random((60, 12)) < rng.uniform(0.01, 0.6, 12)).astype(float)
+    probabilities = rng.integers(0, 8, size=labels.shape).astype(float) / 7
+    control_probabilities = rng.integers(0, 8, size=labels.shape).astype(float) / 7
+    predictions = probabilities > 0.5
+    control_predictions = control_probabilities > 0.5
+
+    def reference_average_precision(probabilities, labels, average):
+        return float(average_precision_score(labels, probabilities, average=average))
+
+    def evaluate(metric):
+        task = get_task("sequence_multilabel_classification")
+        task.metrics = {"average_precision": metric}
+        rng = np.random.default_rng(710019)
+        resampled_scores = []
+        for _ in range(20):
+            indices = bootstrap_indices(len(labels), None, rng)
+            scores = full_scores(
+                task,
+                predictions[indices],
+                labels[indices],
+                probabilities[indices],
+                ["average_precision"],
+                average,
+            )
+            resampled_scores.append(scores["average_precision"])
+        observed_scores = full_scores(
+            task, predictions, labels, probabilities, ["average_precision"], average
+        )
+        p_values = permutation_p_values(
+            task,
+            observed_trained=observed_scores,
+            trained_predictions=predictions,
+            trained_labels=labels,
+            trained_probabilities=probabilities,
+            control_predictions=control_predictions,
+            control_labels=labels,
+            control_probabilities=control_probabilities,
+            metric_names=["average_precision"],
+            n_permutations=32,
+            rng=rng,
+            average=average,
+        )
+        return ci_stats(np.asarray(resampled_scores), 0.025, 0.975), p_values
+
+    expected_ci, expected_p_values = evaluate(reference_average_precision)
+    actual_ci, actual_p_values = evaluate(average_precision)
+    assert actual_ci == pytest.approx(expected_ci, rel=1e-12, abs=1e-12)
+    assert actual_p_values == expected_p_values
+
+
+@pytest.mark.parametrize("average", ["macro", "weighted"])
+def test_multilabel_mcc_resampling_matches_original(average: str) -> None:
+    rng = np.random.default_rng(0)
+    labels = (rng.random((60, 12)) < rng.uniform(0.01, 0.6, 12)).astype(float)
+    predictions = (rng.random(labels.shape) < 0.3).astype(int)
+    control_predictions = (rng.random(labels.shape) < 0.3).astype(int)
+
+    def reference_multilabel_mcc(predictions, labels, average):
+        label_scores = np.asarray(
+            [
+                _mcc_score(labels[:, column], predictions[:, column])
+                for column in range(labels.shape[1])
+            ]
+        )
+        support = labels.sum(axis=0, dtype=float)
+        if average == "macro" or support.sum() == 0:
+            return float(np.mean(label_scores))
+        return float(np.average(label_scores, weights=support))
+
+    def evaluate(metric):
+        task = get_task("sequence_multilabel_classification")
+        task.metrics = {"multilabel_mcc": metric}
+        rng = np.random.default_rng(710019)
+        resampled_scores = []
+        for _ in range(20):
+            indices = bootstrap_indices(len(labels), None, rng)
+            scores = full_scores(
+                task,
+                predictions[indices],
+                labels[indices],
+                None,
+                ["multilabel_mcc"],
+                average,
+            )
+            resampled_scores.append(scores["multilabel_mcc"])
+        observed_scores = full_scores(
+            task, predictions, labels, None, ["multilabel_mcc"], average
+        )
+        p_values = permutation_p_values(
+            task,
+            observed_trained=observed_scores,
+            trained_predictions=predictions,
+            trained_labels=labels,
+            trained_probabilities=None,
+            control_predictions=control_predictions,
+            control_labels=labels,
+            control_probabilities=None,
+            metric_names=["multilabel_mcc"],
+            n_permutations=32,
+            rng=rng,
+            average=average,
+        )
+        return ci_stats(np.asarray(resampled_scores), 0.025, 0.975), p_values
+
+    assert evaluate(multilabel_mcc) == evaluate(reference_multilabel_mcc)
+
+
 def test_dense_bootstrap_resample_keeps_numpy_arrays() -> None:
     task = MagicMock(is_ragged=False)
     task.compute_metrics.return_value = {"accuracy": 0.5}
