@@ -620,6 +620,16 @@ class TuneStep:
             }
         )
 
+    def _cached_batch_size(self, dataloader: Any) -> int:
+        """Honor the tuning override or inherit the prepared loader's batch size."""
+        # Accelerate stores the batch size on the sampler of wrapped loaders.
+        return (
+            self.config.batch_size
+            or getattr(dataloader, "batch_size", None)
+            or getattr(getattr(dataloader, "batch_sampler", None), "batch_size", None)
+            or 128
+        )
+
     @staticmethod
     def _cached_embedding_split(
         dataloader: Any, device: torch.device
@@ -959,11 +969,7 @@ class TuneStep:
             extra_kwargs=self.config.optimizer_kwargs,
         )
         max_epochs = hparams["max_epochs"]
-        batch_size = (
-            self.config.batch_size
-            or getattr(train_dataloader, "batch_size", None)
-            or 128
-        )
+        batch_size = self._cached_batch_size(train_dataloader)
         steps_per_epoch = (
             math.ceil(cached_train[0].shape[0] / batch_size)
             if cached_train is not None
@@ -1167,7 +1173,7 @@ class TuneStep:
             predictions_tensors: list[torch.Tensor] = []
             probabilities_tensors: list[torch.Tensor] = []
             with torch.inference_mode():
-                batch_size = self.config.batch_size or 128
+                batch_size = self._cached_batch_size(prepared.val_dataloader)
                 for batch in self._cached_batches(
                     cached_val, batch_size, shuffle=False
                 ):
