@@ -148,6 +148,19 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
         steps.tune.metric_aggregation = steps.score.metric_aggregation
 
     search_config = steps.tune.hyperparameter_search
+    if (
+        search_config.enabled
+        and search_config.search_space.hidden_size is not None
+        and (
+            steps.mode != "tune_probe"
+            or steps.tune.head.head_type != "mlp"
+            or not steps.prepare.embedding_cache.enabled
+            or steps.layerwise.enabled
+        )
+    ):
+        raise ValueError(
+            "hidden_size search requires a cached MLP probe in tune_probe mode."
+        )
     if search_config.enabled and search_config.direction == "maximize":
         # An explicit 'maximize' for a lower-is-better metric would select the
         # WORST trial as "best" with no useful result.

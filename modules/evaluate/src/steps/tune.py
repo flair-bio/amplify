@@ -19,7 +19,7 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 from accelerate.utils import broadcast, broadcast_object_list
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt
 from torch import nn
 
 from modules.evaluate.src.dataset.workspace import (
@@ -88,6 +88,11 @@ class HyperparameterSearchSpaceConfig(BaseModel):
     learning_rate: list[float] = [5e-4, 1e-4, 5e-5, 1e-5]
     max_epochs: list[int] = [5, 10, 20]
     weight_decay: list[float] = [0.0, 1e-4, 1e-3]
+    hidden_size: list[PositiveInt] | None = Field(
+        None,
+        min_length=1,
+        description="Optional hidden widths for cached MLP probes; null keeps head.hidden_size.",
+    )
 
 
 class HyperparameterSearchConfig(BaseModel):
@@ -229,6 +234,20 @@ class TuneStep:
                 "TuneStep requires a train_dataloader, but the Prepare step "
                 "did not produce one (no 'train' split in the dataset)."
             )
+        search = self.config.hyperparameter_search
+        if (
+            search.enabled
+            and search.search_space.hidden_size is not None
+            and (
+                self.train_trunk
+                or self.config.head.head_type != "mlp"
+                or not isinstance(prepared.model, EmbeddingProbeHead)
+                or find_embedding_dataset(prepared.train_dataloader) is None
+            )
+        ):
+            raise ValueError(
+                "hidden_size search requires a cached MLP probe in tune_probe mode."
+            )
         if isinstance(prepared.model, LayerwiseProbeModel):
             return self._run_layerwise(workspace, prepared, accelerator, seed, controls)
 
@@ -303,7 +322,9 @@ class TuneStep:
             }
             self._train(workspace, prepared, accelerator, best_hparams)
 
-        if self.config.variance_seeds and cached_probe is not None:
+        # Width search can replace the head with a different architecture.
+        model = prepared.model
+        if self.config.variance_seeds and cached_probe:
             self._report_torch_seed_variance(
                 workspace, prepared, accelerator, best_hparams
             )
@@ -1254,6 +1275,7 @@ class TuneStep:
                 space.learning_rate,
                 space.weight_decay,
                 space.max_epochs,
+                space.hidden_size or [None],
             )
         )
 
@@ -1277,7 +1299,18 @@ class TuneStep:
                     n_trials,
                     len(combos),
                 )
-            candidates = sample_candidates(combos, n_trials, seed)
+            if space.hidden_size is None:
+                candidates = sample_candidates(combos, n_trials, seed)
+            else:
+                shuffled = sample_candidates(combos, len(combos), seed)
+                # Cover each width before spending the remaining trial budget.
+                first_by_width = {}
+                for candidate in shuffled:
+                    first_by_width.setdefault(candidate[3], candidate)
+                starters = list(first_by_width.values())
+                candidates = (
+                    starters + [item for item in shuffled if item not in starters]
+                )[:n_trials]
 
         return [
             {
@@ -1285,8 +1318,9 @@ class TuneStep:
                 "weight_decay": wd,
                 "max_epochs": max_epochs,
                 "seed": seed,
+                **({"hidden_size": hidden_size} if hidden_size is not None else {}),
             }
-            for lr, wd, max_epochs in candidates
+            for lr, wd, max_epochs, hidden_size in candidates
         ]
 
     def _search_hyperparameters(
@@ -1303,24 +1337,44 @@ class TuneStep:
 
         model = accelerator.unwrap_model(prepared.model)
         initial_state = checkpoint_state(model)
+        initial_model = model
 
         best_score: float | None = None
         best_hparams: dict[str, Any] | None = None
         best_state: dict[str, Any] | None = None
+        best_model = model
 
         def consider(hparams: dict[str, Any], score: float) -> bool:
-            nonlocal best_score, best_hparams, best_state
+            nonlocal best_score, best_hparams, best_state, best_model
             is_better = best_score is None or (
                 score > best_score if direction == "maximize" else score < best_score
             )
             if is_better:
                 best_score, best_hparams = score, hparams
                 best_state = checkpoint_state(model)
+                best_model = model
             return is_better
 
         def run_trial(
             hparams: dict[str, Any], trial: Any = None, prune_enabled: bool = False
         ) -> float:
+            nonlocal model
+            if space.hidden_size is not None:
+                assert isinstance(initial_model, EmbeddingProbeHead)
+                # Match initialization across trials of the same width, then
+                # reset the training RNG below so width cannot alter batch order.
+                torch.manual_seed(hparams["seed"])
+                model = EmbeddingProbeHead(
+                    initial_model.embedding_size,
+                    initial_model.num_labels,
+                    initial_model.task_type,
+                    probe_hidden_size=hparams["hidden_size"],
+                    standardize_features=initial_model.standardize_features,
+                ).to(initial_model.classifier.weight)
+                if initial_model.standardize_features:
+                    model.feature_mean.copy_(initial_model.feature_mean)
+                    model.feature_std.copy_(initial_model.feature_std)
+                prepared.model = model
             if "seed" in hparams:
                 torch.manual_seed(hparams["seed"])
                 # The train dataloader shuffles via its own torch.Generator
@@ -1331,7 +1385,8 @@ class TuneStep:
                 train_generator = getattr(prepared.train_dataloader, "generator", None)
                 if train_generator is not None:
                     train_generator.manual_seed(hparams["seed"])
-            load_checkpoint_state(model, initial_state)
+            if space.hidden_size is None:
+                load_checkpoint_state(model, initial_state)
             try:
                 training_score = self._train(
                     workspace,
@@ -1424,6 +1479,10 @@ class TuneStep:
                     }
                 else:
                     hparams = None
+                if hparams is not None and space.hidden_size is not None:
+                    hparams["hidden_size"] = trial.suggest_categorical(
+                        "hidden_size", space.hidden_size
+                    )
                 if (
                     self._cached_embedding_split(
                         prepared.train_dataloader, accelerator.device
@@ -1441,6 +1500,18 @@ class TuneStep:
                 return score
 
             study = create_optuna_study(direction, seed, search_config.n_trials)
+            if space.hidden_size is not None:
+                # These initial trials count toward n_trials and compare widths
+                # with the same training settings before adaptive sampling.
+                for hidden_size in space.hidden_size:
+                    study.enqueue_trial(
+                        {
+                            "hidden_size": hidden_size,
+                            "learning_rate": space.learning_rate[0],
+                            "weight_decay": space.weight_decay[0],
+                            "max_epochs": space.max_epochs[0],
+                        }
+                    )
             study.optimize(objective, n_trials=search_config.n_trials)
 
         logger.info(
@@ -1450,5 +1521,7 @@ class TuneStep:
             best_score,
         )
         assert best_hparams is not None and best_state is not None  # >= 1 trial run
-        load_checkpoint_state(model, best_state)
+        load_checkpoint_state(best_model, best_state)
+        if space.hidden_size is not None:
+            prepared.model = best_model
         return best_hparams

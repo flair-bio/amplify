@@ -434,11 +434,22 @@ dataloaders.
 | `save_best_model` | `true` | Persist the best model + tokenizer to `workspace.model_path` after tuning |
 | `variance_seeds` | `[]` | Optional extra seeds for logging validation-metric mean/std; diagnostic only and supported for cached-embedding probes |
 | `hyperparameter_search.enabled` | `false` | Enable hyperparameter search instead of a single fixed-config run |
-| `hyperparameter_search.n_trials` | `5` | Number of trials |
+| `hyperparameter_search.n_trials` | `5` | Total trial budget for BOHB/random; grid evaluates every combination |
 | `hyperparameter_search.direction` | `null` | `maximize` or `minimize` the target metric; inferred from the metric when omitted |
 | `hyperparameter_search.metric` | `null` | Task-specific default metric unless overridden |
 | `hyperparameter_search.search_pattern` | `bohb` | `bohb` (Optuna TPE sampler with median pruning), `random`, or `grid` |
 | `hyperparameter_search.search_space.*` | see [`configs/config.yaml`](configs/config.yaml) | Candidate values for `learning_rate`, `max_epochs`, and `weight_decay`; probe batch size is configured separately with `steps.tune.batch_size` |
+| `hyperparameter_search.search_space.hidden_size` | `null` | Optional hidden widths for cached MLP probes; `null` keeps the fixed `head.hidden_size` |
+
+`configs/tuning/mlp.yaml` searches hidden widths `[128, 256, 512, 1024]`
+jointly with learning rate, weight decay, and epochs in 24 trials total. BOHB
+and random search cover every width before further sampling when the trial
+budget permits; grid search evaluates every combination. Width search requires
+cached MLP probes.
+Candidates reuse training-only feature standardization and are selected by the
+validation metric. The winning architecture and weights are retained for test
+prediction and saved together. With no width search configured, the fixed
+`head.hidden_size` behavior is unchanged.
 
 For classical `head_type` values, put fixed estimator settings in
 `head.hyperparameters` and swept dimensions in `head.search_space`. Every

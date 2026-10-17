@@ -103,6 +103,7 @@ steps:
       direction: null # inferred from the target metric when omitted
       search_pattern: bohb # one of bohb (Optuna TPE + median pruning), random, grid
       search_space:
+        hidden_size: null # optional cached-MLP widths; null keeps head.hidden_size
         learning_rate: [5e-4, 1e-4, 5e-5, 1e-5]
         max_epochs: [5, 10, 20]
         weight_decay: [0, 1e-4, 1e-3]
