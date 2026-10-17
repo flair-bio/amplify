@@ -87,6 +87,14 @@ def full_scores(
     """
     flat_predictions = task.flatten_for_metrics(predictions)
     flat_labels = task.flatten_for_metrics(labels)
+    if task.name in {
+        "sequence_classification",
+        "sequence_multilabel_classification",
+        "token_classification",
+    }:
+        # Reuse the arrays instead of converting Python lists for every metric.
+        flat_predictions = np.asarray(flat_predictions)
+        flat_labels = np.asarray(flat_labels)
     task.validate_metric_names(metric_names)
 
     scores: dict[str, float] = {}

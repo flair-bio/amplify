@@ -849,3 +849,228 @@ class TestBenjaminiHochberg:
 
     def test_empty_input(self):
         assert benjamini_hochberg([]) == []
+
+
+@pytest.fixture
+def contact_predict_output():
+    predictions = [
+        {"scores": [0.5, 0.5, 0.8, 0.1], "separations": [6, 11, 12, 24]},
+        {"scores": [0.2, 0.9, 0.4], "separations": [6, 23, 30]},
+        {"scores": [], "separations": []},
+        {"scores": [0.7], "separations": [6]},
+    ]
+    labels = [
+        {"length": 13, "values": [1, 0, 1, 0]},
+        {"length": 3, "values": [0, 1, 1]},
+        {"length": 10, "values": []},
+        {"length": 0, "values": [1]},
+    ]
+    ids = ["a", "a", "b", "c"]
+    return PredictOutput(
+        metadata=EvaluationMetadata(
+            model_name="toy-model",
+            dataset_name="toy_dataset",
+            task_type="contact_prediction",
+        ),
+        predictions=pl.DataFrame(
+            {
+                "id": ids,
+                "prediction": predictions,
+                "label": labels,
+            }
+        ),
+        controls={
+            name: pl.DataFrame(
+                {
+                    "id": ids,
+                    "prediction": [
+                        {
+                            "scores": [value] * len(row["scores"]),
+                            "separations": row["separations"],
+                        }
+                        for row in predictions
+                    ],
+                }
+            )
+            for name, value in (("untrained", 0.25), ("separation_prior", 0.5))
+        },
+        requested_controls=["untrained", "separation_prior", "scrambled_labels"],
+    )
+
+
+@pytest.mark.parametrize("two_sided", [False, True])
+@pytest.mark.parametrize("grouped", [False, True])
+def test_cached_contact_permutations_match_predictions(
+    contact_predict_output, two_sided, grouped
+):
+    task = get_task("contact_prediction")
+    frame = contact_predict_output.predictions
+    predictions = as_indexable_array(frame["prediction"].to_list(), True)
+    labels = as_indexable_array(frame["label"].to_list(), True)
+    # Use different valid-bin masks and labels between conditions.
+    control_predictions = predictions[::-1]
+    control_labels = labels[::-1]
+    metric_names = task.default_metrics()
+    trained_scores = task.compute_per_example_metrics(predictions, labels, metric_names)
+    control_scores = task.compute_per_example_metrics(
+        control_predictions, control_labels, metric_names
+    )
+    observed = full_scores(task, predictions, labels, None, metric_names, "macro")
+    groups = id_groups(frame["id"].to_list()) if grouped else None
+
+    def compare(cached):
+        return permutation_p_values(
+            task,
+            observed,
+            predictions,
+            labels,
+            None,
+            control_predictions,
+            control_labels,
+            None,
+            metric_names,
+            32,
+            np.random.default_rng(123),
+            "macro",
+            groups=groups,
+            two_sided=two_sided,
+            trained_per_example_scores=trained_scores if cached else None,
+            control_per_example_scores=control_scores if cached else None,
+        )
+
+    assert compare(True) == compare(False)
+    with pytest.raises(ValueError, match="Both conditions"):
+        permutation_p_values(
+            task,
+            observed,
+            predictions,
+            labels,
+            None,
+            control_predictions,
+            control_labels,
+            None,
+            metric_names,
+            1,
+            np.random.default_rng(123),
+            "macro",
+            trained_per_example_scores=trained_scores,
+        )
+
+
+@pytest.mark.parametrize("bootstrap_enabled", [False, True])
+@pytest.mark.parametrize("degenerate", [False, True])
+def test_contact_score_cache_preserves_outputs_and_avoids_recomputation(
+    tmp_path, monkeypatch, contact_predict_output, bootstrap_enabled, degenerate
+):
+    task_type = type(get_task("contact_prediction"))
+    if degenerate:
+        # None of these metrics has an eligible pair in the chosen bin.
+        frame = contact_predict_output.predictions
+        contact_predict_output.predictions = frame.with_columns(
+            pl.Series(
+                "prediction",
+                [
+                    {"scores": row["scores"], "separations": [1] * len(row["scores"])}
+                    for row in frame["prediction"].to_list()
+                ],
+            )
+        )
+    config = ScoreConfig(
+        bootstrap_enabled=bootstrap_enabled,
+        n_samples=16,
+        n_permutations=16,
+    )
+
+    def run(name):
+        workspace = get_evaluation_workspace(
+            EvaluationWorkspaceConfig(
+                model_name="toy-model",
+                dataset_name="toy_dataset",
+                task_type="contact_prediction",
+                target_type="categorical",
+                label_format="contact_pairs",
+                base_path=str(tmp_path / name),
+            )
+        )
+        workspace.setup_directories()
+        return ScoreStep(config).run(
+            workspace, seed=123, predict_result=contact_predict_output
+        )
+
+    with monkeypatch.context() as uncached:
+        uncached.setattr(
+            task_type, "compute_per_example_metrics", lambda *args, **kwargs: None
+        )
+        expected = run("uncached")
+
+    metric_spies = {
+        name: MagicMock(wraps=metric) for name, metric in task_type.metrics.items()
+    }
+    monkeypatch.setattr(task_type, "metrics", metric_spies)
+    actual = run("cached")
+
+    np.testing.assert_equal(actual.scores, expected.scores)
+    if bootstrap_enabled:
+        assert actual.resamples.equals(expected.resamples)
+        np.testing.assert_equal(
+            actual.confidence_intervals, expected.confidence_intervals
+        )
+        np.testing.assert_equal(
+            actual.control_comparisons, expected.control_comparisons
+        )
+    actual_long = pl.read_parquet(actual.long_path)
+    expected_long = pl.read_parquet(expected.long_path)
+    assert actual_long.equals(expected_long)
+    manifest = (
+        json.loads(actual.summary_path.read_text()) if bootstrap_enabled else None
+    )
+    if manifest is not None:
+        assert "bootstrap" in manifest
+    # One call per protein, metric, and condition, independent of resamples.
+    conditions = 4 if bootstrap_enabled else 1
+    for metric in metric_spies.values():
+        assert (
+            metric.call_count == contact_predict_output.predictions.height * conditions
+        )
+
+
+@pytest.mark.parametrize(
+    "task_name",
+    [
+        "sequence_classification",
+        "sequence_multilabel_classification",
+        "token_classification",
+    ],
+)
+@pytest.mark.parametrize("average", ["macro", "weighted"])
+def test_classification_scoring_preserves_list_metrics(task_name, average):
+    task = get_task(task_name)
+    rng = np.random.default_rng(17)
+    probabilities = None
+    if task_name == "sequence_multilabel_classification":
+        labels = rng.integers(0, 2, size=(12, 4)).tolist()
+        probabilities = rng.random((12, 4)).tolist()
+        predictions = (np.asarray(probabilities) > 0.5).astype(int).tolist()
+    elif task_name == "token_classification":
+        labels = [[0, 2], [], [1, 2, 0], [2]]
+        predictions = [[0, 1], [], [2, 2, 0], [0]]
+    else:
+        labels = [0, 2, 1, 0, 1, 2]
+        probabilities = rng.random((len(labels), 3))
+        probabilities /= probabilities.sum(axis=1, keepdims=True)
+        predictions = probabilities.argmax(axis=1).tolist()
+        probabilities = probabilities.tolist()
+
+    metric_names = task.default_metrics()
+    expected = task.compute_metrics(
+        task.flatten_for_metrics(predictions),
+        task.flatten_for_metrics(labels),
+        metric_names,
+        average,
+        probabilities,
+    )
+    actual = full_scores(
+        task, predictions, labels, probabilities, metric_names, average
+    )
+
+    assert actual == expected
