@@ -234,8 +234,16 @@ def permutation_p_values(
             perm_control_preds = np.where(
                 prediction_swap, trained_predictions, control_predictions
             )
-            perm_trained_labels = np.where(label_swap, control_labels, trained_labels)
-            perm_control_labels = np.where(label_swap, trained_labels, control_labels)
+            # Shared labels are unchanged by a paired swap.
+            if trained_labels is control_labels:
+                perm_trained_labels = perm_control_labels = trained_labels
+            else:
+                perm_trained_labels = np.where(
+                    label_swap, control_labels, trained_labels
+                )
+                perm_control_labels = np.where(
+                    label_swap, trained_labels, control_labels
+                )
             if has_probs:
                 swap_2d = swap[:, None]
                 perm_trained_probs = np.where(
