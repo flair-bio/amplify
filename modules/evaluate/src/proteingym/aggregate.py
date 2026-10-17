@@ -196,6 +196,9 @@ def bootstrap_standard_error_by_category(
     once); a single-model run has no other models to be relative to, so this
     reports the SE of the model's own aggregate score directly.
     """
+    assay_results = assay_results.filter(pl.col(score_column).is_finite())
+    if assay_results.is_empty():
+        return float("nan")
     per_protein = (
         assay_results.group_by(["coarse_selection_type", "uniprot_id"])
         .agg(pl.col(score_column).mean())
@@ -229,15 +232,20 @@ def aggregate_proteingym_scores(
 
     ``assay_results`` must have columns ``dms_id``, ``uniprot_id``,
     ``coarse_selection_type``, ``score_column`` (Spearman or AUC values --
-    whichever ``compute_assay_metric`` returned for these assays).
+    whichever ``compute_assay_metric`` returned for these assays). Undefined
+    metrics are excluded, matching the official pandas means. Clinical
+    substitutions use one gene per ID and a single Clinical category, so this
+    reduces to an equal mean of the valid per-gene AUCs.
     """
+    assay_results = assay_results.filter(pl.col(score_column).is_finite())
     per_protein = assay_results.group_by(["coarse_selection_type", "uniprot_id"]).agg(
         pl.col(score_column).mean()
     )
     per_category = per_protein.group_by("coarse_selection_type").agg(
         pl.col(score_column).mean()
     )
-    overall = float(per_category[score_column].mean())
+    mean = per_category[score_column].mean()
+    overall = float(mean) if mean is not None else float("nan")
     summary: dict[str, object] = {
         "overall": overall,
         "per_category": dict(
