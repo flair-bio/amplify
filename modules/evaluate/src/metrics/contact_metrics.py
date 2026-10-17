@@ -32,23 +32,51 @@ _DECILES: tuple[float, ...] = tuple(d / 10 for d in range(1, 11))
 
 def _iter_rows(
     predictions: Any, labels: Any
-) -> Iterator[tuple[int, list[float], list[int], list[int]]]:
+) -> Iterator[tuple[int, np.ndarray, np.ndarray, np.ndarray]]:
     """Yield aligned sequence length, scores, separations, and labels per row."""
     for pred_row, label_row in zip(predictions, labels):
         if not isinstance(pred_row, dict):
             yield (
                 int(label_row[0]),
-                [float(score) for score, _ in pred_row[1:]],
-                [int(sep) for _, sep in pred_row[1:]],
-                [int(value) for value in label_row[1:]],
+                np.asarray([score for score, _ in pred_row[1:]], dtype=float),
+                np.asarray([sep for _, sep in pred_row[1:]], dtype=int),
+                np.asarray(label_row[1:], dtype=int),
             )
             continue
         yield (
             int(label_row["length"]),
-            [float(score) for score in pred_row["scores"]],
-            [int(sep) for sep in pred_row["separations"]],
-            [int(value) for value in label_row["values"]],
+            np.asarray(pred_row["scores"], dtype=float),
+            np.asarray(pred_row["separations"], dtype=int),
+            np.asarray(label_row["values"], dtype=int),
         )
+
+
+def _ranked_values(
+    scores: np.ndarray,
+    separations: np.ndarray,
+    values: np.ndarray,
+    min_sep: int,
+    max_sep: int | None,
+) -> np.ndarray:
+    """Rank labels within a separation bin, retaining input order for ties."""
+    size = min(len(scores), len(separations), len(values))
+    scores, separations, values = scores[:size], separations[:size], values[:size]
+    mask = separations >= min_sep
+    if max_sep is not None:
+        mask &= separations < max_sep
+    scores, values = scores[mask], values[mask]
+    if np.isnan(scores).any():
+        # Python's ordering of NaNs depends on the original row order.
+        return np.asarray(
+            [
+                value
+                for _, value in sorted(
+                    zip(scores, values), key=lambda item: item[0], reverse=True
+                )
+            ],
+            dtype=int,
+        )
+    return values[np.argsort(-scores, kind="stable")]
 
 
 def precision_at_l(
@@ -65,16 +93,11 @@ def precision_at_l(
     ``[min_sep, max_sep)``."""
     precisions = []
     for length, scores, separations, values in _iter_rows(predictions, labels):
-        candidates = [
-            (score, label)
-            for score, sep, label in zip(scores, separations, values)
-            if sep >= min_sep and (max_sep is None or sep < max_sep)
-        ]
-        if not candidates or length <= 0:
+        ranked = _ranked_values(scores, separations, values, min_sep, max_sep)
+        if not len(ranked) or length <= 0:
             continue
         k = max(1, round(length / fraction))
-        top = sorted(candidates, key=lambda item: item[0], reverse=True)[:k]
-        precisions.append(sum(label for _, label in top) / len(top))
+        precisions.append(float(ranked[:k].mean()))
     return float(np.mean(precisions)) if precisions else float("nan")
 
 
@@ -94,19 +117,13 @@ def contact_range_auc(
     """
     per_sequence_means = []
     for length, scores, separations, values in _iter_rows(predictions, labels):
-        candidates = [
-            (score, label)
-            for score, sep, label in zip(scores, separations, values)
-            if sep >= min_sep and (max_sep is None or sep < max_sep)
-        ]
-        if not candidates or length <= 0:
+        ranked = _ranked_values(scores, separations, values, min_sep, max_sep)
+        if not len(ranked) or length <= 0:
             continue
-        ranked = sorted(candidates, key=lambda item: item[0], reverse=True)
         decile_precisions = []
         for decile in _DECILES:
             k = max(1, round(length * decile))
-            top = ranked[:k]
-            decile_precisions.append(sum(label for _, label in top) / len(top))
+            decile_precisions.append(float(ranked[:k].mean()))
         per_sequence_means.append(float(np.mean(decile_precisions)))
     return float(np.mean(per_sequence_means)) if per_sequence_means else float("nan")
 
