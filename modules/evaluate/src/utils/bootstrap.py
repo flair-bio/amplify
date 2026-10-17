@@ -180,26 +180,52 @@ def permutation_p_values(
             if groups is None
             else (rng.random(int(groups.max()) + 1) < 0.5)[groups]
         )
-        prediction_swap = swap[:, None] if trained_predictions.ndim == 2 else swap
-        label_swap = swap[:, None] if trained_labels.ndim == 2 else swap
-        perm_trained_preds = np.where(
-            prediction_swap, control_predictions, trained_predictions
-        )
-        perm_control_preds = np.where(
-            prediction_swap, trained_predictions, control_predictions
-        )
-        perm_trained_labels = np.where(label_swap, control_labels, trained_labels)
-        perm_control_labels = np.where(label_swap, trained_labels, control_labels)
-        if has_probs:
-            swap_2d = swap[:, None]
-            perm_trained_probs = np.where(
-                swap_2d, control_probabilities, trained_probabilities
+        if (
+            trained_per_example_scores is not None
+            and control_per_example_scores is not None
+        ):
+            swap_rows = swap[:, None]
+            perm_trained = mean_per_example_scores(
+                np.where(
+                    swap_rows, control_per_example_scores, trained_per_example_scores
+                ),
+                metric_names,
             )
-            perm_control_probs = np.where(
-                swap_2d, trained_probabilities, control_probabilities
+            perm_control = mean_per_example_scores(
+                np.where(
+                    swap_rows, trained_per_example_scores, control_per_example_scores
+                ),
+                metric_names,
             )
         else:
-            perm_trained_probs = perm_control_probs = None
+            prediction_swap = swap[:, None] if trained_predictions.ndim == 2 else swap
+            label_swap = swap[:, None] if trained_labels.ndim == 2 else swap
+            perm_trained_preds = np.where(
+                prediction_swap, control_predictions, trained_predictions
+            )
+            perm_control_preds = np.where(
+                prediction_swap, trained_predictions, control_predictions
+            )
+            # Shared labels are unchanged by a paired swap.
+            if trained_labels is control_labels:
+                perm_trained_labels = perm_control_labels = trained_labels
+            else:
+                perm_trained_labels = np.where(
+                    label_swap, control_labels, trained_labels
+                )
+                perm_control_labels = np.where(
+                    label_swap, trained_labels, control_labels
+                )
+            if has_probs:
+                swap_2d = swap[:, None]
+                perm_trained_probs = np.where(
+                    swap_2d, control_probabilities, trained_probabilities
+                )
+                perm_control_probs = np.where(
+                    swap_2d, trained_probabilities, control_probabilities
+                )
+            else:
+                perm_trained_probs = perm_control_probs = None
 
         perm_trained = full_scores(
             task,

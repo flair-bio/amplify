@@ -1074,3 +1074,89 @@ def test_classification_scoring_preserves_list_metrics(task_name, average):
     )
 
     assert actual == expected
+
+
+@pytest.mark.parametrize(
+    "task_name",
+    [
+        "sequence_classification",
+        "sequence_multilabel_classification",
+        "token_classification",
+    ],
+)
+def test_shared_control_labels_preserve_bootstrap_results(
+    tmp_path, monkeypatch, task_name
+):
+    from modules.evaluate.src.steps import score as score_module
+
+    if task_name == "sequence_multilabel_classification":
+        labels = [[1, 0, 1], [0, 1, 0], [0, 0, 1], [1, 1, 0], [1, 0, 0], [0, 1, 1]]
+        predictions = [[1, 0, 0], [0, 1, 0], [0, 1, 1], [1, 1, 0], [1, 0, 1], [0, 0, 1]]
+        metrics = ["f1", "multilabel_mcc"]
+        label_format = "multilabel"
+    elif task_name == "token_classification":
+        labels = [[0, 2], [], [1, 2, 0], [2]]
+        predictions = [[0, 1], [], [2, 2, 0], [0]]
+        metrics = ["accuracy", "f1", "mcc"]
+        label_format = "per_token"
+    else:
+        labels = [0, 1, 2, 0, 1, 2, 0, 1]
+        predictions = [0, 2, 2, 1, 1, 0, 0, 1]
+        metrics = ["accuracy", "f1", "mcc"]
+        label_format = "scalar"
+    controls = (
+        [row[::-1] for row in predictions]
+        if task_name == "token_classification"
+        else predictions[::-1]
+    )
+    ids = list(range(len(labels)))
+    predict_output = PredictOutput(
+        metadata=EvaluationMetadata(
+            model_name="toy-model", dataset_name="toy_dataset", task_type=task_name
+        ),
+        predictions=pl.DataFrame(
+            {"id": ids, "prediction": predictions, "label": labels}
+        ),
+        controls={"untrained": pl.DataFrame({"id": ids, "prediction": controls})},
+        requested_controls=["untrained", "scrambled_labels"],
+    )
+    config = ScoreConfig(
+        metrics=metrics, bootstrap_enabled=True, n_samples=16, n_permutations=16
+    )
+
+    def run(name):
+        workspace = get_evaluation_workspace(
+            EvaluationWorkspaceConfig(
+                model_name="toy-model",
+                dataset_name="toy_dataset",
+                task_type=task_name,
+                target_type="categorical",
+                label_format=label_format,
+                num_labels=3,
+                base_path=str(tmp_path / name),
+            )
+        )
+        workspace.setup_directories()
+        return ScoreStep(config).run(workspace, seed=123, predict_result=predict_output)
+
+    collect = score_module.collect_control_arrays
+
+    def copy_labels(*args, **kwargs):
+        return {
+            name: (predictions, list(labels), probabilities)
+            for name, (predictions, labels, probabilities) in collect(
+                *args, **kwargs
+            ).items()
+        }
+
+    # Independent label objects exercise the original copying path.
+    with monkeypatch.context() as reference:
+        reference.setattr(score_module, "collect_control_arrays", copy_labels)
+        expected = run("independent")
+    actual = run("shared")
+
+    np.testing.assert_equal(actual.scores, expected.scores)
+    assert actual.resamples.equals(expected.resamples)
+    np.testing.assert_equal(actual.confidence_intervals, expected.confidence_intervals)
+    np.testing.assert_equal(actual.control_comparisons, expected.control_comparisons)
+    assert actual.long_df.equals(expected.long_df)

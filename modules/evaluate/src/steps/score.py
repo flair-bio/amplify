@@ -431,7 +431,11 @@ class ScoreStep:
         control_arrays_np = {
             control: (
                 as_indexable_array(c_preds, ragged),
-                as_indexable_array(c_labels, ragged),
+                (
+                    labels_arr
+                    if c_labels is labels_col
+                    else as_indexable_array(c_labels, ragged)
+                ),
                 as_indexable_array(c_probs, ragged=False)
                 if c_probs is not None
                 else None,
@@ -447,11 +451,12 @@ class ScoreStep:
         n_degenerate: dict[str, int] = {name: 0 for name in metric_names}
         for i in range(self.config.n_samples):
             idx = bootstrap_indices(n_examples, groups, rng)
+            sampled_labels = labels_arr[idx]
 
             trained_scores = full_scores(
                 task,
                 predictions_arr[idx],
-                labels_arr[idx],
+                sampled_labels,
                 probabilities_arr[idx] if probabilities_arr is not None else None,
                 metric_names,
                 self.config.metric_aggregation,
@@ -460,7 +465,7 @@ class ScoreStep:
                 control: full_scores(
                     task,
                     c_preds[idx],
-                    c_labels[idx],
+                    sampled_labels if c_labels is labels_arr else c_labels[idx],
                     c_probs[idx] if c_probs is not None else None,
                     metric_names,
                     self.config.metric_aggregation,
