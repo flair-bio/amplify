@@ -237,6 +237,129 @@ def test_cached_layerwise_pipeline_scores_each_layer(
         assert metric in score.scores
 
 
+@pytest.mark.parametrize("length_grouped_sampling", [False, True])
+@pytest.mark.parametrize("embedding_batch_size", [1, 3])
+@pytest.mark.parametrize("with_ids", [False, True])
+def test_cached_token_controls_preserve_extraction_order(
+    monkeypatch, tmp_path, model_family, length_grouped_sampling, embedding_batch_size,
+    with_ids,
+):
+    if with_ids:
+        from . import test_prepare
+
+        raw = build_raw_dataset_dict("token_classification")
+        raw = DatasetDict(
+            {
+                split: dataset.add_column(
+                    "id", [f"{split}-{i}" for i in range(len(dataset))]
+                )
+                for split, dataset in raw.items()
+            }
+        )
+        monkeypatch.setattr(test_prepare, "build_raw_dataset_dict", lambda _: raw)
+
+    prepared = _run_prepare(
+        monkeypatch,
+        tmp_path,
+        "token_classification",
+        model_family,
+        embedding_cache=EmbeddingCacheConfig(enabled=True, dtype="float32"),
+        length_grouped_sampling=length_grouped_sampling,
+        embedding_batch_size=embedding_batch_size,
+    )
+    workspace = _make_workspace(tmp_path, "token_classification")
+    backend = prepared.embedding_backend
+    assert backend is not None
+    expected_ids = []
+    expected_labels = []
+    example_offset = 0
+    for batch in backend.token_test_dataloader:
+        for index, label in enumerate(batch["labels"]):
+            valid_labels = label[label != -100].tolist()
+            example_id = batch["id"][index] if "id" in batch else example_offset
+            expected_ids.extend([example_id] * len(valid_labels))
+            expected_labels.extend([[value] for value in valid_labels])
+            example_offset += 1
+
+    result = PredictStep(
+        PredictConfig(controls=["untrained", "random_head", "random_trunk", "random_both"])
+    ).run(workspace, prepared, accelerator=Accelerator(cpu=True))
+    assert result.predictions["id"].to_list() == expected_ids
+    assert result.predictions["label"].to_list() == expected_labels
+    for control in result.controls.values():
+        assert control["id"].to_list() == expected_ids
+        assert control.height == len(expected_labels)
+
+
+@pytest.mark.parametrize(
+    "test_ids, control_ids, expected",
+    [
+        (["p1", "p1", "p2"], ["p1", "p1", "p2"], [-1.0, -2.0, -3.0]),
+        (["p1", "p2"], ["p2", "p1"], [-2.0, -1.0]),
+    ],
+)
+def test_model_controls_align_repeated_and_unique_ids(
+    monkeypatch, test_ids, control_ids, expected
+):
+    from modules.evaluate.src.utils import controls
+
+    builder = ControlBuilder(collect_probabilities=False)
+    monkeypatch.setattr(builder, "_build_control_model", lambda *args: object())
+    monkeypatch.setattr(
+        controls,
+        "run_inference",
+        lambda *args, **kwargs: (
+            control_ids,
+            [-float(i + 1) for i in range(len(control_ids))],
+            [],
+            None,
+            None,
+        ),
+    )
+    predictions = pl.DataFrame({"id": test_ids, "prediction": [-0.5] * len(test_ids)})
+    result, _ = builder.build(
+        "random_both",
+        SimpleNamespace(task_type="pseudo_perplexity"),
+        SimpleNamespace(embedding_backend=None, test_dataloader=None, tokenizer=None),
+        predictions,
+        Accelerator(cpu=True),
+        seed=1,
+    )
+    assert result["id"].to_list() == test_ids
+    assert result["prediction"].to_list() == expected
+
+
+@pytest.mark.parametrize("control_ids", [["p1", "p2", "p1"], ["p1", "p1"]])
+def test_model_controls_reject_misaligned_repeated_ids(monkeypatch, control_ids):
+    from modules.evaluate.src.utils import controls
+
+    builder = ControlBuilder(collect_probabilities=False)
+    monkeypatch.setattr(builder, "_build_control_model", lambda *args: object())
+    monkeypatch.setattr(
+        controls,
+        "run_inference",
+        lambda *args, **kwargs: (
+            control_ids,
+            [-1.0] * len(control_ids),
+            [],
+            None,
+            None,
+        ),
+    )
+    predictions = pl.DataFrame({"id": ["p1", "p1", "p2"], "prediction": [-0.5] * 3})
+    with pytest.raises(RuntimeError, match="different order/count"):
+        builder.build(
+            "random_both",
+            SimpleNamespace(task_type="pseudo_perplexity"),
+            SimpleNamespace(
+                embedding_backend=None, test_dataloader=None, tokenizer=None
+            ),
+            predictions,
+            Accelerator(cpu=True),
+            seed=1,
+        )
+
+
 def test_cached_layerwise_token_controls(monkeypatch, tmp_path, model_family):
     prepared = _run_prepare(
         monkeypatch,
