@@ -184,6 +184,7 @@ class EmbeddingProbeHead(nn.Module):
         num_labels: int,
         task_type: str,
         probe_hidden_size: int | None = None,
+        standardize_features: bool = False,
     ) -> None:
         super().__init__()
         self.num_labels = num_labels
@@ -193,6 +194,35 @@ class EmbeddingProbeHead(nn.Module):
         self.projection, self.classifier = build_probe_layers(
             hidden_size, probe_hidden_size, num_labels
         )
+        self.standardize_features = standardize_features
+        self.register_buffer(
+            "feature_mean", torch.zeros(hidden_size) if standardize_features else None
+        )
+        self.register_buffer(
+            "feature_std", torch.ones(hidden_size) if standardize_features else None
+        )
+
+    @torch.no_grad()
+    def fit_standardization(
+        self, embeddings: torch.Tensor, *, enabled: bool = True
+    ) -> None:
+        """Fit feature statistics on training rows; disabled heads keep raw inputs."""
+        self.standardize_features = enabled
+        if not enabled:
+            self.feature_mean = self.feature_std = None
+            return
+        if (
+            embeddings.ndim != 2
+            or embeddings.shape[0] == 0
+            or embeddings.shape[1] != self.embedding_size
+        ):
+            raise ValueError(
+                "Feature standardization requires nonempty training embeddings "
+                f"with shape (examples, {self.embedding_size})."
+            )
+        std, mean = torch.std_mean(embeddings.float(), dim=0, correction=0)
+        self.feature_mean = mean.to(self.classifier.weight)
+        self.feature_std = std.clamp_min(1e-6).to(self.classifier.weight)
 
     def cache_identity(self) -> str:
         """Return the shape identity used by control-output caching."""
@@ -213,6 +243,8 @@ class EmbeddingProbeHead(nn.Module):
         inputs_embeds = inputs_embeds.to(
             device=self.classifier.weight.device, dtype=self.classifier.weight.dtype
         )
+        if self.standardize_features:
+            inputs_embeds = (inputs_embeds - self.feature_mean) / self.feature_std
         logits = self.classifier(self.projection(inputs_embeds))
         loss = None
         if labels is not None:

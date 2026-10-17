@@ -89,6 +89,7 @@ steps:
     max_grad_norm: 1.0
     accumulation_steps: 1 # effective batches accumulated per optimizer step
     batch_size: null # cached-embedding probe batch size; null keeps the prepared loader size
+    standardize_features: true # ordinary cached MLP/torch_linear probes; fit on train only
     early_stopping_patience: 5 # stop early after this many epochs with no val improvement
     optimizer: adamw # one of adamw, adam, sgd, rmsprop, adagrad, adafactor
     optimizer_kwargs: {} # extra optimizer constructor kwargs, e.g. {momentum: 0.9} for sgd

@@ -438,6 +438,7 @@ dataloaders.
 | `max_grad_norm` | `1.0` | Gradient clipping norm |
 | `accumulation_steps` | `1` | Batches accumulated per optimizer step |
 | `batch_size` | `128` | Cached-embedding probe batch size; set to `null` to use the PrepareStep loader size |
+| `standardize_features` | `true` | Standardize ordinary cached MLP/Torch linear inputs with training-set statistics; layerwise probing uses its own setting |
 | `early_stopping_patience` | `5` | Stop early after this many epochs with no validation improvement |
 | `optimizer` | `adamw` | One of `adamw`, `adam`, `sgd`, `rmsprop`, `adagrad`, `adafactor` |
 | `optimizer_kwargs` | `{}` | Extra optimizer constructor kwargs, e.g. `{momentum: 0.9}` for `sgd` |
@@ -464,7 +465,7 @@ Optuna BOHB-style trials over those estimator parameters. Classical estimators
 fit atomically, so BOHB cannot prune within a fit.
 
 `torch_linear` is trained through the PyTorch optimization loop and has no
-hidden projection: its input is precisely the selected cached embedding
+hidden projection: it uses the selected cached embedding
 vector. For sequence-level classification/regression it requires
 `steps.prepare.embedding_cache.enabled=true`; for token classification it can
 also use a compatible native `nn.Linear` model head without the cache. Classical
@@ -472,6 +473,23 @@ probes always require `steps.mode=tune_probe` and
 `steps.prepare.embedding_cache.enabled=true`. Set `embedding_cache.layers: [-1]`
 for the final layer, or list any valid model hidden-state indices to concatenate
 pooled representations from several layers.
+
+Ordinary cached `mlp` and `torch_linear` probes standardize each feature with
+the training-set mean and population standard deviation. Sequence tasks use
+pooled embeddings; token tasks use valid training residues, excluding ignored
+labels. Constant features use a standard-deviation floor of `1e-6`. Validation,
+test, controls, and HPO trials reuse the fitted transformation; no statistics
+are fitted on validation or test data. Each CV fold fits its own training
+statistics. Set `steps.tune.standardize_features=false` to use raw features.
+
+The fitted statistics are saved in `probe_head.pt`, and
+`probe_head_config.json` records `standardize_features` for reconstruction.
+Raw embedding caches remain reusable across this setting. Standardization is
+fixed during HPO and does not change regression targets or
+`normalize_before_pooling` (per-residue L2 normalization). Layerwise probing
+uses `steps.layerwise.standardize_features`; native uncached heads and
+fine-tuning do not use this cached-probe setting. Classical and ProteinGym
+supervised probes retain their existing preprocessing.
 
 Cached validation features stay on the device across epochs, and validation
 inference skips loss computation.
