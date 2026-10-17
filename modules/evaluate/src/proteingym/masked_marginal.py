@@ -144,9 +144,10 @@ def score_assay_masked_marginal(
             batch_attention = batch_attention.to(device)
 
         logits = model(input_ids=batch_input, attention_mask=batch_attention).logits
-        log_probs = torch.log_softmax(logits.float(), dim=-1)
-        rows = torch.arange(len(batch_positions), device=log_probs.device)
-        masked_log_probs = log_probs[rows, local_indices].cpu()
+        rows = torch.arange(len(batch_positions), device=logits.device)
+        masked_log_probs = torch.log_softmax(
+            logits[rows, local_indices].float(), dim=-1
+        ).cpu()
         for position, values in zip(batch_positions, masked_log_probs):
             log_probs_by_position[position] = values
 
@@ -219,11 +220,9 @@ def _sequence_log_likelihood(
                 else None
             )
             logits = model(input_ids=batch_input, attention_mask=batch_attention).logits
-            log_probs = torch.log_softmax(logits.float(), dim=-1)
-            rows = torch.arange(len(positions), device=log_probs.device)
-            token_log_probs = (
-                log_probs[rows, positions, input_ids[0, positions]].cpu().tolist()
-            )
+            rows = torch.arange(len(positions), device=logits.device)
+            log_probs = torch.log_softmax(logits[rows, positions].float(), dim=-1)
+            token_log_probs = log_probs[rows, input_ids[0, positions]].cpu().tolist()
             # Preserve sequential accumulation while transferring once per batch.
             for value in token_log_probs:
                 total += value

@@ -95,7 +95,7 @@ class PseudoPerplexityTask(TaskHandler):
 
         scored = labels != IGNORE_INDEX
         target_ids = labels[scored]
-        log_probs = logits.log_softmax(dim=-1)[scored]
+        log_probs = logits[scored].log_softmax(dim=-1)
         return log_probs[
             torch.arange(target_ids.numel(), device=logits.device), target_ids
         ]
