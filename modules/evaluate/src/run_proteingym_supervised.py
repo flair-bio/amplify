@@ -23,7 +23,10 @@ import torch
 from transformers import AutoModel, AutoTokenizer
 
 from modules.core.utils.config_loader import load_runtime_config_from_argv
-from modules.evaluate.src.proteingym.aggregate import compute_assay_metric
+from modules.evaluate.src.proteingym.aggregate import (
+    binarize_labels,
+    compute_assay_metric,
+)
 from modules.evaluate.src.proteingym.config import ProteinGymSupervisedConfig
 from modules.evaluate.src.proteingym.runner import run_assay_loop
 from modules.evaluate.src.proteingym.supervised import (
@@ -77,8 +80,11 @@ def run(config: ProteinGymSupervisedConfig) -> dict[str, object]:
         targets = (
             assay["dms_score"].to_numpy()
             if has_score
-            else assay["dms_score_bin"].to_numpy()
+            else binarize_labels(assay["dms_score_bin"].to_numpy())
         )
+        if not has_score and row.get("is_clinical"):
+            # Clinical aggregation treats benign as positive; fit the same direction.
+            targets = 1 - targets
 
         embeddings = pool_embeddings(
             model,
@@ -129,11 +135,11 @@ def run(config: ProteinGymSupervisedConfig) -> dict[str, object]:
                     seed=config.seed,
                     device=device,
                 )
+                # Targets already match the prediction direction.
                 _, value = compute_assay_metric(
                     predictions,
                     dms_scores=targets if has_score else None,
                     dms_score_bin=targets if not has_score else None,
-                    flip_binary_labels=bool(row.get("is_clinical")),
                 )
                 metric_values.append(value)
                 predictions_by_scheme[scheme] = predictions

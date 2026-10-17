@@ -931,3 +931,153 @@ def test_run_assay_loop_force_download_skips_local_hf_snapshot(tmp_path, monkeyp
     assert len(calls) == 1
     assert calls[0]["force_download"] is True
     assert "local_files_only" not in calls[0]
+
+
+@pytest.fixture
+def supervised_entrypoint(monkeypatch):
+    from modules.evaluate.src import run_proteingym_supervised as entrypoint
+
+    monkeypatch.setattr(
+        entrypoint.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: object()
+    )
+    monkeypatch.setattr(
+        entrypoint.AutoModel, "from_pretrained", lambda *args, **kwargs: nn.Identity()
+    )
+    # Fixed embeddings make the probe tests independent of model inference.
+    monkeypatch.setattr(
+        entrypoint,
+        "pool_embeddings",
+        lambda model, tokenizer, sequences, **kwargs: np.array(
+            [[sequence.count("C") - sequence.count("A")] for sequence in sequences],
+            dtype=float,
+        ),
+    )
+    return entrypoint
+
+
+def _write_supervised_assay(root, targets, *, clinical=True, regression=False):
+    (root / "data").mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "dms_id": ["assay-1"],
+            "uniprot_id": ["P1"],
+            "coarse_selection_type": ["Clinical" if clinical else "Activity"],
+            "is_clinical": [clinical],
+            "is_indel": [False],
+        }
+    ).write_parquet(root / "reference.parquet")
+    n = len(targets)
+    pl.DataFrame(
+        {
+            "mutated_sequence": (
+                ["C" * (i + 1) for i in range(n)]
+                if regression
+                else ["A", "C"] * (n // 2)
+            ),
+            "dms_score" if regression else "dms_score_bin": targets,
+            "split": (
+                ["train"] * (n // 2)
+                + ["validation"] * (n // 4)
+                + ["test"] * (n - n // 2 - n // 4)
+            ),
+            **{
+                scheme: np.roll(np.arange(n) % 5, offset)
+                for offset, scheme in enumerate(OFFICIAL_CV_SCHEMES)
+            },
+        }
+    ).write_parquet(root / "data/assay-1.parquet")
+
+
+@pytest.mark.parametrize(
+    "split", ["custom_kfold", "seeded", "fold_random_5", "official_average"]
+)
+def test_supervised_clinical_string_and_numeric_labels_agree(
+    tmp_path, supervised_entrypoint, split
+):
+    from modules.evaluate.src.proteingym.config import ProteinGymSupervisedConfig
+
+    predictions = []
+    for name, targets in (
+        ("strings", ["Pathogenic", "Benign", " pathogenic ", " BENIGN "] * 10),
+        ("numeric", [1, 0] * 20),
+    ):
+        data_dir, output_dir = tmp_path / name / "data", tmp_path / name / "out"
+        _write_supervised_assay(data_dir, targets)
+        config = ProteinGymSupervisedConfig(
+            model_id="offline",
+            data_dir=data_dir,
+            output_dir=output_dir,
+            split=split,
+            device="cpu",
+        )
+        summary = supervised_entrypoint.run(config)
+        assert summary["overall"] == pytest.approx(1.0)
+        assert summary["aggregation"] == "pooled"
+        assay = pl.read_parquet(output_dir / "assay-1_scored.parquet")
+        predictions.append(assay["model_score"].to_numpy())
+        # Check both per-assay and pooled AUC, including official-average overrides.
+        scores = pl.read_parquet(output_dir / "assay_scores.parquet")
+        assert scores["score"][0] == pytest.approx(1.0)
+        assert scores["metric"][0] == "auc"
+    np.testing.assert_allclose(predictions[0], predictions[1], equal_nan=True)
+
+
+@pytest.mark.parametrize("clinical", [False, True])
+def test_supervised_numeric_labels_preserve_missing_targets(
+    tmp_path, monkeypatch, supervised_entrypoint, clinical
+):
+    from modules.evaluate.src.proteingym.config import ProteinGymSupervisedConfig
+
+    targets = np.array([0.0, 1.0, np.nan] * 10)
+    assay = pl.DataFrame(
+        {"mutated_sequence": ["A"] * len(targets), "dms_score_bin": targets}
+    )
+    # Inspect the targets passed to the probe before metric aggregation.
+    monkeypatch.setattr(
+        supervised_entrypoint,
+        "run_cv",
+        lambda embeddings, targets, *args, **kwargs: targets,
+    )
+    monkeypatch.setattr(
+        supervised_entrypoint,
+        "run_assay_loop",
+        lambda data_dir, output_dir, max_assays, score_assay, **kwargs: score_assay(
+            {"is_clinical": clinical}, assay
+        ),
+    )
+    config = ProteinGymSupervisedConfig(
+        model_id="offline",
+        data_dir=tmp_path,
+        output_dir=tmp_path,
+        split="custom_kfold",
+        device="cpu",
+    )
+    actual = supervised_entrypoint.run(config)
+    np.testing.assert_allclose(
+        actual, 1 - targets if clinical else targets, equal_nan=True
+    )
+
+
+@pytest.mark.parametrize("split", ["custom_kfold", "official_average"])
+def test_supervised_continuous_regression_is_unchanged(
+    tmp_path, supervised_entrypoint, split
+):
+    from modules.evaluate.src.proteingym.config import ProteinGymSupervisedConfig
+
+    _write_supervised_assay(
+        tmp_path / "data",
+        np.arange(1, 41, dtype=float),
+        clinical=False,
+        regression=True,
+    )
+    config = ProteinGymSupervisedConfig(
+        model_id="offline",
+        data_dir=tmp_path / "data",
+        output_dir=tmp_path / "out",
+        split=split,
+        device="cpu",
+    )
+    summary = supervised_entrypoint.run(config)
+    assert summary["overall"] == pytest.approx(1.0)
+    scores = pl.read_parquet(tmp_path / "out/assay_scores.parquet")
+    assert scores["metric"][0] == "spearman"
