@@ -368,6 +368,46 @@ def test_aggregate_proteingym_scores_uncertainty_is_zero_with_one_protein_per_ca
     assert result["bootstrap_standard_error"] == pytest.approx(0.0)
 
 
+def test_proteingym_aggregation_excludes_undefined_metrics_before_grouping():
+    clean = pl.DataFrame(
+        {
+            "uniprot_id": ["P1", "P1", "P2", "P3"],
+            "coarse_selection_type": ["Activity"] * 3 + ["Binding"],
+            "score": [0.9, 0.1, 0.8, 0.2],
+        }
+    )
+    undefined = pl.DataFrame(
+        {
+            "uniprot_id": ["P1", "P4", "P5"],
+            "coarse_selection_type": ["Activity", "Activity", "Stability"],
+            "score": [np.nan, None, np.nan],
+        }
+    )
+    expected = aggregate_proteingym_scores(clean, compute_uncertainty=True, n_bootstrap=50)
+    actual = aggregate_proteingym_scores(
+        pl.concat([clean, undefined]), compute_uncertainty=True, n_bootstrap=50
+    )
+    assert actual == expected
+    assert actual["overall"] == pytest.approx(0.425)
+
+
+def test_proteingym_aggregation_with_no_defined_metrics_returns_nan():
+    undefined = pl.DataFrame(
+        {
+            "uniprot_id": ["P1", "P2"],
+            "coarse_selection_type": ["Activity", "Binding"],
+            "score": [np.nan, None],
+        }
+    )
+    summary = aggregate_proteingym_scores(
+        undefined, compute_uncertainty=True, n_bootstrap=20
+    )
+    assert np.isnan(summary["overall"])
+    assert np.isnan(summary["bootstrap_standard_error"])
+    assert summary["per_category"] == {}
+    assert np.isnan(aggregate_proteingym_metrics(undefined, ["score"])["score"]["overall"])
+
+
 def test_bootstrap_standard_error_is_deterministic_given_seed():
     assay_results = pl.DataFrame(
         {
@@ -683,9 +723,10 @@ def test_run_assay_loop_computes_extra_zero_shot_metrics_when_requested(tmp_path
     assert set(summary["metrics"]) == {"spearman", "ndcg", "top_recall"}
 
 
-def test_run_assay_loop_pools_auc_across_genes_for_clinical_indels(tmp_path):
-    # Matches performance_clinical_benchmarks.py's compute_pooled_auc: one AUC
-    # over every gene's variants combined, not the average of per-gene AUCs.
+@pytest.mark.parametrize("is_indel", [False, True])
+def test_run_assay_loop_uses_track_specific_clinical_aggregation(tmp_path, is_indel):
+    # These unequal-size genes distinguish a per-gene mean (substitutions)
+    # from a pooled AUC (indels). Label dtypes differ across source files.
     data_dir = tmp_path / "sourced"
     (data_dir / "data").mkdir(parents=True)
     pl.DataFrame(
@@ -694,13 +735,16 @@ def test_run_assay_loop_pools_auc_across_genes_for_clinical_indels(tmp_path):
             "uniprot_id": ["gene-a", "gene-b"],
             "coarse_selection_type": ["Clinical", "Clinical"],
             "is_clinical": [True, True],
-            "is_indel": [True, True],
+            "is_indel": [is_indel, is_indel],
         }
     ).write_parquet(data_dir / "reference.parquet")
     # Pathogenic=1, Benign=0 (pre-flip); gene-a's scores separate perfectly,
     # gene-b's are inverted, so the per-gene-average AUC would be (1.0+0.0)/2=0.5.
     pl.DataFrame(
-        {"mutated_sequence": ["A", "B", "C", "D"], "dms_score_bin": [1, 0, 1, 0]}
+        {
+            "mutated_sequence": ["A", "B", "C", "D"],
+            "dms_score_bin": ["Pathogenic", "Benign"] * 2,
+        }
     ).write_parquet(data_dir / "data" / "gene-a.parquet")
     pl.DataFrame(
         {"mutated_sequence": ["E", "F"], "dms_score_bin": [1, 0]}
@@ -715,10 +759,140 @@ def test_run_assay_loop_pools_auc_across_genes_for_clinical_indels(tmp_path):
         data_dir, tmp_path / "out", None, lambda row, assay: model_scores[row["dms_id"]]
     )
 
-    assert summary["aggregation"] == "pooled"
     assert summary["metric"] == "auc"
-    # Pooled across both genes: 6 of 9 positive/negative pairs rank correctly.
-    assert summary["overall"] == pytest.approx(6 / 9)
+    if is_indel:
+        assert summary["aggregation"] == "pooled"
+        # Pooled across both genes: 6 of 9 positive/negative pairs rank correctly.
+        assert summary["overall"] == pytest.approx(6 / 9)
+    else:
+        assert summary["aggregation"] == "per_gene"
+        assert summary["num_genes"] == 2
+        assert summary["overall"] == pytest.approx(0.5)
+
+
+def _write_clinical_genes(root, *, is_indel, labels_by_gene):
+    (root / "data").mkdir(parents=True)
+    genes = list(labels_by_gene)
+    pl.DataFrame(
+        {
+            "dms_id": genes,
+            "uniprot_id": genes,
+            "coarse_selection_type": ["Clinical"] * len(genes),
+            "is_clinical": [True] * len(genes),
+            "is_indel": [is_indel] * len(genes),
+        }
+    ).write_parquet(root / "reference.parquet")
+    for gene, labels in labels_by_gene.items():
+        pl.DataFrame({"dms_score_bin": labels}).write_parquet(
+            root / "data" / f"{gene}.parquet"
+        )
+
+
+@pytest.mark.parametrize("has_valid_gene", [False, True])
+def test_clinical_substitutions_exclude_undefined_gene_auc(tmp_path, has_valid_gene):
+    data_dir = tmp_path / "data"
+    labels = {"single-class": [1, 1], "missing-class": [1, 0]}
+    predictions = {
+        "single-class": np.array([0.1, 0.2]),
+        "missing-class": np.array([0.1, np.nan]),
+    }
+    if has_valid_gene:
+        labels["valid"] = [1, 0]
+        predictions["valid"] = np.array([0.1, 0.9])
+    _write_clinical_genes(data_dir, is_indel=False, labels_by_gene=labels)
+    output = tmp_path / "out"
+    summary = run_assay_loop(
+        data_dir,
+        output,
+        None,
+        lambda row, assay: predictions[row["dms_id"]],
+        compute_uncertainty=True,
+        n_bootstrap=20,
+        compute_extra_zero_shot_metrics=True,
+    )
+    assert summary["aggregation"] == "per_gene"
+    assert summary["num_genes"] == int(has_valid_gene)
+    assert "metrics" not in summary  # Clinical benchmarks report AUC only.
+    if has_valid_gene:
+        assert summary["overall"] == 1.0
+        assert summary["bootstrap_standard_error"] == 0.0
+    else:
+        assert np.isnan(summary["overall"])
+        assert np.isnan(summary["bootstrap_standard_error"])
+    # Undefined genes remain in the detailed outputs for inspection.
+    assay_scores = pl.read_parquet(output / "assay_scores.parquet")
+    assert assay_scores.height == len(labels)
+    assert assay_scores["score"].is_nan().sum() == 2
+    assert len(list(output.glob("*_scored.parquet"))) == len(labels)
+
+
+def test_clinical_substitution_mean_preserves_metric_overrides(tmp_path):
+    data_dir = tmp_path / "data"
+    _write_clinical_genes(
+        data_dir, is_indel=False, labels_by_gene={"a": [1, 0], "b": [1, 0]}
+    )
+    # Predictions alone yield AUC 1.0, but an average over CV schemes can
+    # differ from the AUC of their mean predictions. Preserve that override.
+    overrides = {"a": 0.25, "b": 0.5}
+    summary = run_assay_loop(
+        data_dir,
+        tmp_path / "out",
+        None,
+        lambda row, assay: (np.array([0.1, 0.9]), overrides[row["dms_id"]]),
+    )
+    assert summary["overall"] == pytest.approx(0.375)
+    assert summary["num_genes"] == 2
+
+
+def test_clinical_indels_pool_single_class_genes_and_numeric_pseudocontrols(tmp_path):
+    data_dir = tmp_path / "data"
+    _write_clinical_genes(
+        data_dir,
+        is_indel=True,
+        labels_by_gene={"pathogenic": ["Pathogenic"], "pseudocontrol": [0]},
+    )
+    output = tmp_path / "out"
+    summary = run_assay_loop(
+        data_dir,
+        output,
+        None,
+        lambda row, assay: np.array([0.1 if row["dms_id"] == "pathogenic" else 0.9]),
+    )
+    assert summary["aggregation"] == "pooled"
+    assert summary["overall"] == 1.0
+    assert pl.read_parquet(output / "assay_scores.parquet")["score"].is_nan().all()
+
+
+@pytest.mark.parametrize("is_indel", [False, True])
+def test_dms_tracks_keep_protein_and_function_weighting(tmp_path, is_indel):
+    data_dir = tmp_path / "data"
+    (data_dir / "data").mkdir(parents=True)
+    reference = pl.DataFrame(
+        {
+            "dms_id": ["a1", "a2", "a3", "b1"],
+            "uniprot_id": ["P1", "P1", "P2", "P3"],
+            "coarse_selection_type": ["Activity"] * 3 + ["Binding"],
+            "is_clinical": [False] * 4,
+            "is_indel": [is_indel] * 4,
+            "expected": [0.9, 0.1, 0.8, 0.2],
+            "n_variants": [2, 4, 2, 6],
+        }
+    )
+    reference.write_parquet(data_dir / "reference.parquet")
+    for row in reference.iter_rows(named=True):
+        assay = pl.DataFrame({"dms_score": np.arange(row["n_variants"], dtype=float)})
+        assay.write_parquet(data_dir / "data" / f"{row['dms_id']}.parquet")
+    summary = run_assay_loop(
+        data_dir,
+        tmp_path / "out",
+        None,
+        lambda row, assay: (np.zeros(assay.height), row["expected"]),
+    )
+    # Assay mean 0.5 and variant-weighted mean 5/14 are both incorrect.
+    # P1=0.5, P2=0.8 -> Activity=0.65; Binding=0.2 -> overall=0.425.
+    assert summary["overall"] == pytest.approx(0.425)
+    assert summary["per_category"] == pytest.approx({"Activity": 0.65, "Binding": 0.2})
+    assert "aggregation" not in summary
 
 
 def test_run_cv_recovers_a_linear_relationship():
@@ -1012,10 +1186,11 @@ def test_supervised_clinical_string_and_numeric_labels_agree(
         )
         summary = supervised_entrypoint.run(config)
         assert summary["overall"] == pytest.approx(1.0)
-        assert summary["aggregation"] == "pooled"
+        assert summary["aggregation"] == "per_gene"
+        assert summary["num_genes"] == 1
         assay = pl.read_parquet(output_dir / "assay-1_scored.parquet")
         predictions.append(assay["model_score"].to_numpy())
-        # Check both per-assay and pooled AUC, including official-average overrides.
+        # Check per-assay and mean per-gene AUC, including scheme overrides.
         scores = pl.read_parquet(output_dir / "assay_scores.parquet")
         assert scores["score"][0] == pytest.approx(1.0)
         assert scores["metric"][0] == "auc"

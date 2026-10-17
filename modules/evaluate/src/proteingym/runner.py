@@ -19,6 +19,7 @@ from modules.core.utils.hf_download import download_from_hf, resolve_hf_token
 from modules.evaluate.src.proteingym.aggregate import (
     aggregate_proteingym_metrics,
     aggregate_proteingym_scores,
+    binarize_labels,
     compute_all_assay_metrics,
     compute_assay_auc,
     compute_assay_metric,
@@ -116,11 +117,9 @@ def run_assay_loop(
         reference = reference.head(max_assays)
 
     assay_rows: list[dict[str, object]] = []
-    # Clinical tracks (substitutions and indels): the official benchmark pools
-    # every variant across genes into one AUC instead of averaging per-gene
-    # AUCs (per-gene sample sizes are too small there, and single-class genes
-    # would otherwise yield NaN AUC), per performance_clinical_benchmarks.py's
-    # compute_pooled_auc. Stays empty (and unused) for every other track.
+    # Only clinical indels pool variants across genes. Clinical substitutions
+    # average per-gene AUCs (one gene per uniprot_id, one Clinical category in
+    # the sourced reference), per performance_clinical_benchmarks.py.
     pooled_scores: list[np.ndarray] = []
     pooled_labels: list[np.ndarray] = []
     for row in reference.iter_rows(named=True):
@@ -181,9 +180,11 @@ def run_assay_loop(
         logger.info(
             "Scored %s: %s=%.4f (n=%d)", dms_id, metric_name, metric_value, assay.height
         )
-        if row.get("is_clinical"):
+        if row.get("is_clinical") and row.get("is_indel"):
             pooled_scores.append(model_scores)
-            pooled_labels.append(assay[DMS_SCORE_BIN_COLUMN].to_numpy())
+            # Normalize before concatenation: clinical genes can use strings or
+            # numeric labels, including numeric-only benign pseudocontrols.
+            pooled_labels.append(binarize_labels(assay[DMS_SCORE_BIN_COLUMN].to_numpy()))
 
     assay_results = pl.DataFrame(assay_rows)
     write_parquet(assay_results, output_dir / "assay_scores.parquet")
@@ -202,7 +203,13 @@ def run_assay_loop(
             n_bootstrap=n_bootstrap,
             bootstrap_seed=bootstrap_seed,
         )
-        if compute_extra_zero_shot_metrics:
+        if "is_clinical" in reference.columns and reference["is_clinical"].all():
+            summary.update(
+                metric="auc",
+                aggregation="per_gene",
+                num_genes=assay_results.filter(pl.col("score").is_finite()).height,
+            )
+        elif compute_extra_zero_shot_metrics:
             summary["metrics"] = aggregate_proteingym_metrics(
                 assay_results,
                 ["spearman", "auc", "mcc", "ndcg", "top_recall"],

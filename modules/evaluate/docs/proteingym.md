@@ -30,8 +30,8 @@ Four tracks are supported:
 | Clinical substitutions | Human disease-gene variants curated as pathogenic or benign | Binary | AUC |
 | Clinical indels | The same, for insertions and deletions | Binary | AUC |
 
-Each row is one variant (`mutated_sequence`) of an assay's wild-type sequence,
-and scores are only comparable within an assay. That is why ProteinGym uses
+Each row is one variant (`mutated_sequence`) of an assay's wild-type sequence.
+DMS scores are only comparable within an assay. That is why ProteinGym uses
 per-assay variant tables rather than the standard `sequence`/`targets`
 dataset contract, and has its own sourcing script and two dedicated runners
 instead of `run_evaluate.py`. Hub artifacts are listed in the
@@ -140,7 +140,27 @@ uv run modules/evaluate/src/run_proteingym_supervised.py \
 
 Both runners write `<dms_id>_scored.parquet` (each variant's `model_score`),
 `assay_scores.parquet` (per-assay Spearman for continuous DMS scores or AUC for
-binary clinical labels), and `summary.json` under `output_dir`. The summary
-aggregates by taking the mean over UniProt IDs, then over function categories.
-Set `compute_uncertainty: true` to add bootstrap standard errors;
+binary clinical labels), and `summary.json` under `output_dir`.
+
+Aggregation follows the track's benchmark protocol:
+
+| Track | Summary aggregation |
+|---|---|
+| DMS substitutions and indels | Mean over assays within each protein/function pair, then over proteins within each function, then equally over functions |
+| Clinical substitutions | Equal mean of per-gene AUCs; genes without both classes among scored variants have undefined AUC and are excluded from the mean |
+| Clinical indels | One AUC over all scored variants pooled across genes, including genes with only one label class |
+
+See the official [DMS evaluation code](https://github.com/OATML-Markslab/ProteinGym/blob/main/proteingym/performance_DMS_benchmarks.py)
+and [clinical evaluation code](https://github.com/OATML-Markslab/ProteinGym/blob/main/proteingym/performance_clinical_benchmarks.py).
+Clinical substitutions report `aggregation: per_gene` and the number of genes
+with a finite metric in `num_genes`; clinical indels report `aggregation: pooled`.
+Undefined metrics remain in `assay_scores.parquet` for inspection but do not
+contribute to averages. If no metric is defined, the aggregate is NaN.
+
+Set `compute_uncertainty: true` to add bootstrap standard errors for DMS and
+clinical substitution means; clinical indels do not report a bootstrap error.
 `n_bootstrap` controls the resamples for either runner and defaults to `10000`.
+The clinical substitution bootstrap resamples genes. DMS bootstrap errors
+measure uncertainty in this model's aggregate, whereas the official leaderboard
+reports uncertainty relative to the best model. Metrics retain full precision
+rather than reproducing the leaderboard's intermediate rounding.
