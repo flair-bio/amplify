@@ -37,7 +37,6 @@ class AMPLIFYConfig(PretrainedConfig):
         num_hidden_layers: int = 32,
         num_attention_heads: int = 15,
         intermediate_size: int = 2560,
-        gaussian_init: bool = False,
         embedding_init_range: float = 0.02,
         decoder_init_range: float = 0.02,
         norm_eps: float = 1e-05,
@@ -54,6 +53,7 @@ class AMPLIFYConfig(PretrainedConfig):
         norm_type: Literal[
             "RMSNorm", "CenteredRMSNorm", "ZeroCenteredRMSNorm", "LayerNorm"
         ] = "RMSNorm",
+        gaussian_init: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(
