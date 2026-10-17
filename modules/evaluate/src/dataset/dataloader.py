@@ -19,7 +19,7 @@ import random
 from typing import Any, Iterator
 
 import torch
-from datasets import DatasetDict, load_dataset  # type: ignore[attr-defined]
+from datasets import Dataset, DatasetDict, load_dataset  # type: ignore[attr-defined]
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from torch.utils.data import DataLoader, Sampler
 from transformers import PreTrainedTokenizerBase
@@ -523,6 +523,11 @@ def tokenize_dataset(
     return DatasetDict(mapped)
 
 
+def token_lengths(dataset: Dataset) -> list[int]:
+    """Read token-list lengths without decoding individual token IDs."""
+    return dataset.with_format("polars")["input_ids"].list.len().to_list()
+
+
 def build_dataloaders(
     dataset: DatasetDict,
     collator: EvaluationCollator,
@@ -549,7 +554,7 @@ def build_dataloaders(
             return None
         if config.max_tokens_per_batch is not None:
             assert generator is not None
-            lengths = [len(ids) for ids in dataset[split]["input_ids"]]
+            lengths = token_lengths(dataset[split])
             sampler = TokenBudgetBatchSampler(
                 lengths, config.max_tokens_per_batch, shuffle, generator
             )
@@ -563,7 +568,7 @@ def build_dataloaders(
                 },
             )
         if config.length_grouped_sampling:
-            lengths = [len(ids) for ids in dataset[split]["input_ids"]]
+            lengths = token_lengths(dataset[split])
             sampler = LengthGroupedSampler(
                 lengths, config.batch_size, generator=generator, shuffle=shuffle
             )

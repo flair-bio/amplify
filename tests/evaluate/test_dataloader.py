@@ -27,6 +27,7 @@ from modules.evaluate.src.dataset.dataloader import (
     load_evaluation_dataset,
     select_dataset_splits,
     tokenize_dataset,
+    token_lengths,
 )
 from modules.evaluate.src.utils.seed import seed_everything
 from modules.pretrain.src.model.tokenizer import ProteinTokenizer, TokenizerConfig
@@ -767,3 +768,46 @@ class TestBuildDataloadersLengthGrouped:
             return sum(b["input_ids"].numel() for b in train_dl)
 
         assert total_padded_tokens(True) <= total_padded_tokens(False)
+
+
+@pytest.mark.parametrize("format_type", [None, "numpy", "torch"])
+@pytest.mark.parametrize("indices", [None, [3, 0, 2, 2], []])
+def test_token_lengths_preserve_order_and_format(format_type, indices):
+    dataset = Dataset.from_dict({"input_ids": [[1, 2], [], [3, 4, 5], [6]]})
+    if indices is not None:
+        dataset = dataset.select(indices)
+    dataset = dataset.with_format(format_type)
+    original_format = dataset.format
+
+    assert token_lengths(dataset) == [len(ids) for ids in dataset["input_ids"]]
+    assert dataset.format == original_format
+
+
+@pytest.mark.parametrize("budget", [None, 8])
+def test_column_lengths_preserve_batch_assignments(budget):
+    dataset = Dataset.from_dict(
+        {"input_ids": [[0] * length for length in [4, 2, 5, 3, 4, 1]]}
+    ).select([4, 0, 3, 2, 1, 5])
+    lengths = [len(ids) for ids in dataset["input_ids"]]
+    train, validation, test = build_dataloaders(
+        DatasetDict({role: dataset for role in ("train", "validation", "test")}),
+        collator=lambda batch: batch,
+        config=DataLoaderConfig(
+            batch_size=2,
+            num_workers=0,
+            length_grouped_sampling=True,
+            max_tokens_per_batch=budget,
+            seed=17,
+        ),
+    )
+    for loader, shuffle in [(train, True), (validation, False), (test, False)]:
+        generator = torch.Generator().manual_seed(17)
+        if budget is None:
+            sampler = LengthGroupedSampler(lengths, 2, generator, shuffle)
+            order = list(sampler)
+            expected = [order[index : index + 2] for index in range(0, len(order), 2)]
+        else:
+            expected = list(
+                TokenBudgetBatchSampler(lengths, budget, shuffle, generator)
+            )
+        assert list(loader.batch_sampler) == expected
