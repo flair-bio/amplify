@@ -121,14 +121,20 @@ def split_decay_parameters(
 
     Biases and normalization-layer weights/biases (identified by having
     <= 1 dimensions, e.g. LayerNorm/BatchNorm weight and any bias) are
-    excluded from weight decay, following common practice.
+    excluded from weight decay, except ZeroCenteredRMSNorm gain offsets.
     """
     decay_params: list[nn.Parameter] = []
     no_decay_params: list[nn.Parameter] = []
+    # Match pretraining, including norms loaded through HF's dynamic modules.
+    decay_norm_weights = {
+        id(module.weight)
+        for module in model.modules()
+        if any(cls.__name__ == "ZeroCenteredRMSNorm" for cls in type(module).__mro__)
+    }
     for param in model.parameters():
         if not param.requires_grad:
             continue
-        if param.ndim <= 1:
+        if param.ndim <= 1 and id(param) not in decay_norm_weights:
             no_decay_params.append(param)
         else:
             decay_params.append(param)
