@@ -42,6 +42,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from modules.evaluate.src.dataset.collator import input_id_rows, unpack_packed
+from modules.evaluate.src.dataset.dataloader import LengthGroupedSampler, token_lengths
 from modules.evaluate.src.utils.inference import pad_for_gather
 
 logger = logging.getLogger(__name__)
@@ -876,7 +877,7 @@ def build_embedding_dataloaders(
                 if is_ragged and "input_ids" in getattr(
                     dataloader.dataset, "column_names", ()
                 ):
-                    num_tokens = sum(map(len, dataloader.dataset["input_ids"]))
+                    num_tokens = sum(token_lengths(dataloader.dataset))
                     logger.info(
                         "Token-level '%s' embeddings will hold up to %.1f GB in "
                         "memory (%d tokens x %d features).",
@@ -890,6 +891,12 @@ def build_embedding_dataloaders(
                     )
             extraction_dataloader = dataloader
             if extraction_batch_size is not None:
+                sampler = None
+                if length_grouped_sampling:
+                    lengths = token_lengths(dataloader.dataset)
+                    sampler = LengthGroupedSampler(
+                        lengths, extraction_batch_size, shuffle=False
+                    )
                 extraction_dataloader = accelerator.prepare(
                     DataLoader(
                         dataloader.dataset,
