@@ -5,6 +5,9 @@ steps:
   prepare:
     embedding_cache:
       enabled: true # RAM-only per-residue features; disable when host memory is insufficient
+  tune:
+    batch_size: 4096 # cached residues, not proteins; ignored without the embedding cache
   predict:
+    embedding_batch_size: 16384 # cached residues only; trunk extraction keeps protein batches
     controls:
       [untrained, random_trunk, random_head, random_both, scrambled_labels]

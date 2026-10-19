@@ -88,8 +88,13 @@ class ControlBuilder:
     condition. Expensive trunk features are reused through the embedding cache;
     predictions are always produced by the current head in memory."""
 
-    def __init__(self, collect_probabilities: bool) -> None:
+    def __init__(
+        self,
+        collect_probabilities: bool,
+        embedding_batch_size: int | None = None,
+    ) -> None:
         self.collect_probabilities = collect_probabilities
+        self.embedding_batch_size = embedding_batch_size
 
     def build(
         self,
@@ -473,7 +478,9 @@ class ControlBuilder:
         dataset = EmbeddingDataset(embeddings, ids, labels.to(label_dtype))
         if prepared.test_dataloader is None:
             raise ValueError("A test dataloader is required for local inference.")
-        batch_size = prepared.test_dataloader.batch_size or 16
+        batch_size = (
+            self.embedding_batch_size or prepared.test_dataloader.batch_size or 16
+        )
 
         if is_classical_head:
             # The estimator isn't distributed, so every rank runs the same

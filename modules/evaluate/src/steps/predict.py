@@ -60,6 +60,15 @@ class PredictConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    embedding_batch_size: int | None = Field(
+        None,
+        gt=0,
+        description=(
+            "Cached-feature rows per prediction batch, including controls. "
+            "Token caches count residues, not proteins. Null inherits the "
+            "prepared loader size; live trunk inference is unchanged."
+        ),
+    )
     collect_probabilities: bool = Field(
         False,
         description=(
@@ -305,7 +314,11 @@ class PredictStep:
             )
             embedding_dataset = find_embedding_dataset(prepared.test_dataloader)
             if embedding_dataset is not None:
-                batch_size = prepared.test_dataloader.batch_size or 16
+                batch_size = (
+                    self.config.embedding_batch_size
+                    or prepared.test_dataloader.batch_size
+                    or 16
+                )
                 dataloader = (
                     {
                         "inputs_embeds": embedding_dataset.embeddings[
@@ -339,7 +352,9 @@ class PredictStep:
                 torch.as_tensor(embedding_dataset.labels),
                 workspace.task_type,
                 accelerator.device,
-                prepared.test_dataloader.batch_size or 16,
+                self.config.embedding_batch_size
+                or prepared.test_dataloader.batch_size
+                or 16,
                 collect_probabilities=self.config.collect_probabilities,
             )
             sequences = None
@@ -393,7 +408,10 @@ class PredictStep:
 
         controls: dict[str, pl.DataFrame] = {}
         control_paths: dict[str, Path] = {}
-        control_builder = ControlBuilder(self.config.collect_probabilities)
+        control_builder = ControlBuilder(
+            self.config.collect_probabilities,
+            embedding_batch_size=self.config.embedding_batch_size,
+        )
         for control in self.config.controls:
             if control in NO_INFERENCE_CONTROLS:
                 continue

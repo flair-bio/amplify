@@ -548,6 +548,19 @@ Per-task presets, invalid combinations, and how to read the results are in
 | `persist_to_disk` | `true` | Write predictions and the prediction manifest; disable for fast in-process evaluation |
 | `store_sequences` | `false` | Decode and include source sequences in the main predictions table |
 | `controls` | `[untrained]` | Any of the controls above; task configs set per-task presets |
+| `embedding_batch_size` | `null` | Cached-feature rows per prediction batch, including model-based controls; `null` inherits the prepared loader size. Does not change live trunk batches. |
+
+Cached token probes batch **residues**, not proteins. The token-classification
+task overlay sets `steps.tune.batch_size=4096` for cached training/validation and
+`steps.predict.embedding_batch_size=16384` for cached prediction and control
+heads. Protein batches remain controlled by `steps.prepare.batch_size` (live
+inference) and `steps.prepare.embedding_batch_size` (feature extraction).
+Changing the training batch size changes optimization and the learning-rate
+schedule's update count; compare validation quality when tuning it. Set
+`steps.tune.batch_size=null steps.predict.embedding_batch_size=null` to restore
+the previous inherited batch sizes. These settings do not change uncached
+training or inference. Layerwise controls that require live trunk features
+continue to use protein batches.
 
 **Input:** `PreparedArtifacts` (trained model + test dataloader) from Prepare/Tune
 **Output:** `<workspace>/runs/<variant>/preds/predictions.parquet`; settings are also recorded in `<workspace>/runs/<variant>/run_manifest.json`'s "predict" section

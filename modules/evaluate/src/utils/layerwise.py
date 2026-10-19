@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping, NamedTuple
 import torch
 from accelerate import Accelerator
 from torch import nn
+from torch.utils.data import DataLoader
 
 from modules.evaluate.src.dataset.collator import input_id_rows, unpack_packed
 from modules.evaluate.src.model.heads import EmbeddingProbeHead
@@ -98,9 +99,20 @@ def run_layerwise_control_conditions(
         else prepared.test_dataloader
     )
     fresh_head_controls = controls & FRESH_HEAD_CONTROLS
+    prediction_dataloader = prepared.test_dataloader
+    if using_embeddings and config.embedding_batch_size is not None:
+        assert prediction_dataloader is not None
+        prediction_dataloader = accelerator.prepare(
+            DataLoader(
+                prediction_dataloader.dataset,
+                batch_size=config.embedding_batch_size,
+                shuffle=False,
+                collate_fn=prediction_dataloader.collate_fn,
+            )
+        )
     conditions = run_layerwise_conditions(
         prepared.model,
-        prepared.test_dataloader,
+        prediction_dataloader,
         task_type,
         accelerator,
         collect_probabilities=config.collect_probabilities,
