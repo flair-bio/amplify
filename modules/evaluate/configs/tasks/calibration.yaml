@@ -4,10 +4,14 @@ workspace:
 steps:
   mode: evaluate_as_is
   prepare:
+    batch_size: 128
     # The handler cuts its own 512-residue window centred on each scored
     # position, so the dataloader must keep full sequences (longest ~7k).
     max_length: 100000
     embedding_cache:
+      enabled: false
+  tune:
+    hyperparameter_search:
       enabled: false
   predict:
     controls: ["random_both"]

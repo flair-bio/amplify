@@ -199,7 +199,11 @@ order. This allows a contact dataset to run both `contact_prediction` and
 `pseudo_perplexity`. Without an explicit task YAML, a CLI
 `workspace.task_type=...` selects a different task overlay. The baseline Slurm
 launcher accepts dataset-only rows plus an optional task column for extra
-methods; ProteinGym rows select their separate runner explicitly.
+methods; ProteinGym rows select their separate runner explicitly. The launcher
+loads `tuning/mlp.yaml` before task and dataset overlays, so ordinary supervised
+tasks use its probe search while contact and zero-shot task configs disable it.
+Calibration and pseudo-perplexity task configs default to batch size 128, as does
+the ProteinGym zero-shot config. CLI overrides can change these batch sizes.
 
 The entry point is `modules/evaluate/src/run_evaluate.py`. Explicit YAML files
 are merged left-to-right (later files win), followed by optional `key=value`

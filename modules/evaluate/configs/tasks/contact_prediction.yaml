@@ -9,5 +9,10 @@ steps:
   tune:
     head:
       head_type: mlp
+    hyperparameter_search:
+      enabled: false
+      search_space:
+        hidden_size: null
+        batch_size: null
   predict:
     controls: [untrained, scrambled_labels, separation_prior]

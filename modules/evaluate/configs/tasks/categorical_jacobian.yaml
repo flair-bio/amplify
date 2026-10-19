@@ -9,5 +9,8 @@ steps:
   prepare:
     embedding_cache:
       enabled: false
+  tune:
+    hyperparameter_search:
+      enabled: false
   predict:
     controls: [scrambled_labels, separation_prior]

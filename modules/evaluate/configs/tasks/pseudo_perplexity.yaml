@@ -4,6 +4,7 @@ workspace:
 steps:
   mode: evaluate_as_is
   prepare:
+    batch_size: 128
     # Prepare still requires three roles; only the test loader is scored.
     split:
       train: test
@@ -12,6 +13,9 @@ steps:
     random_truncate_by_split:
       train: false
     embedding_cache:
+      enabled: false
+  tune:
+    hyperparameter_search:
       enabled: false
   predict:
     controls: ["random_both"]

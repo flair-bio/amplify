@@ -9,7 +9,7 @@ data_repo_id: null
 force_download: false
 output_dir: eval/proteingym_zero_shot/flair-bio_amplify-120m
 
-batch_size: 16
+batch_size: 128
 max_length: 1024
 max_assays: null # null scores every sourced assay
 
