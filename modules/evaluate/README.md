@@ -521,6 +521,12 @@ and `contact_config.json`. Reload them with
 
 ## Step 3 — Predict
 
+INFO logs report start/completion and elapsed time for trained prediction,
+model controls, control embedding extraction/cache I/O, and persistence.
+Long prediction/extraction loops report completed batches at most every 10
+seconds (after a batch finishes), on the main process only. Layerwise logs name
+conditions sharing a forward pass; validation loops remain quiet.
+
 **Purpose:** Run inference over the `test` split for the trained model and for each configured control condition. Control predictions are rebuilt every run from the current head; only frozen-trunk embeddings are reused. No metrics are computed here — that's [Score](#step-4--score)'s job.
 
 **Control conditions (`controls`):** each removes one possible source of the trained model's performance, so [Score](#step-4--score) can test whether the trained model still beats it.

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import polars as pl
@@ -122,6 +123,8 @@ def persist_predictions(
 ) -> None:
     """Write predictions and uncached controls, then record in the run
     manifest everything ScoreStep needs to rerun as a disk-only process."""
+    started = monotonic()
+    logger.info("Persisting predictions started (%s)", workspace.preds_path)
     config = output.config or {}
     output.predictions_path = write_parquet(
         downcast_prediction_dtypes(output.predictions),
@@ -143,6 +146,12 @@ def persist_predictions(
             "metadata": output.metadata.model_dump(mode="json"),
             "control_paths": {k: str(v) for k, v in output.control_paths.items()},
         },
+    )
+    logger.info(
+        "Persisting predictions finished in %.1fs (%d rows, %d controls)",
+        monotonic() - started,
+        output.predictions.height,
+        len(output.controls),
     )
 
 
@@ -284,8 +293,6 @@ class PredictStep:
         variant: str | None = None,
         accelerator: Accelerator | None = None,
     ) -> PredictOutput:
-        logger.info("Running Predict step...")
-
         # Guard in case the user misconfigures the pipeline and tries to run PredictStep without a test dataloader (e.g. no 'test' split in the dataset).
         if prepared.test_dataloader is None:
             raise ValueError(
@@ -298,6 +305,10 @@ class PredictStep:
         if accelerator is None:
             accelerator = Accelerator()
 
+        started = monotonic()
+        if accelerator.is_main_process:
+            logger.info("Trained prediction started")
+        progress_label = "Trained prediction" if accelerator.is_main_process else None
         # steps.prepare.embedding_cache.enabled=True: test_dataloader yields
         # pooled inputs_embeds, not tokens, so sequences can't be decoded
         # from it directly -- decode separately from the retained
@@ -339,6 +350,7 @@ class PredictStep:
                 workspace.task_type,
                 num_labels,
                 collect_probabilities=self.config.collect_probabilities,
+                progress_label=progress_label,
             )
             sequences = None
         elif using_embeddings:
@@ -356,6 +368,7 @@ class PredictStep:
                 or prepared.test_dataloader.batch_size
                 or 16,
                 collect_probabilities=self.config.collect_probabilities,
+                progress_label=progress_label,
             )
             sequences = None
         else:
@@ -370,6 +383,7 @@ class PredictStep:
                     if using_embeddings
                     else (prepared.tokenizer if self.config.store_sequences else None)
                 ),
+                progress_label=progress_label,
             )
 
         # Keep track of conditions for reproducibility and downstream steps like ScoreStep
@@ -406,6 +420,12 @@ class PredictStep:
             )
             predictions_df = predictions_df.join(sequence_by_id, on="id", how="left")
 
+        if accelerator.is_main_process:
+            logger.info(
+                "Trained prediction finished in %.1fs (%d rows)",
+                monotonic() - started,
+                predictions_df.height,
+            )
         controls: dict[str, pl.DataFrame] = {}
         control_paths: dict[str, Path] = {}
         control_builder = ControlBuilder(

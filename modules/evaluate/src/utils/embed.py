@@ -31,6 +31,7 @@ import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 from typing import Any, Callable, Literal, Sequence
 
 import torch
@@ -434,6 +435,7 @@ def extract_embeddings(
     autocast_dtype: torch.dtype | None = None,
     normalize_before_pooling: bool = False,
     gather_across_processes: bool = True,
+    progress_label: str | None = None,
 ) -> tuple[torch.Tensor, list[Any], torch.Tensor, list[str] | None]:
     """One frozen forward pass over *dataloader*, returning embeddings
     (float `dtype`, on CPU), their aligned ids, labels, and (if *tokenizer*
@@ -508,7 +510,8 @@ def extract_embeddings(
     embeddings: torch.Tensor | None = None
     embeddings_chunks: list[torch.Tensor] = []
     offset = 0
-    for batch in dataloader:
+    started = last_log = monotonic()
+    for batch_idx, batch in enumerate(dataloader, 1):
         batch = dict(batch)
         ids = batch.pop("id", None)
         labels = batch.pop("labels")
@@ -652,6 +655,17 @@ def extract_embeddings(
                 all_ids.extend(ids[: pooled.shape[0]])
         if is_ragged:
             example_offset += valid.shape[0]
+        if progress_label and accelerator.is_main_process:
+            now = monotonic()
+            if now - last_log >= 10:
+                logger.info(
+                    "%s: %d batches completed (%d rows, %.1fs elapsed)",
+                    progress_label,
+                    batch_idx,
+                    len(all_labels),
+                    now - started,
+                )
+                last_log = now
 
     if embeddings is None:
         embeddings = (
