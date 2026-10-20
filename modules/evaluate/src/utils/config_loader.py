@@ -29,13 +29,10 @@ def load_evaluation_config(
     if OmegaConf.select(yaml_config, "workspace.task_type") is None and task:
         if task not in available_tasks():
             raise ValueError(
-                f"Unknown task type '{task}'. "
-                f"Available: {available_tasks()}."
+                f"Unknown task type '{task}'. Available: {available_tasks()}."
             )
         task_path = (
-            Path(__file__).resolve().parents[2]
-            / "configs/tasks"
-            / f"{task}.yaml"
+            Path(__file__).resolve().parents[2] / "configs/tasks" / f"{task}.yaml"
         )
         insertion = len(paths)
         for index, config_path in enumerate(paths):

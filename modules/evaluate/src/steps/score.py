@@ -30,13 +30,16 @@ from modules.evaluate.src.tasks import get_task
 from modules.evaluate.src.utils.bootstrap import (
     as_indexable_array,
     benjamini_hochberg,
+    bootstrap_confusion_scores,
     bootstrap_indices,
     ci_stats,
     collect_control_arrays,
+    confusion_scores,
     full_scores,
     id_groups,
     permutation_p_values,
     summarize_controls,
+    token_confusion_matrices,
 )
 from modules.evaluate.src.utils.io import (
     update_run_manifest,
@@ -269,29 +272,48 @@ class ScoreStep:
         rng = np.random.default_rng(seed)
         n_examples = len(reference_ids)
         groups = id_groups([task.bootstrap_group_id(i) for i in reference_ids])
+        confusions = token_confusion_matrices(
+            task,
+            {str(layer): values for layer, values in arrays.items()},
+            groups,
+            metric_names,
+            average,
+        )
         differences: dict[int, dict[str, list[float]]] = {
             layer: {name: [] for name in metric_names} for layer in others
         }
         for _ in range(self.config.n_samples):
-            idx = bootstrap_indices(n_examples, groups, rng)
-            resampled = {
-                layer: full_scores(
-                    task,
-                    predictions[idx],
-                    labels[idx],
-                    None if probabilities is None else probabilities[idx],
-                    metric_names,
-                    average,
+            if confusions is not None:
+                sampled = bootstrap_confusion_scores(
+                    confusions, metric_names, average, rng
                 )
-                for layer, (predictions, labels, probabilities) in arrays.items()
-            }
+                resampled = {layer: sampled[str(layer)] for layer in arrays}
+            else:
+                idx = bootstrap_indices(n_examples, groups, rng)
+                resampled = {
+                    layer: full_scores(
+                        task,
+                        predictions[idx],
+                        labels[idx],
+                        None if probabilities is None else probabilities[idx],
+                        metric_names,
+                        average,
+                    )
+                    for layer, (predictions, labels, probabilities) in arrays.items()
+                }
             for layer in others:
                 for name in metric_names:
                     differences[layer][name].append(
                         resampled[layer][name] - resampled[reference][name]
                     )
         observed = {
-            layer: full_scores(task, *layer_arrays, metric_names, average)
+            layer: (
+                confusion_scores(
+                    confusions[str(layer)].sum(axis=0), metric_names, average
+                )
+                if confusions is not None
+                else full_scores(task, *layer_arrays, metric_names, average)
+            )
             for layer, layer_arrays in arrays.items()
         }
         alpha = 1.0 - self.config.confidence_interval
@@ -308,6 +330,12 @@ class ScoreStep:
                 average,
                 groups=groups,
                 two_sided=True,
+                trained_confusions=confusions[str(layer)]
+                if confusions is not None
+                else None,
+                control_confusions=confusions[str(reference)]
+                if confusions is not None
+                else None,
             )
             for name in metric_names:
                 interval = ci_stats(
@@ -468,6 +496,20 @@ class ScoreStep:
             )
             for control, (c_preds, c_labels, c_probs) in control_arrays.items()
         }
+        confusions = token_confusion_matrices(
+            task,
+            {
+                "trained": (predictions_arr, labels_arr, probabilities_arr),
+                **control_arrays_np,
+            },
+            groups,
+            metric_names,
+            self.config.metric_aggregation,
+        )
+        if confusions is not None:
+            logger.info(
+                "Using per-protein confusion matrices for token bootstrap and permutations."
+            )
 
         resample_rows: list[dict[str, float]] = []
         control_resample_rows: dict[str, list[dict[str, float]]] = {
@@ -476,38 +518,44 @@ class ScoreStep:
 
         n_degenerate: dict[str, int] = {name: 0 for name in metric_names}
         for i in range(self.config.n_samples):
-            idx = bootstrap_indices(n_examples, groups, rng)
-            sampled_labels = labels_arr[idx]
-
-            trained_scores = full_scores(
-                task,
-                predictions_arr[idx],
-                sampled_labels,
-                probabilities_arr[idx] if probabilities_arr is not None else None,
-                metric_names,
-                self.config.metric_aggregation,
-                per_example_scores=(
-                    trained_per_example_scores[idx]
-                    if trained_per_example_scores is not None
-                    else None
-                ),
-            )
-            control_scores_by_name = {}
-            for control, (c_preds, c_labels, c_probs) in control_arrays_np.items():
-                per_example_scores = control_per_example_scores[control]
-                control_scores_by_name[control] = full_scores(
+            if confusions is not None:
+                scores_by_condition = bootstrap_confusion_scores(
+                    confusions, metric_names, self.config.metric_aggregation, rng
+                )
+                trained_scores = scores_by_condition.pop("trained")
+                control_scores_by_name = scores_by_condition
+            else:
+                idx = bootstrap_indices(n_examples, groups, rng)
+                sampled_labels = labels_arr[idx]
+                trained_scores = full_scores(
                     task,
-                    c_preds[idx],
-                    sampled_labels if c_labels is labels_arr else c_labels[idx],
-                    c_probs[idx] if c_probs is not None else None,
+                    predictions_arr[idx],
+                    sampled_labels,
+                    probabilities_arr[idx] if probabilities_arr is not None else None,
                     metric_names,
                     self.config.metric_aggregation,
                     per_example_scores=(
-                        per_example_scores[idx]
-                        if per_example_scores is not None
+                        trained_per_example_scores[idx]
+                        if trained_per_example_scores is not None
                         else None
                     ),
                 )
+                control_scores_by_name = {}
+                for control, (c_preds, c_labels, c_probs) in control_arrays_np.items():
+                    per_example_scores = control_per_example_scores[control]
+                    control_scores_by_name[control] = full_scores(
+                        task,
+                        c_preds[idx],
+                        sampled_labels if c_labels is labels_arr else c_labels[idx],
+                        c_probs[idx] if c_probs is not None else None,
+                        metric_names,
+                        self.config.metric_aggregation,
+                        per_example_scores=(
+                            per_example_scores[idx]
+                            if per_example_scores is not None
+                            else None
+                        ),
+                    )
             for name in metric_names:
                 if np.isnan(trained_scores[name]):
                     n_degenerate[name] += 1
@@ -563,6 +611,14 @@ class ScoreStep:
             groups=groups,
             trained_per_example_scores=trained_per_example_scores,
             control_per_example_scores=control_per_example_scores,
+            trained_confusions=confusions["trained"]
+            if confusions is not None
+            else None,
+            control_confusions=(
+                {name: confusions[name] for name in control_arrays_np}
+                if confusions is not None
+                else None
+            ),
         )
 
         summary_path = update_run_manifest(

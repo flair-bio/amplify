@@ -287,7 +287,7 @@ class TuneStep:
         model = prepared.model
         embedding_dataset = find_embedding_dataset(prepared.train_dataloader)
         cached_probe = embedding_dataset is not None
-        if cached_probe and isinstance(model, EmbeddingProbeHead):
+        if embedding_dataset is not None and isinstance(model, EmbeddingProbeHead):
             features = embedding_dataset.embeddings
             if self.config.standardize_features:
                 if workspace.task_type == "token_classification":

@@ -575,6 +575,13 @@ Bootstrap and permutation tests reuse predictions, not model inference.
 Multilabel AP/MCC use optimized array calculations, multiclass ROC-AUC retains
 one-vs-one semantics without explicit class-pair loops, and contact resampling
 reuses per-protein scores.
+Token-classification resampling with `micro`, `macro`, or `weighted` aggregation
+precomputes per-protein confusion matrices for accuracy, F1, precision, recall,
+and MCC. Bootstrap samples sum counts with protein multiplicities; paired
+permutations swap whole protein matrices. Metrics are computed from pooled
+counts, not averaged protein scores. This preserves protein grouping and seeded
+draws while avoiding repeated scans of all residue predictions. Other tasks,
+custom metrics, and unsupported aggregation modes retain the existing path.
 
 **Key config fields (`steps.score`):**
 

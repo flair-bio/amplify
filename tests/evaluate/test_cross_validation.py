@@ -584,7 +584,7 @@ def test_cli_dispatches_cv_without_single_split_preparation(tmp_path, monkeypatc
 
     config = evaluation_config(tmp_path)
     monkeypatch.setattr("sys.argv", ["run_evaluate.py", "example.yaml"])
-    monkeypatch.setattr(run_evaluate, "load_and_parse", lambda **kwargs: config)
+    monkeypatch.setattr(run_evaluate, "load_evaluation_config", lambda **kwargs: config)
     monkeypatch.setattr(
         run_evaluate, "Accelerator", lambda **kwargs: Accelerator(cpu=True)
     )

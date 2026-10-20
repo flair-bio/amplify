@@ -28,8 +28,11 @@ from modules.evaluate.src.dataset.collator import (
     EvaluationCollator,
     EvaluationCollatorConfig,
 )
-from modules.evaluate.src.dataset.dataloader import DataLoaderConfig, build_dataloaders
-from modules.evaluate.src.dataset.dataloader import tokenize_dataset
+from modules.evaluate.src.dataset.dataloader import (
+    DataLoaderConfig,
+    build_dataloaders,
+    tokenize_dataset,
+)
 from modules.evaluate.src.dataset.workspace import (
     EvaluationWorkspaceConfig,
     get_evaluation_workspace,
@@ -53,20 +56,177 @@ from modules.evaluate.src.utils.bootstrap import (
     benjamini_hochberg,
     bootstrap_indices,
     ci_stats,
+    confusion_scores,
     full_scores,
     id_groups,
     permutation_p_values,
     summarize_controls,
+    token_confusion_matrices,
 )
-from modules.evaluate.src.utils.long_format import build_long_df, upsert_long_df
 from modules.evaluate.src.utils.io import write_parquet
+from modules.evaluate.src.utils.long_format import build_long_df, upsert_long_df
 
 from .conftest import ModelFamily, build_raw_dataset_dict, build_tiny_model
 
 
+@pytest.mark.parametrize("average", ["micro", "macro", "weighted"])
+@pytest.mark.parametrize(
+    "predictions,labels",
+    [
+        ([[0, 4], [], [2, 4, 0], [4]], [[0, 2], [], [2, 2, 0], [2]]),
+        ([[4], [4]], [[4], [4]]),
+        ([[4], [4]], [[0], [2]]),
+        ([[], [4]], [[], [4]]),
+    ],
+)
+def test_token_confusion_scores_match_residue_metrics(average, predictions, labels):
+    task = get_task("token_classification")
+    names = task.default_metrics()
+    arrays = (
+        as_indexable_array(predictions, True),
+        as_indexable_array(labels, True),
+        None,
+    )
+    matrices = token_confusion_matrices(task, {"trained": arrays}, None, names, average)
+    assert matrices is not None
+    rng = np.random.default_rng(71)
+    for _ in range(12):
+        idx = bootstrap_indices(len(labels), None, rng)
+        actual = confusion_scores(matrices["trained"][idx].sum(axis=0), names, average)
+        expected = full_scores(
+            task, arrays[0][idx], arrays[1][idx], None, names, average
+        )
+        np.testing.assert_allclose(
+            list(actual.values()),
+            list(expected.values()),
+            rtol=1e-14,
+            atol=1e-14,
+            equal_nan=True,
+        )
+
+
+@pytest.mark.parametrize("average", ["micro", "macro", "weighted"])
+@pytest.mark.parametrize("cached_rows", [False, True])
+def test_token_confusion_bootstrap_preserves_results(
+    tmp_path, monkeypatch, average, cached_rows
+):
+    from modules.evaluate.src.steps import score as score_module
+    from modules.evaluate.src.utils import bootstrap as bootstrap_module
+
+    rng = np.random.default_rng(42)
+    lengths = [2, 0, 7, 1, 3, 5, 2, 9]
+    labels = [rng.choice([0, 2, 4], size=n).tolist() for n in lengths]
+    predictions = [rng.choice([0, 2, 4], size=n).tolist() for n in lengths]
+    # This class occurs only in a control, never in the trained condition.
+    controls = [rng.choice([0, 2, 4, 6], size=n).tolist() for n in lengths]
+    ids = list(range(len(lengths)))
+    if cached_rows:
+        ids = [i for i, row in enumerate(labels) for _ in row]
+        labels = [[value] for row in labels for value in row]
+        predictions = [[value] for row in predictions for value in row]
+        controls = [[value] for row in controls for value in row]
+    output = PredictOutput(
+        metadata=EvaluationMetadata(
+            model_name="toy-model",
+            dataset_name="toy_dataset",
+            task_type="token_classification",
+        ),
+        predictions=pl.DataFrame(
+            {"id": ids, "prediction": predictions, "label": labels}
+        ),
+        controls={"untrained": pl.DataFrame({"id": ids, "prediction": controls})},
+        requested_controls=["untrained", "scrambled_labels"],
+    )
+    config = ScoreConfig(
+        bootstrap_enabled=True,
+        n_samples=24,
+        n_permutations=64,
+        metric_aggregation=average,
+    )
+
+    def run(name):
+        workspace = get_evaluation_workspace(
+            EvaluationWorkspaceConfig(
+                model_name="toy-model",
+                dataset_name="toy_dataset",
+                task_type="token_classification",
+                target_type="categorical",
+                label_format="per_token",
+                num_labels=7,
+                base_path=str(tmp_path / name),
+            )
+        )
+        workspace.setup_directories()
+        step = ScoreStep(config)
+        result = step.run(workspace, seed=123, predict_result=output)
+        other_layer = PredictOutput(
+            metadata=output.metadata,
+            predictions=output.predictions.with_columns(
+                pl.Series("prediction", controls)
+            ),
+        )
+        comparison_path = step.compare_layers(
+            workspace, {0: output, 2: other_layer}, seed=123
+        )
+        return result, pl.read_parquet(comparison_path)
+
+    with monkeypatch.context() as reference:
+        reference.setattr(score_module, "token_confusion_matrices", lambda *args: None)
+        expected, expected_layers = run("reference")
+
+    score_spy = MagicMock(wraps=score_module.full_scores)
+    monkeypatch.setattr(score_module, "full_scores", score_spy)
+    permutation_spy = MagicMock(wraps=bootstrap_module.full_scores)
+    monkeypatch.setattr(bootstrap_module, "full_scores", permutation_spy)
+    actual, actual_layers = run("optimized")
+    assert actual.scores == expected.scores
+    np.testing.assert_allclose(
+        actual.resamples.to_numpy(),
+        expected.resamples.to_numpy(),
+        rtol=1e-14,
+        atol=1e-14,
+        equal_nan=True,
+    )
+    for name in actual.scores:
+        assert actual.confidence_intervals[name] == pytest.approx(
+            expected.confidence_intervals[name], abs=1e-14
+        )
+    for control, comparisons in actual.control_comparisons.items():
+        for name, comparison in comparisons.items():
+            reference = expected.control_comparisons[control][name]
+            assert comparison == pytest.approx(reference, abs=1e-14)
+            assert comparison["p_value"] == reference["p_value"]
+            assert comparison["p_value_adjusted"] == reference["p_value_adjusted"]
+    assert score_spy.call_count == 1  # Only the unchanged full-test point estimate.
+    permutation_spy.assert_not_called()
+    assert actual.output_path.exists()
+    assert actual.long_path.exists()
+    for name in ["p_value", "p_value_adjusted"]:
+        assert actual_layers[name].to_list() == expected_layers[name].to_list()
+    np.testing.assert_allclose(
+        actual_layers.drop("metric").to_numpy(),
+        expected_layers.drop("metric").to_numpy(),
+        rtol=1e-14,
+        atol=1e-14,
+        equal_nan=True,
+    )
+
+
+def test_token_confusions_fall_back_for_custom_metrics_and_samples():
+    task = get_task("token_classification")
+    arrays = {
+        "trained": (np.array([[0]], dtype=object), np.array([[0]], dtype=object), None)
+    }
+    assert token_confusion_matrices(task, arrays, None, ["f1"], "samples") is None
+    task.metrics = {"f1": lambda predictions, labels, average: 0.5}
+    assert token_confusion_matrices(task, arrays, None, ["f1"], "macro") is None
+
+
 @pytest.mark.parametrize("average", ["macro", "weighted"])
 @pytest.mark.parametrize("score_type", ["continuous", "tied", "constant"])
-def test_multiclass_auc_resampling_matches_sklearn(average: str, score_type: str) -> None:
+def test_multiclass_auc_resampling_matches_sklearn(
+    average: str, score_type: str
+) -> None:
     rng = np.random.default_rng(0)
     labels = np.repeat([0, 2, 4], [36, 18, 6])
     shape = (len(labels), 6)
@@ -315,7 +475,9 @@ def test_multilabel_permutations_swap_whole_example_rows(n_examples):
     probabilities = trained.astype(float)
     control_probabilities = control.astype(float)
     metric_names = ["accuracy"]
-    observed = full_scores(task, trained, labels, probabilities, metric_names, "weighted")
+    observed = full_scores(
+        task, trained, labels, probabilities, metric_names, "weighted"
+    )
     seed = 0
     swap = np.random.default_rng(seed).random(n_examples) < 0.5
     expected_trained = np.where(swap[:, None], control, trained)
@@ -326,7 +488,9 @@ def test_multilabel_permutations_swap_whole_example_rows(n_examples):
     permuted_difference = float(np.mean(expected_trained == expected_labels)) - float(
         np.mean(expected_control == expected_control_labels)
     )
-    expected_p_value = (1 + int(permuted_difference >= observed["accuracy"] - observed_control)) / 2
+    expected_p_value = (
+        1 + int(permuted_difference >= observed["accuracy"] - observed_control)
+    ) / 2
 
     result = permutation_p_values(
         task=task,
@@ -345,12 +509,22 @@ def test_multilabel_permutations_swap_whole_example_rows(n_examples):
 
     assert result == {"accuracy": expected_p_value}
     permuted_calls = task.compute_metrics.call_args_list[-2:]
-    np.testing.assert_array_equal(permuted_calls[0].kwargs["predictions"], expected_trained)
+    np.testing.assert_array_equal(
+        permuted_calls[0].kwargs["predictions"], expected_trained
+    )
     np.testing.assert_array_equal(permuted_calls[0].kwargs["labels"], expected_labels)
-    np.testing.assert_array_equal(permuted_calls[0].kwargs["probabilities"], expected_trained)
-    np.testing.assert_array_equal(permuted_calls[1].kwargs["predictions"], expected_control)
-    np.testing.assert_array_equal(permuted_calls[1].kwargs["labels"], expected_control_labels)
-    np.testing.assert_array_equal(permuted_calls[1].kwargs["probabilities"], expected_control)
+    np.testing.assert_array_equal(
+        permuted_calls[0].kwargs["probabilities"], expected_trained
+    )
+    np.testing.assert_array_equal(
+        permuted_calls[1].kwargs["predictions"], expected_control
+    )
+    np.testing.assert_array_equal(
+        permuted_calls[1].kwargs["labels"], expected_control_labels
+    )
+    np.testing.assert_array_equal(
+        permuted_calls[1].kwargs["probabilities"], expected_control
+    )
 
 
 def _task_with_failing_metric(failing: str) -> MagicMock:
@@ -421,8 +595,18 @@ def test_two_sided_permutation_is_symmetric() -> None:
     def p_value(first, second):
         observed = full_scores(task, first, labels, None, ["accuracy"], "weighted")
         return permutation_p_values(
-            task, observed, first, labels, None, second, labels, None,
-            ["accuracy"], 200, np.random.default_rng(0), "weighted",
+            task,
+            observed,
+            first,
+            labels,
+            None,
+            second,
+            labels,
+            None,
+            ["accuracy"],
+            200,
+            np.random.default_rng(0),
+            "weighted",
             two_sided=True,
         )["accuracy"]
 
@@ -620,10 +804,12 @@ class TestScoreStepMetrics:
     ):
         prepared = _build_prepared_artifacts(model_family, task_type)
         workspace = _make_workspace(tmp_path, task_type)
-        PredictStep(PredictConfig(
-            controls=[],
-            collect_probabilities=(task_type == "sequence_classification"),
-        )).run(workspace, prepared)
+        PredictStep(
+            PredictConfig(
+                controls=[],
+                collect_probabilities=(task_type == "sequence_classification"),
+            )
+        ).run(workspace, prepared)
 
         result = ScoreStep(ScoreConfig()).run(workspace)
 
@@ -672,10 +858,8 @@ class TestScoreStepMetrics:
     ):
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
-        predicted = (
-            PredictStep(PredictConfig(controls=[], persist_to_disk=False)).run(
-                workspace, prepared
-            )
+        predicted = PredictStep(PredictConfig(controls=[], persist_to_disk=False)).run(
+            workspace, prepared
         )
 
         assert predicted.predictions_path is None
@@ -818,7 +1002,9 @@ class TestScoreStepBootstrap:
         control = "random_trunk"
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
-        PredictStep(PredictConfig(controls=[control])).run(workspace, prepared, seed=123)
+        PredictStep(PredictConfig(controls=[control])).run(
+            workspace, prepared, seed=123
+        )
 
         config = ScoreConfig(metrics=["accuracy"], bootstrap_enabled=True, n_samples=5)
         first = ScoreStep(config).run(workspace, seed=123)
@@ -832,11 +1018,9 @@ class TestScoreStepBootstrap:
         workspace = _make_workspace(tmp_path, "sequence_classification")
         PredictStep(PredictConfig(controls=["majority_class"])).run(workspace, prepared)
 
-        result = (
-            ScoreStep(
-                ScoreConfig(metrics=["accuracy"], bootstrap_enabled=True, n_samples=5)
-            ).run(workspace)
-        )
+        result = ScoreStep(
+            ScoreConfig(metrics=["accuracy"], bootstrap_enabled=True, n_samples=5)
+        ).run(workspace)
 
         assert result.control_comparisons is not None
         assert "majority_class" in result.control_comparisons
@@ -846,11 +1030,9 @@ class TestScoreStepBootstrap:
         workspace = _make_workspace(tmp_path, "sequence_regression")
         PredictStep(PredictConfig(controls=["train_mean"])).run(workspace, prepared)
 
-        result = (
-            ScoreStep(
-                ScoreConfig(metrics=["mse"], bootstrap_enabled=True, n_samples=5)
-            ).run(workspace)
-        )
+        result = ScoreStep(
+            ScoreConfig(metrics=["mse"], bootstrap_enabled=True, n_samples=5)
+        ).run(workspace)
 
         assert result.control_comparisons is not None
         assert "train_mean" in result.control_comparisons
@@ -994,7 +1176,9 @@ class TestScoreStepAcrossTaskTypes:
     def test_scrambled_labels_control(self, tmp_path, model_family, task_type, metrics):
         prepared = _build_prepared_artifacts(model_family, task_type)
         workspace = _make_workspace(tmp_path, task_type)
-        PredictStep(PredictConfig(controls=["scrambled_labels"])).run(workspace, prepared)
+        PredictStep(PredictConfig(controls=["scrambled_labels"])).run(
+            workspace, prepared
+        )
 
         config = ScoreConfig(metrics=metrics, bootstrap_enabled=True, n_samples=5)
         result = ScoreStep(config).run(workspace)

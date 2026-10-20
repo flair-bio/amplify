@@ -184,7 +184,9 @@ def run_assay_loop(
             pooled_scores.append(model_scores)
             # Normalize before concatenation: clinical genes can use strings or
             # numeric labels, including numeric-only benign pseudocontrols.
-            pooled_labels.append(binarize_labels(assay[DMS_SCORE_BIN_COLUMN].to_numpy()))
+            pooled_labels.append(
+                binarize_labels(assay[DMS_SCORE_BIN_COLUMN].to_numpy())
+            )
 
     assay_results = pl.DataFrame(assay_rows)
     write_parquet(assay_results, output_dir / "assay_scores.parquet")

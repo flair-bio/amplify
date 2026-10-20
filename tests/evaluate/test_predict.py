@@ -208,18 +208,34 @@ def test_cached_layerwise_pipeline_scores_each_layer(
     prepared = TuneStep(
         TuneConfig(
             head=HeadConfig(head_type="torch_linear"),
+            batch_size=7,
             max_epochs=1,
             early_stopping_patience=None,
         )
     ).run(workspace, prepared, accelerator=accelerator)
+    assert prepared.train_dataloader.batch_sampler.batch_size == 7
+    assert prepared.val_dataloader.batch_sampler.batch_size == 7
+    forward = MagicMock(wraps=prepared.model.forward_conditions)
+    monkeypatch.setattr(prepared.model, "forward_conditions", forward)
     predict_step = PredictStep(
-        PredictConfig(controls=["untrained"], store_sequences=True)
+        PredictConfig(
+            controls=["untrained"], store_sequences=True, embedding_batch_size=7
+        )
     )
     decode_sequences = MagicMock(wraps=predict_step._decode_token_dataloader)
     monkeypatch.setattr(predict_step, "_decode_token_dataloader", decode_sequences)
     results = predict_step.run_layerwise(
         workspace, prepared, accelerator, seed=710019
     )
+    assert all(
+        call.kwargs["inputs_embeds"].shape[0] <= 7
+        for call in forward.call_args_list
+    )
+    if task_type == "token_classification":
+        assert any(
+            call.kwargs["inputs_embeds"].shape[0] == 7
+            for call in forward.call_args_list
+        )
     decode_sequences.assert_called_once_with(
         prepared.embedding_backend.token_test_dataloader,
         prepared.tokenizer,
@@ -289,6 +305,65 @@ def test_cached_token_controls_preserve_extraction_order(
     for control in result.controls.values():
         assert control["id"].to_list() == expected_ids
         assert control.height == len(expected_labels)
+
+
+@pytest.mark.parametrize("task_type", ["token_classification", "sequence_classification"])
+def test_cached_prediction_batching_is_independent_of_protein_batches(
+    monkeypatch, tmp_path, model_family, task_type
+):
+    prepared = _run_prepare(
+        monkeypatch,
+        tmp_path,
+        task_type,
+        model_family,
+        embedding_cache=EmbeddingCacheConfig(enabled=True),
+    )
+    workspace = _make_workspace(tmp_path, task_type)
+    loader = prepared.test_dataloader
+    backend = prepared.embedding_backend
+    controls = ["untrained", "random_head", "random_trunk", "random_both"]
+    baseline = PredictStep(
+        PredictConfig(controls=controls, collect_probabilities=True)
+    ).run(workspace, prepared, accelerator=Accelerator(cpu=True))
+
+    from modules.evaluate.src.utils import controls as control_module
+    from modules.evaluate.src.steps import predict as predict_module
+
+    local_inference = MagicMock(wraps=predict_module.run_local_embedding_inference)
+    monkeypatch.setattr(predict_module, "run_local_embedding_inference", local_inference)
+    control_inference = ControlBuilder._run_local_head_inference
+    control_batch_sizes = []
+
+    def capture_batches(head, dataloader, *args, **kwargs):
+        control_batch_sizes.append(dataloader.batch_size)
+        return control_inference(head, dataloader, *args, **kwargs)
+
+    monkeypatch.setattr(
+        control_module.ControlBuilder,
+        "_run_local_head_inference",
+        staticmethod(capture_batches),
+    )
+    result = PredictStep(
+        PredictConfig(
+            embedding_batch_size=7,
+            controls=controls,
+            collect_probabilities=True,
+        )
+    ).run(workspace, prepared, accelerator=Accelerator(cpu=True))
+    assert local_inference.call_args.args[6] == 7
+    assert control_batch_sizes == [7] * len(controls)
+    assert prepared.test_dataloader is loader
+    assert prepared.embedding_backend is backend
+    for actual, expected in [
+        (result.predictions, baseline.predictions),
+        *[(result.controls[name], baseline.controls[name]) for name in controls],
+    ]:
+        assert actual["id"].to_list() == expected["id"].to_list()
+        assert actual["prediction"].to_list() == expected["prediction"].to_list()
+        torch.testing.assert_close(
+            torch.tensor(actual["probability"].to_list()),
+            torch.tensor(expected["probability"].to_list()),
+        )
 
 
 @pytest.mark.parametrize(
