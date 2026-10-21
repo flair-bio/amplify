@@ -557,7 +557,7 @@ Per-task presets, invalid combinations, and how to read the results are in
 | `embedding_batch_size` | `null` | Cached-feature rows per prediction batch, including model-based controls; `null` inherits the prepared loader size. Does not change live trunk batches. |
 
 Cached token probes batch **residues**, not proteins. The token-classification
-task overlay sets `steps.tune.batch_size=4096` for cached training/validation and
+task overlay sets `steps.tune.batch_size=1024` for cached training/validation and
 `steps.predict.embedding_batch_size=16384` for cached prediction and control
 heads. Protein batches remain controlled by `steps.prepare.batch_size` (live
 inference) and `steps.prepare.embedding_batch_size` (feature extraction).
@@ -567,6 +567,11 @@ schedule's update count; compare validation quality when tuning it. Set
 the previous inherited batch sizes. These settings do not change uncached
 training or inference. Layerwise controls that require live trunk features
 continue to use protein batches.
+
+For cached sequence classification, multilabel classification, and regression,
+the task overlays set prediction batches to 1,024 examples. Cached probe tuning
+inherits the prepared loader batch size (16 examples by default); embedding
+extraction has its own `steps.prepare.embedding_batch_size` setting.
 
 **Input:** `PreparedArtifacts` (trained model + test dataloader) from Prepare/Tune
 **Output:** `<workspace>/runs/<variant>/preds/predictions.parquet`; settings are also recorded in `<workspace>/runs/<variant>/run_manifest.json`'s "predict" section

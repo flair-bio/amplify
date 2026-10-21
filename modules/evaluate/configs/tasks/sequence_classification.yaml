@@ -6,5 +6,6 @@ steps:
     embedding_cache:
       enabled: true
   predict:
+    embedding_batch_size: 1024
     controls:
       [untrained, random_trunk, random_head, random_both, scrambled_labels, scrambled_sequences, majority_class]
