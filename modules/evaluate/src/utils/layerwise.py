@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+from time import monotonic
 from typing import TYPE_CHECKING, Any, Callable, Mapping, NamedTuple
 
 import torch
 from accelerate import Accelerator
 from torch import nn
+from torch.utils.data import DataLoader
 
 from modules.evaluate.src.dataset.collator import input_id_rows, unpack_packed
 from modules.evaluate.src.model.heads import EmbeddingProbeHead
@@ -19,6 +22,8 @@ from modules.evaluate.src.utils.controls import (
     ControlBuilder,
 )
 from modules.evaluate.src.utils.inference import pad_for_gather, unique_id_indices
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
@@ -98,9 +103,20 @@ def run_layerwise_control_conditions(
         else prepared.test_dataloader
     )
     fresh_head_controls = controls & FRESH_HEAD_CONTROLS
+    prediction_dataloader = prepared.test_dataloader
+    if using_embeddings and config.embedding_batch_size is not None:
+        assert prediction_dataloader is not None
+        prediction_dataloader = accelerator.prepare(
+            DataLoader(
+                prediction_dataloader.dataset,
+                batch_size=config.embedding_batch_size,
+                shuffle=False,
+                collate_fn=prediction_dataloader.collate_fn,
+            )
+        )
     conditions = run_layerwise_conditions(
         prepared.model,
-        prepared.test_dataloader,
+        prediction_dataloader,
         task_type,
         accelerator,
         collect_probabilities=config.collect_probabilities,
@@ -114,6 +130,8 @@ def run_layerwise_control_conditions(
             if fresh_head_controls
             else None
         ),
+        progress_label="Layerwise prediction: "
+        + ", ".join(["trained", *sorted(fresh_head_controls)]),
     )
     if fresh_head_controls:
         fresh_rows = conditions.pop("fresh")
@@ -130,6 +148,7 @@ def run_layerwise_control_conditions(
                 prepared.tokenizer, seed
             ),
             tokenizer=prepared.tokenizer,
+            progress_label="Layerwise prediction: scrambled_sequences",
         )["trained"]
     if controls & RANDOMIZED_TRUNK_CONTROLS:
         assert prepared.layerwise_random_model is not None
@@ -146,6 +165,8 @@ def run_layerwise_control_conditions(
                 else None
             ),
             flatten_ragged=using_embeddings,
+            progress_label="Layerwise prediction: "
+            + ", ".join(sorted(controls & RANDOMIZED_TRUNK_CONTROLS)),
         )
         if "random_trunk" in controls:
             conditions["random_trunk"] = random_conditions["trained"]
@@ -172,6 +193,7 @@ def run_layerwise_conditions(
     tokenizer: Any | None = None,
     extra_heads: Mapping[str, nn.ModuleDict] | None = None,
     flatten_ragged: bool = False,
+    progress_label: str | None = None,
 ) -> ConditionRows:
     """Gather aligned rows keyed by condition name and hidden-state position.
 
@@ -188,6 +210,9 @@ def run_layerwise_conditions(
     task = get_task(task_type)
     inner = accelerator.unwrap_model(model)
     layer_ids = inner.layers
+    started = last_log = monotonic()
+    if progress_label and accelerator.is_main_process:
+        logger.info("%s started (layers=%s)", progress_label, layer_ids)
     head_sets = {"trained": inner.heads, **(extra_heads or {})}
     rows: ConditionRows = {
         name: {
@@ -206,7 +231,7 @@ def run_layerwise_conditions(
     example_offset = 0
     seen_ids: set[Any] = set()
     with torch.inference_mode():
-        for raw_batch in dataloader:
+        for batch_idx, raw_batch in enumerate(dataloader, 1):
             batch = dict(raw_batch)
             ids = batch.pop("id", None)
             labels = batch.pop("labels")
@@ -290,4 +315,21 @@ def run_layerwise_conditions(
                         )
                     if layer_rows.sequences is not None and sequences is not None:
                         layer_rows.sequences.extend(sequences)
+            if progress_label and accelerator.is_main_process:
+                now = monotonic()
+                if now - last_log >= 10:
+                    logger.info(
+                        "%s: %d batches completed (%.1fs elapsed)",
+                        progress_label,
+                        batch_idx,
+                        now - started,
+                    )
+                    last_log = now
+    if progress_label and accelerator.is_main_process:
+        logger.info(
+            "%s finished in %.1fs (%d rows per layer)",
+            progress_label,
+            monotonic() - started,
+            len(rows["trained"][layer_ids[0]].ids),
+        )
     return rows

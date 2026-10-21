@@ -109,6 +109,7 @@ steps:
         max_epochs: [5, 10, 20]
         weight_decay: [0, 1e-4, 1e-3]
   predict:
+    embedding_batch_size: null # cached rows per batch (residues for token tasks); null inherits prepare.batch_size
     collect_probabilities: false # auto-enabled when effective metrics need probabilities, e.g. roc_auc or multilabel average_precision
     predictions_filename: predictions.parquet
     store_sequences: false # include decoded input sequences in main predictions parquet (larger output)

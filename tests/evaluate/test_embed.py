@@ -679,6 +679,50 @@ class TestEmbeddingProbeHead:
 
 
 class TestExtractEmbeddings:
+    @pytest.mark.parametrize(
+        "label,main",
+        [(None, True), ("Control extraction", True), ("Control extraction", False)],
+    )
+    def test_extraction_progress_is_scoped_and_throttled(
+        self, monkeypatch, caplog, label, main
+    ):
+        from modules.evaluate.src.utils import embed
+
+        now = [0.0]
+        monkeypatch.setattr(embed, "monotonic", lambda: now[0])
+
+        class Trunk(nn.Module):
+            def forward(self, input_ids, **kwargs):
+                now[0] += 4.0
+                return SimpleNamespace(last_hidden_state=input_ids.unsqueeze(-1).float())
+
+        accelerator = SimpleNamespace(
+            device=torch.device("cpu"), num_processes=1, is_main_process=main,
+        )
+        batches = [
+            {
+                "input_ids": torch.tensor([[3, 4]]),
+                "attention_mask": torch.ones(1, 2),
+                "labels": torch.tensor([0]),
+                "id": [i],
+            }
+            for i in range(5)
+        ]
+        with caplog.at_level("INFO"):
+            embeddings, ids, labels, _ = extract_embeddings(
+                Trunk(), iter(batches), accelerator, "mean", "float32",
+                progress_label=label,
+            )
+        assert ids == list(range(5))
+        assert labels.tolist() == [0] * 5
+        torch.testing.assert_close(embeddings, torch.full((5, 1), 3.5))
+        if label and main:
+            assert caplog.messages == [
+                "Control extraction: 3 batches completed (3 rows, 12.0s elapsed)"
+            ]
+        else:
+            assert not caplog.records
+
     def test_packed_sequence_pooling_and_token_selection(self):
         class Trunk(nn.Module):
             def forward(

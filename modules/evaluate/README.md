@@ -521,6 +521,12 @@ and `contact_config.json`. Reload them with
 
 ## Step 3 — Predict
 
+INFO logs report start/completion and elapsed time for trained prediction,
+model controls, control embedding extraction/cache I/O, and persistence.
+Long prediction/extraction loops report completed batches at most every 10
+seconds (after a batch finishes), on the main process only. Layerwise logs name
+conditions sharing a forward pass; validation loops remain quiet.
+
 **Purpose:** Run inference over the `test` split for the trained model and for each configured control condition. Control predictions are rebuilt every run from the current head; only frozen-trunk embeddings are reused. No metrics are computed here — that's [Score](#step-4--score)'s job.
 
 **Control conditions (`controls`):** each removes one possible source of the trained model's performance, so [Score](#step-4--score) can test whether the trained model still beats it.
@@ -548,6 +554,24 @@ Per-task presets, invalid combinations, and how to read the results are in
 | `persist_to_disk` | `true` | Write predictions and the prediction manifest; disable for fast in-process evaluation |
 | `store_sequences` | `false` | Decode and include source sequences in the main predictions table |
 | `controls` | `[untrained]` | Any of the controls above; task configs set per-task presets |
+| `embedding_batch_size` | `null` | Cached-feature rows per prediction batch, including model-based controls; `null` inherits the prepared loader size. Does not change live trunk batches. |
+
+Cached token probes batch **residues**, not proteins. The token-classification
+task overlay sets `steps.tune.batch_size=1024` for cached training/validation and
+`steps.predict.embedding_batch_size=16384` for cached prediction and control
+heads. Protein batches remain controlled by `steps.prepare.batch_size` (live
+inference) and `steps.prepare.embedding_batch_size` (feature extraction).
+Changing the training batch size changes optimization and the learning-rate
+schedule's update count; compare validation quality when tuning it. Set
+`steps.tune.batch_size=null steps.predict.embedding_batch_size=null` to restore
+the previous inherited batch sizes. These settings do not change uncached
+training or inference. Layerwise controls that require live trunk features
+continue to use protein batches.
+
+For cached sequence classification, multilabel classification, and regression,
+the task overlays set prediction batches to 1,024 examples. Cached probe tuning
+inherits the prepared loader batch size (16 examples by default); embedding
+extraction has its own `steps.prepare.embedding_batch_size` setting.
 
 **Input:** `PreparedArtifacts` (trained model + test dataloader) from Prepare/Tune
 **Output:** `<workspace>/runs/<variant>/preds/predictions.parquet`; settings are also recorded in `<workspace>/runs/<variant>/run_manifest.json`'s "predict" section
@@ -562,6 +586,13 @@ Bootstrap and permutation tests reuse predictions, not model inference.
 Multilabel AP/MCC use optimized array calculations, multiclass ROC-AUC retains
 one-vs-one semantics without explicit class-pair loops, and contact resampling
 reuses per-protein scores.
+Token-classification resampling with `micro`, `macro`, or `weighted` aggregation
+precomputes per-protein confusion matrices for accuracy, F1, precision, recall,
+and MCC. Bootstrap samples sum counts with protein multiplicities; paired
+permutations swap whole protein matrices. Metrics are computed from pooled
+counts, not averaged protein scores. This preserves protein grouping and seeded
+draws while avoiding repeated scans of all residue predictions. Other tasks,
+custom metrics, and unsupported aggregation modes retain the existing path.
 
 **Key config fields (`steps.score`):**
 

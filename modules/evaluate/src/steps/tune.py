@@ -21,6 +21,7 @@ from accelerate import Accelerator
 from accelerate.utils import broadcast, broadcast_object_list
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt
 from torch import nn
+from torch.utils.data import DataLoader
 
 from modules.evaluate.src.dataset.workspace import (
     EvaluationWorkspace,
@@ -286,7 +287,7 @@ class TuneStep:
         model = prepared.model
         embedding_dataset = find_embedding_dataset(prepared.train_dataloader)
         cached_probe = embedding_dataset is not None
-        if cached_probe and isinstance(model, EmbeddingProbeHead):
+        if embedding_dataset is not None and isinstance(model, EmbeddingProbeHead):
             features = embedding_dataset.embeddings
             if self.config.standardize_features:
                 if workspace.task_type == "token_classification":
@@ -363,6 +364,29 @@ class TuneStep:
         layer's selected epoch, not the frozen trunk.
         """
         assert prepared.train_dataloader is not None
+        if (
+            prepared.embedding_backend is not None
+            and self.config.batch_size is not None
+        ):
+            for attribute, shuffle in (
+                ("train_dataloader", True),
+                ("val_dataloader", False),
+            ):
+                loader = getattr(prepared, attribute)
+                if loader is not None:
+                    setattr(
+                        prepared,
+                        attribute,
+                        accelerator.prepare(
+                            DataLoader(
+                                loader.dataset,
+                                batch_size=self.config.batch_size,
+                                shuffle=shuffle,
+                                generator=torch.Generator().manual_seed(seed),
+                                collate_fn=loader.collate_fn,
+                            )
+                        ),
+                    )
         prepared.model = accelerator.prepare(prepared.model)
         inner = accelerator.unwrap_model(prepared.model)
         assert isinstance(inner, LayerwiseProbeModel)
@@ -1035,7 +1059,9 @@ class TuneStep:
             extra_kwargs=self.config.optimizer_kwargs,
         )
         max_epochs = hparams["max_epochs"]
-        batch_size = hparams.get("batch_size") or self._cached_batch_size(train_dataloader)
+        batch_size = hparams.get("batch_size") or self._cached_batch_size(
+            train_dataloader
+        )
         steps_per_epoch = (
             math.ceil(cached_train[0].shape[0] / batch_size)
             if cached_train is not None
@@ -1249,7 +1275,9 @@ class TuneStep:
             predictions_tensors: list[torch.Tensor] = []
             probabilities_tensors: list[torch.Tensor] = []
             with torch.inference_mode():
-                batch_size = batch_size or self._cached_batch_size(prepared.val_dataloader)
+                batch_size = batch_size or self._cached_batch_size(
+                    prepared.val_dataloader
+                )
                 for batch in self._cached_batches(
                     cached_val, batch_size, shuffle=False
                 ):

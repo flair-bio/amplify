@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import logging
 from pathlib import Path
+from time import monotonic
 from typing import Any, Callable, Literal
 
 import polars as pl
@@ -88,8 +89,13 @@ class ControlBuilder:
     condition. Expensive trunk features are reused through the embedding cache;
     predictions are always produced by the current head in memory."""
 
-    def __init__(self, collect_probabilities: bool) -> None:
+    def __init__(
+        self,
+        collect_probabilities: bool,
+        embedding_batch_size: int | None = None,
+    ) -> None:
         self.collect_probabilities = collect_probabilities
+        self.embedding_batch_size = embedding_batch_size
 
     def build(
         self,
@@ -127,9 +133,20 @@ class ControlBuilder:
                 ),
                 None,
             )
-        return self._get_or_build_control(
+        started = monotonic()
+        if accelerator.is_main_process:
+            logger.info("Control '%s' prediction started", control)
+        result = self._get_or_build_control(
             control, workspace, prepared, predictions_df, accelerator, seed
         )
+        if accelerator.is_main_process:
+            logger.info(
+                "Control '%s' prediction finished in %.1fs (%d rows)",
+                control,
+                monotonic() - started,
+                result[0].height,
+            )
+        return result
 
     @staticmethod
     def _gather_train_labels(
@@ -342,6 +359,7 @@ class ControlBuilder:
                 collect_probabilities=self.collect_probabilities,
                 batch_transform=batch_transform,
                 tokenizer=prepared.tokenizer if is_scrambled_sequences else None,
+                progress_label=f"Control '{control}' prediction",
             )
         control_data: dict[str, list[Any]] = {"id": ids, "prediction": predictions}
         if probabilities is not None:
@@ -473,7 +491,9 @@ class ControlBuilder:
         dataset = EmbeddingDataset(embeddings, ids, labels.to(label_dtype))
         if prepared.test_dataloader is None:
             raise ValueError("A test dataloader is required for local inference.")
-        batch_size = prepared.test_dataloader.batch_size or 16
+        batch_size = (
+            self.embedding_batch_size or prepared.test_dataloader.batch_size or 16
+        )
 
         if is_classical_head:
             # The estimator isn't distributed, so every rank runs the same
@@ -496,6 +516,11 @@ class ControlBuilder:
                 workspace.task_type,
                 num_labels,
                 collect_probabilities=self.collect_probabilities,
+                progress_label=(
+                    f"Control '{control}' prediction"
+                    if accelerator.is_main_process
+                    else None
+                ),
             )
             return control_ids, predictions, probabilities, sequences
 
@@ -519,6 +544,7 @@ class ControlBuilder:
                 self.collect_probabilities,
                 accelerator,
                 gather_across_processes=False,
+                progress_label=f"Control '{control}' prediction",
             )
             # Match run_local_embedding_inference's per-row shape for ragged
             # tasks: each row is one valid token wrapped in a single-element
@@ -549,6 +575,7 @@ class ControlBuilder:
             workspace.task_type,
             self.collect_probabilities,
             accelerator,
+            progress_label=f"Control '{control}' prediction",
         )
         return control_ids, predictions, probabilities, sequences
 
@@ -583,11 +610,19 @@ class ControlBuilder:
             and backend.cache_policy == "reuse"
             and cache.exists("test", cache_key)
         ):
+            started = monotonic()
             if accelerator.is_main_process:
                 logger.info(
                     "Loading cached '%s' control embeddings from disk...", control
                 )
             embeddings, ids, labels = cache.read("test", cache_key)
+            if accelerator.is_main_process:
+                logger.info(
+                    "Loaded control '%s' embeddings in %.1fs (%d rows)",
+                    control,
+                    monotonic() - started,
+                    len(ids),
+                )
             return embeddings, ids, labels
 
         cached_dataset = find_embedding_dataset(prepared.test_dataloader)
@@ -606,6 +641,9 @@ class ControlBuilder:
                 if is_scrambled_sequences
                 else None
             )
+            started = monotonic()
+            if accelerator.is_main_process:
+                logger.info("Control '%s' embedding extraction started", control)
             embeddings, ids, labels, _ = extract_embeddings(
                 trunk,
                 backend.token_test_dataloader,
@@ -625,7 +663,15 @@ class ControlBuilder:
                 # rank already (see its docstring); gathering it again here
                 # would double every row per additional rank.
                 gather_across_processes=False,
+                progress_label=f"Control '{control}' embedding extraction",
             )
+            if accelerator.is_main_process:
+                logger.info(
+                    "Control '%s' embedding extraction finished in %.1fs (%d rows)",
+                    control,
+                    monotonic() - started,
+                    len(ids),
+                )
             if (
                 cache is not None
                 and cache_key is not None
@@ -636,7 +682,14 @@ class ControlBuilder:
                 )
                 and accelerator.is_main_process
             ):
+                started = monotonic()
+                logger.info("Persisting control '%s' embeddings started", control)
                 cache.write("test", cache_key, embeddings, ids, labels)
+                logger.info(
+                    "Persisting control '%s' embeddings finished in %.1fs",
+                    control,
+                    monotonic() - started,
+                )
             # Only the main process writes the cache file above; without this
             # barrier, a later control that reuses this same cache_key could
             # have other ranks see cache.exists()==False (still racing ahead
@@ -676,6 +729,7 @@ class ControlBuilder:
         collect_probabilities: bool,
         accelerator: Accelerator,
         gather_across_processes: bool = True,
+        progress_label: str | None = None,
     ) -> tuple[list[Any], list[Any], list[Any] | None]:
         """Run *head_model* over a distributed shard of gathered embeddings.
 
@@ -702,8 +756,9 @@ class ControlBuilder:
         all_ids: list[Any] = []
         all_predictions: list[Any] = []
         all_probabilities: list[Any] | None = [] if collect_probabilities else None
+        started = last_log = monotonic()
         with torch.inference_mode():
-            for batch in dataloader:
+            for batch_idx, batch in enumerate(dataloader, 1):
                 batch = dict(batch)
                 ids = batch.pop("id", None)
                 labels = batch.pop("labels", None)
@@ -780,6 +835,16 @@ class ControlBuilder:
                     if all_probabilities is not None:
                         assert batch_probabilities is not None
                         all_probabilities.extend(batch_probabilities)
+                if progress_label and accelerator.is_main_process:
+                    now = monotonic()
+                    if now - last_log >= 10:
+                        logger.info(
+                            "%s: %d batches completed (%.1fs elapsed)",
+                            progress_label,
+                            batch_idx,
+                            now - started,
+                        )
+                        last_log = now
         if len(all_predictions) != expected_examples:
             raise RuntimeError(
                 f"Local head inference produced {len(all_predictions)} unique "

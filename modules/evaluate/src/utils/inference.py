@@ -12,6 +12,8 @@ one another just to share this loop.
 
 from __future__ import annotations
 
+import logging
+from time import monotonic
 from typing import Any, Callable
 
 import torch
@@ -19,6 +21,8 @@ from accelerate import Accelerator
 
 from modules.evaluate.src.dataset.collator import input_id_rows, unpack_packed
 from modules.evaluate.src.tasks import TaskType, get_task
+
+logger = logging.getLogger(__name__)
 
 
 def pad_for_gather(
@@ -54,6 +58,7 @@ def run_inference(
     max_batches: int | None = None,
     batch_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     tokenizer: Any | None = None,
+    progress_label: str | None = None,
 ) -> tuple[list[Any], list[Any], list[Any], list[Any] | None, list[str] | None]:
     """Run the model over the test set, returning per-example ids/predictions/labels.
 
@@ -84,6 +89,9 @@ def run_inference(
     example's ``input_ids`` back into a sequence string, returned as the
     fifth element; this is how callers recover the *scrambled* sequence text
     for the ``scrambled_sequences`` control. ``None`` otherwise.
+
+    ``progress_label`` enables throttled INFO batch logs for prediction callers;
+    shared validation callers remain silent by default.
     """
     model.eval()
     task = get_task(task_type)
@@ -105,6 +113,7 @@ def run_inference(
     input_ids_batches: list[torch.Tensor] | None = [] if tokenizer is not None else None
     id_batches: list[Any] = []
 
+    started = last_log = monotonic()
     with torch.inference_mode():
         for batch_idx, batch in enumerate(test_dataloader):
             if max_batches is not None and batch_idx >= max_batches:
@@ -171,6 +180,16 @@ def run_inference(
                 # gathers. The gathered prediction tensor is authoritative.
                 ids = ids[: preds.shape[0]]
             id_batches.append(ids)
+            if progress_label and accelerator.is_main_process:
+                now = monotonic()
+                if now - last_log >= 10:
+                    logger.info(
+                        "%s: %d batches completed (%.1fs elapsed)",
+                        progress_label,
+                        batch_idx + 1,
+                        now - started,
+                    )
+                    last_log = now
 
     # Single host-sync pass over the whole split: every `.cpu()`/`.tolist()`
     # call (and sequence decoding) happens here, once the full split has
@@ -223,6 +242,7 @@ def run_local_embedding_inference(
     device: torch.device,
     batch_size: int,
     collect_probabilities: bool = False,
+    progress_label: str | None = None,
 ) -> tuple[list[Any], list[Any], list[Any], list[Any] | None]:
     """Run a probe over a complete, locally replicated embedding split."""
     model.eval()
@@ -231,8 +251,9 @@ def run_local_embedding_inference(
     all_labels: list[Any] = []
     all_probabilities: list[Any] | None = [] if collect_probabilities else None
 
+    started = last_log = monotonic()
     with torch.inference_mode():
-        for start in range(0, embeddings.shape[0], batch_size):
+        for batch_idx, start in enumerate(range(0, embeddings.shape[0], batch_size), 1):
             end = start + batch_size
             logits = model(inputs_embeds=embeddings[start:end].to(device=device)).logits
             predictions = task.extract_predictions(logits, labels=labels[start:end])
@@ -245,5 +266,15 @@ def run_local_embedding_inference(
                 all_probabilities.extend(
                     task.predicted_probabilities(logits).cpu().tolist()
                 )
+            if progress_label:
+                now = monotonic()
+                if now - last_log >= 10:
+                    logger.info(
+                        "%s: %d batches completed (%.1fs elapsed)",
+                        progress_label,
+                        batch_idx,
+                        now - started,
+                    )
+                    last_log = now
 
     return ids, all_predictions, all_labels, all_probabilities

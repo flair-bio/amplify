@@ -231,7 +231,9 @@ def spearman(predictions: Any, labels: Any, average: str) -> float:
 
 
 def _binary_roc_auc(
-    probabilities: np.ndarray, labels: np.ndarray, sample_weight: np.ndarray | None = None
+    probabilities: np.ndarray,
+    labels: np.ndarray,
+    sample_weight: np.ndarray | None = None,
 ) -> float:
     """Weighted fraction of positive/negative pairs ranked correctly, ties half.
 

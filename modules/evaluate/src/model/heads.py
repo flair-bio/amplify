@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from time import monotonic
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -493,6 +494,7 @@ def run_classical_inference(
     task_type: str,
     num_labels: int,
     collect_probabilities: bool = False,
+    progress_label: str | None = None,
 ) -> tuple[list[Any], list[Any], list[Any], list[Any] | None]:
     """Run a fitted estimator over a cached-embedding dataloader."""
     from modules.evaluate.src.tasks import get_task
@@ -502,7 +504,8 @@ def run_classical_inference(
     all_predictions: list[Any] = []
     all_labels: list[Any] = []
     all_probabilities: list[Any] | None = [] if collect_probabilities else None
-    for batch in dataloader:
+    started = last_log = monotonic()
+    for batch_idx, batch in enumerate(dataloader, 1):
         batch = dict(batch)
         ids = batch.pop("id", None)
         labels = batch.pop("labels")
@@ -519,4 +522,14 @@ def run_classical_inference(
             all_ids.extend(ids.tolist() if torch.is_tensor(ids) else ids)
         if all_probabilities is not None:
             all_probabilities.extend(logits.softmax(dim=-1).tolist())
+        if progress_label:
+            now = monotonic()
+            if now - last_log >= 10:
+                logger.info(
+                    "%s: %d batches completed (%.1fs elapsed)",
+                    progress_label,
+                    batch_idx,
+                    now - started,
+                )
+                last_log = now
     return all_ids, all_predictions, all_labels, all_probabilities

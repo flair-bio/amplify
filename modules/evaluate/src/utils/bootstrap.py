@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 from scipy.stats import false_discovery_control
 
+from modules.evaluate.src.metrics import metrics
 from modules.evaluate.src.schemas.artifacts import (
     ConfidenceInterval,
     ControlComparison,
@@ -68,6 +69,139 @@ def bootstrap_indices(
     n_groups = int(groups.max()) + 1
     counts = np.bincount(rng.integers(0, n_groups, size=n_groups), minlength=n_groups)
     return np.repeat(np.arange(n_rows), counts[groups])
+
+
+def token_confusion_matrices(
+    task: TaskHandler,
+    conditions: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray | None]],
+    groups: np.ndarray | None,
+    metric_names: list[str],
+    average: str,
+) -> dict[str, np.ndarray] | None:
+    """Prepare integer [protein, actual class, predicted class] counts once.
+
+    All conditions share a class vocabulary so matrices can be swapped even
+    when a control changes labels or predicts classes absent from the truth.
+    Custom metrics and unsupported aggregation modes retain the ordinary path.
+    """
+    if (
+        task.name != "token_classification"
+        or average not in {"micro", "macro", "weighted"}
+        or any(
+            name not in {"accuracy", "f1", "precision", "recall", "mcc"}
+            or task.metrics[name] is not getattr(metrics, name)
+            for name in metric_names
+        )
+    ):
+        return None
+
+    flattened = {}
+    for name, (predictions, labels, _) in conditions.items():
+        pred_lengths = np.fromiter(map(len, predictions), dtype=np.int64)
+        label_lengths = np.fromiter(map(len, labels), dtype=np.int64)
+        if not np.array_equal(pred_lengths, label_lengths):
+            raise ValueError("Token prediction and label lengths must match per row.")
+        flat_preds = np.asarray(task.flatten_for_metrics(predictions.tolist()))
+        flat_labels = np.asarray(task.flatten_for_metrics(labels.tolist()))
+        if (
+            not len(flat_preds)
+            or flat_preds.dtype.kind not in "iu"
+            or flat_labels.dtype.kind not in "iu"
+        ):
+            return None
+        flattened[name] = (flat_preds, flat_labels, pred_lengths)
+
+    classes = np.unique(
+        np.concatenate(
+            [
+                array
+                for preds, labels, _ in flattened.values()
+                for array in (preds, labels)
+            ]
+        )
+    )
+    n_classes = len(classes)
+    first_predictions = next(iter(conditions.values()))[0]
+    row_groups = np.arange(len(first_predictions)) if groups is None else groups
+    n_groups = int(row_groups.max()) + 1
+    matrices = {}
+    for name, (predictions, labels, lengths) in flattened.items():
+        if len(lengths) != len(row_groups):
+            raise ValueError("Conditions must have the same number of token rows.")
+        token_groups = np.repeat(row_groups, lengths)
+        indices = (
+            token_groups * n_classes**2
+            + np.searchsorted(classes, labels) * n_classes
+            + np.searchsorted(classes, predictions)
+        )
+        matrices[name] = np.bincount(
+            indices, minlength=n_groups * n_classes**2
+        ).reshape(n_groups, n_classes, n_classes)
+    return matrices
+
+
+def confusion_scores(
+    matrix: np.ndarray, metric_names: list[str], average: str
+) -> dict[str, float]:
+    """Pooled classification metrics, with sklearn's observed-class/zero rules."""
+    actual = matrix.sum(axis=1, dtype=float)
+    predicted = matrix.sum(axis=0, dtype=float)
+    total = actual.sum()
+    if total == 0:
+        return dict.fromkeys(metric_names, float("nan"))
+    present = (actual + predicted) != 0
+    actual, predicted = actual[present], predicted[present]
+    true_positive = np.diag(matrix)[present].astype(float)
+    correct = true_positive.sum()
+    scores = {}
+    for name in metric_names:
+        if name == "accuracy":
+            value = correct / total
+        elif name == "mcc":
+            covariance = correct * total - np.dot(actual, predicted)
+            denominator = (total**2 - np.dot(actual, actual)) * (
+                total**2 - np.dot(predicted, predicted)
+            )
+            value = covariance / np.sqrt(denominator) if denominator != 0 else 0.0
+        elif average == "micro":
+            value = correct / total
+        else:
+            numerator = 2 * true_positive if name == "f1" else true_positive
+            denominator = (
+                actual + predicted
+                if name == "f1"
+                else predicted
+                if name == "precision"
+                else actual
+            )
+            per_class = np.divide(
+                numerator,
+                denominator,
+                out=np.zeros_like(numerator),
+                where=denominator != 0,
+            )
+            value = np.average(
+                per_class, weights=actual if average == "weighted" else None
+            )
+        scores[name] = float(value)
+    return scores
+
+
+def bootstrap_confusion_scores(
+    matrices: dict[str, np.ndarray],
+    metric_names: list[str],
+    average: str,
+    rng: np.random.Generator,
+) -> dict[str, dict[str, float]]:
+    """Draw the same protein multiplicities as bootstrap_indices, without rows."""
+    n_groups = len(next(iter(matrices.values())))
+    counts = np.bincount(rng.integers(0, n_groups, size=n_groups), minlength=n_groups)
+    return {
+        condition: confusion_scores(
+            np.einsum("g,gij->ij", counts, values), metric_names, average
+        )
+        for condition, values in matrices.items()
+    }
 
 
 def mean_per_example_scores(
@@ -153,6 +287,8 @@ def permutation_p_values(
     *,
     trained_per_example_scores: np.ndarray | None = None,
     control_per_example_scores: np.ndarray | None = None,
+    trained_confusions: np.ndarray | None = None,
+    control_confusions: np.ndarray | None = None,
 ) -> dict[str, float | None]:
     """Paired randomization-test p-values for "the trained model did not
     beat this control", one per metric.
@@ -180,18 +316,26 @@ def permutation_p_values(
     together. ``two_sided`` tests for any difference, using ``|diff|``.
     Optional per-example scores must be supplied for both conditions, in
     metric_names column order; swapping these rows avoids metric recomputation.
+    Optional confusion matrices must likewise be supplied for both conditions,
+    with the same protein/class axes; swaps then operate on pooled counts.
     """
     if (trained_per_example_scores is None) != (control_per_example_scores is None):
         raise ValueError("Both conditions must supply per-example scores.")
+    if (trained_confusions is None) != (control_confusions is None):
+        raise ValueError("Both conditions must supply confusion matrices.")
 
-    observed_control = full_scores(
-        task,
-        control_predictions,
-        control_labels,
-        control_probabilities,
-        metric_names,
-        average,
-        per_example_scores=control_per_example_scores,
+    observed_control = (
+        confusion_scores(control_confusions.sum(axis=0), metric_names, average)
+        if control_confusions is not None
+        else full_scores(
+            task,
+            control_predictions,
+            control_labels,
+            control_probabilities,
+            metric_names,
+            average,
+            per_example_scores=control_per_example_scores,
+        )
     )
 
     observed_diff = {
@@ -203,15 +347,30 @@ def permutation_p_values(
     n_examples = len(trained_predictions)
     has_probs = trained_probabilities is not None and control_probabilities is not None
     for _ in range(n_permutations):
-        swap = (
-            rng.random(n_examples) < 0.5
-            if groups is None
-            else (rng.random(int(groups.max()) + 1) < 0.5)[groups]
+        group_swap = (
+            rng.random(n_examples if groups is None else int(groups.max()) + 1) < 0.5
         )
-        if (
+        if trained_confusions is not None and control_confusions is not None:
+            swap_matrices = group_swap[:, None, None]
+            perm_trained = confusion_scores(
+                np.where(swap_matrices, control_confusions, trained_confusions).sum(
+                    axis=0
+                ),
+                metric_names,
+                average,
+            )
+            perm_control = confusion_scores(
+                np.where(swap_matrices, trained_confusions, control_confusions).sum(
+                    axis=0
+                ),
+                metric_names,
+                average,
+            )
+        elif (
             trained_per_example_scores is not None
             and control_per_example_scores is not None
         ):
+            swap = group_swap if groups is None else group_swap[groups]
             swap_rows = swap[:, None]
             perm_trained = mean_per_example_scores(
                 np.where(
@@ -226,6 +385,7 @@ def permutation_p_values(
                 metric_names,
             )
         else:
+            swap = group_swap if groups is None else group_swap[groups]
             prediction_swap = swap[:, None] if trained_predictions.ndim == 2 else swap
             label_swap = swap[:, None] if trained_labels.ndim == 2 else swap
             perm_trained_preds = np.where(
@@ -379,6 +539,8 @@ def summarize_controls(
     *,
     trained_per_example_scores: np.ndarray | None = None,
     control_per_example_scores: dict[str, np.ndarray | None] | None = None,
+    trained_confusions: np.ndarray | None = None,
+    control_confusions: dict[str, np.ndarray] | None = None,
 ) -> dict[str, dict[str, ControlComparison]]:
     """Per metric, summarize how the trained model compares to each control.
 
@@ -392,19 +554,24 @@ def summarize_controls(
     metric, across controls: the same metric on the same predictions is one
     family, whereas accuracy/f1/mcc are near-perfectly correlated with each
     other and do not form a valid joint family. Optional per-example scores
-    reuse prepared contributions for point estimates and permutations."""
+    reuse prepared contributions for point estimates and permutations.
+    Token confusion matrices similarly reuse grouped counts."""
     trained_by_resample = {row["resample"]: row for row in resample_rows}
 
     # Independent of `control`, so compute once rather than once per
     # control inside permutation_p_values.
-    observed_trained = full_scores(
-        task,
-        predictions_arr,
-        labels_arr,
-        probabilities_arr,
-        metric_names,
-        average,
-        per_example_scores=trained_per_example_scores,
+    observed_trained = (
+        confusion_scores(trained_confusions.sum(axis=0), metric_names, average)
+        if trained_confusions is not None
+        else full_scores(
+            task,
+            predictions_arr,
+            labels_arr,
+            probabilities_arr,
+            metric_names,
+            average,
+            per_example_scores=trained_per_example_scores,
+        )
     )
 
     control_comparisons: dict[str, dict[str, ControlComparison]] = {}
@@ -432,6 +599,10 @@ def summarize_controls(
                 if control_per_example_scores is not None
                 else None
             ),
+            trained_confusions=trained_confusions,
+            control_confusions=control_confusions[control]
+            if control_confusions is not None
+            else None,
         )
 
         comparisons: dict[str, ControlComparison] = {}
