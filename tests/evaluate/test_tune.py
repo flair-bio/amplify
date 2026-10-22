@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -32,6 +33,93 @@ from modules.evaluate.src.utils.hpo import (
 from modules.evaluate.src.utils.embed import EmbeddingDataset
 
 from .test_prepare import _make_workspace, _run_prepare
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize(
+    "task_type,num_labels",
+    [
+        ("sequence_classification", 2),
+        ("token_classification", 3),
+        ("token_classification", 8),
+        ("sequence_multilabel_classification", 3),
+    ],
+)
+def test_validation_f1_keeps_configured_classes_and_token_masks(
+    monkeypatch, tmp_path, cached, task_type, num_labels
+):
+    labels = torch.zeros(3, dtype=torch.long)
+    if task_type == "token_classification":
+        labels[1] = -100
+    elif task_type == "sequence_multilabel_classification":
+        labels = torch.tensor([[1, 0, 0]] * 3)
+    model = EmbeddingProbeHead(4, num_labels, task_type)
+    with torch.no_grad():
+        model.classifier.weight.zero_()
+        model.classifier.bias.fill_(-5)
+        model.classifier.bias[0] = 5
+    loader = DataLoader(
+        EmbeddingDataset(torch.ones(3, 4), list(range(3)), labels)
+        if cached
+        else [{"input_ids": torch.tensor([0]), "labels": 0}],
+        batch_size=2,
+    )
+    prepared = PreparedArtifacts(
+        model=model,
+        tokenizer=None,
+        train_dataloader=None,
+        val_dataloader=loader,
+        test_dataloader=None,
+    )
+    live_labels = (
+        [[0, 0], []] if task_type == "token_classification" else labels.tolist()
+    )
+    monkeypatch.setattr(
+        "modules.evaluate.src.steps.tune.run_inference",
+        lambda *args, **kwargs: ([], live_labels, live_labels, None, None),
+    )
+    step = TuneStep(TuneConfig(metric_aggregation="macro"))
+    score = step._evaluate_validation(
+        _make_workspace(tmp_path, task_type, num_labels=num_labels),
+        prepared,
+        Accelerator(cpu=True),
+        "f1",
+    )
+    assert score == pytest.approx(1 / num_labels)
+
+
+def test_classical_selection_uses_fixed_class_macro_f1(monkeypatch):
+    from modules.evaluate.src.model.heads import sweep_classical_head
+
+    candidates = {
+        "observed_winner": np.zeros(8, dtype=int),
+        "fixed_winner": np.array([0, 2, 2, 2, 1, 2, 2, 2]),
+    }
+
+    def build(head_type, task_type, hparams, **kwargs):
+        return SimpleNamespace(
+            fit=lambda *args: None,
+            predict=lambda *args: candidates[hparams["candidate"]],
+        )
+
+    monkeypatch.setattr("modules.evaluate.src.model.heads.build_estimator", build)
+    _, best, score = sweep_classical_head(
+        "knn",
+        "sequence_classification",
+        np.ones((8, 2)),
+        np.array([0] * 4 + [1] * 4),
+        np.ones((8, 2)),
+        np.array([0] * 4 + [1] * 4),
+        {"candidate": list(candidates)},
+        {},
+        "f1",
+        "maximize",
+        search_pattern="grid",
+        average="macro",
+        num_labels=3,
+    )
+    assert best["candidate"] == "fixed_winner"
+    assert score == pytest.approx(0.8 / 3)
 
 
 def test_online_layerwise_tuning_saves_independent_heads(
@@ -434,7 +522,9 @@ class TestVarianceSeeds:
             embedding_cache=EmbeddingCacheConfig(enabled=True),
         )
         workspace = MagicMock(
-            task_type="sequence_classification", model_path=tmp_path / "model"
+            task_type="sequence_classification",
+            model_path=tmp_path / "model",
+            num_labels=2,
         )
         step = TuneStep(
             TuneConfig(
@@ -474,7 +564,9 @@ class TestVarianceSeeds:
             embedding_cache=EmbeddingCacheConfig(enabled=True),
         )
         workspace = MagicMock(
-            task_type="sequence_classification", model_path=tmp_path / "model"
+            task_type="sequence_classification",
+            model_path=tmp_path / "model",
+            num_labels=2,
         )
         step = TuneStep(
             TuneConfig(
@@ -510,7 +602,9 @@ class TestBohbAcrossTaskTypesAndSettings:
             model_family,
             embedding_cache=EmbeddingCacheConfig(enabled=embedding_cache_enabled),
         )
-        workspace = MagicMock(task_type=task_type, model_path=tmp_path / "model")
+        workspace = MagicMock(
+            task_type=task_type, model_path=tmp_path / "model", num_labels=2
+        )
         step = TuneStep(
             TuneConfig(
                 head=HeadConfig(head_type=head_type),
@@ -557,7 +651,9 @@ class TestBohbAcrossClassicalHeadTypes:
             model_family,
             embedding_cache=EmbeddingCacheConfig(enabled=True),
         )
-        workspace = MagicMock(task_type=task_type, model_path=tmp_path / "model")
+        workspace = MagicMock(
+            task_type=task_type, model_path=tmp_path / "model", num_labels=2
+        )
         step = TuneStep(
             TuneConfig(
                 head=HeadConfig(
@@ -721,7 +817,7 @@ def test_cached_probe_batch_size_honors_loader_and_override(
     )
     monkeypatch.setattr("modules.evaluate.src.steps.tune.build_scheduler", scheduler)
     monkeypatch.setattr(model, "forward", forward)
-    workspace = MagicMock(task_type="sequence_classification")
+    workspace = MagicMock(task_type="sequence_classification", num_labels=2)
     hparams = {"learning_rate": 1e-3, "weight_decay": 0.0, "max_epochs": 2}
 
     step._train(workspace, prepared, accelerator, hparams)

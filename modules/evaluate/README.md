@@ -181,7 +181,13 @@ Only the selected metric is reported by default; override `steps.score.metrics`
 to request diagnostic metrics. Stability's intended grouped Macro-Spearman
 still requires verified parent-design metadata and scorer support. Calibration
 currently reports `mean(exp(-KL))` on a 0–1 scale, not the planned 0–100 scale.
-Classification still uses the existing observed-class inclusion rules.
+Classification F1 includes every class configured by `workspace.num_labels`,
+even when absent from a split or resample (zero F1 for an absent class).
+This includes background class 0, both binary classes, all three Q3 states,
+and all eight Q8 states. Multilabel F1 averages over the configured indicator
+columns, including zero-only columns. Validation selection, final scores,
+controls, bootstrap, and permutations share this policy; token positions
+labelled `-100` remain excluded. Precision and recall use the same vocabulary.
 
 The neural tuning overlays enable 100 TPE trials, with learning-rate bounds
 `[1e-5, 1e-3]`, epoch choices `[1, 2, 5, 10, 20, 40, 100]`, cosine decay,

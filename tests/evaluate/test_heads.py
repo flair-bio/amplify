@@ -351,7 +351,7 @@ class TestTuneStepClassicalHead:
             test_dataloader=None,
         )
         workspace = MagicMock(
-            model_path=tmp_path / "model", task_type="sequence_classification"
+            model_path=tmp_path / "model", task_type="sequence_classification", num_labels=2
         )
 
         step = TuneStep(
@@ -567,7 +567,7 @@ class TestTuneStepClassicalHead:
             test_dataloader=None,
         )
         workspace = MagicMock(
-            model_path=tmp_path / "model", task_type="sequence_classification"
+            model_path=tmp_path / "model", task_type="sequence_classification", num_labels=2
         )
         step = TuneStep(
             TuneConfig(

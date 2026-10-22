@@ -156,7 +156,7 @@ class ScoreStep:
             else None
         )
 
-        task = get_task(workspace.task_type)
+        task = get_task(workspace.task_type, workspace.num_labels)
         metric_names = self.config.metrics or task.default_metrics()
         logger.info("Computing metrics: %s", metric_names)
         trained_per_example_scores = task.compute_per_example_metrics(
@@ -248,7 +248,7 @@ class ScoreStep:
         """
         if len(layer_predictions) < 2:
             return None
-        task = get_task(workspace.task_type)
+        task = get_task(workspace.task_type, workspace.num_labels)
         metric_names = self.config.metrics or task.default_metrics()
         average = self.config.metric_aggregation
         reference = max(layer_predictions)
@@ -285,7 +285,11 @@ class ScoreStep:
         for _ in range(self.config.n_samples):
             if confusions is not None:
                 sampled = bootstrap_confusion_scores(
-                    confusions, metric_names, average, rng
+                    confusions,
+                    metric_names,
+                    average,
+                    rng,
+                    include_absent=task.class_labels is not None,
                 )
                 resampled = {layer: sampled[str(layer)] for layer in arrays}
             else:
@@ -309,7 +313,10 @@ class ScoreStep:
         observed = {
             layer: (
                 confusion_scores(
-                    confusions[str(layer)].sum(axis=0), metric_names, average
+                    confusions[str(layer)].sum(axis=0),
+                    metric_names,
+                    average,
+                    include_absent=task.class_labels is not None,
                 )
                 if confusions is not None
                 else full_scores(task, *layer_arrays, metric_names, average)
@@ -437,7 +444,7 @@ class ScoreStep:
         # deterministic given the same config.
         n_examples = len(predictions_col)
         rng = np.random.default_rng(seed)
-        task = get_task(workspace.task_type)
+        task = get_task(workspace.task_type, workspace.num_labels)
         predictions_df = predict_result.predictions
         groups = id_groups(
             [task.bootstrap_group_id(i) for i in predictions_df["id"].to_list()]
@@ -520,7 +527,11 @@ class ScoreStep:
         for i in range(self.config.n_samples):
             if confusions is not None:
                 scores_by_condition = bootstrap_confusion_scores(
-                    confusions, metric_names, self.config.metric_aggregation, rng
+                    confusions,
+                    metric_names,
+                    self.config.metric_aggregation,
+                    rng,
+                    include_absent=task.class_labels is not None,
                 )
                 trained_scores = scores_by_condition.pop("trained")
                 control_scores_by_name = scores_by_condition

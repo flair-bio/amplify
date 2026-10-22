@@ -385,6 +385,7 @@ def sweep_classical_head(
     n_trials: int | None = None,
     seed: int = 710019,
     average: str = "weighted",
+    num_labels: int | None = None,
 ) -> tuple[BaseEstimator, dict[str, Any], float]:
     """Fit and validate classical probe candidates, returning the best one.
 
@@ -431,7 +432,7 @@ def sweep_classical_head(
         estimator = build_estimator(head_type, task_type, hparams, seed=seed)
         estimator.fit(train_X, train_y)
         predictions = estimator.predict(val_X)
-        task = get_task(task_type)
+        task = get_task(task_type, num_labels)
         probabilities = (
             estimator.predict_proba(val_X)
             if hasattr(estimator, "predict_proba")

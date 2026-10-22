@@ -23,6 +23,8 @@ import numpy as np
 import torch
 from torch import nn
 
+from modules.evaluate.src.metrics import metrics as metric_functions
+
 # Every metric callable takes the same (values, labels, average) signature so
 # the base compute_metrics() can dispatch without knowing the metric. ``values``
 # is normally the predictions, but is the per-class probability matrix for
@@ -48,6 +50,7 @@ class TaskHandler(ABC):
 
     #: Value of ``workspace.task_type`` that selects this handler.
     name: ClassVar[str]
+    class_labels: tuple[int, ...] | None = None
 
     #: Hugging Face ``Auto*`` class used to wrap the trunk. Works with any Hub
     #: model repo rather than depending on a specific model module. Subclasses
@@ -357,6 +360,7 @@ class TaskHandler(ABC):
         if not len(predictions):
             raise ValueError("Cannot compute metrics from an empty predictions list.")
         self.validate_metric_names(metric_names)
+        self.validate_metric_inputs(predictions, labels)
 
         scores: dict[str, float] = {}
         for name in metric_names:
@@ -367,9 +371,46 @@ class TaskHandler(ABC):
                         "none were provided."
                     )
                 scores[name] = float(self.metrics[name](probabilities, labels, average))
+            elif (
+                self.class_labels is not None
+                and name in {"f1", "precision", "recall"}
+                and self.metrics[name] is getattr(metric_functions, name)
+            ):
+                scores[name] = float(
+                    getattr(metric_functions, name)(
+                        predictions, labels, average, class_labels=self.class_labels
+                    )
+                )
             else:
                 scores[name] = float(self.metrics[name](predictions, labels, average))
         return scores
+
+    def validate_metric_inputs(self, predictions: Sequence, labels: Sequence) -> None:
+        """Reject labels outside the configured vocabulary rather than omit them."""
+        if self.class_labels is None:
+            return
+        pred_array, label_array = np.asarray(predictions), np.asarray(labels)
+        if pred_array.shape != label_array.shape:
+            raise ValueError("Classification prediction and label shapes must match.")
+        if self.name == "sequence_multilabel_classification":
+            if label_array.ndim != 2 or label_array.shape[1] != len(self.class_labels):
+                raise ValueError(
+                    "Multilabel metric inputs must have one column per configured label."
+                )
+            if (
+                not np.isin(pred_array, (0, 1)).all()
+                or not np.isin(label_array, (0, 1)).all()
+            ):
+                raise ValueError("Multilabel metric inputs must contain binary values.")
+        elif (
+            pred_array.ndim != 1
+            or not np.isin(pred_array, self.class_labels).all()
+            or not np.isin(label_array, self.class_labels).all()
+        ):
+            raise ValueError(
+                "Classification metric inputs contain labels outside the configured "
+                "class vocabulary; token ignore-index positions must be removed first."
+            )
 
     # -- controls ------------------------------------------------------------
 

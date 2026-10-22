@@ -37,16 +37,46 @@ def accuracy(predictions: Any, labels: Any, average: str) -> float:
     return float(accuracy_score(labels, predictions))
 
 
-def f1(predictions: Any, labels: Any, average: str) -> float:
-    return float(f1_score(labels, predictions, average=average, zero_division=0))
+def f1(
+    predictions: Any,
+    labels: Any,
+    average: str,
+    *,
+    class_labels: Sequence[int] | None = None,
+) -> float:
+    return float(
+        f1_score(
+            labels, predictions, labels=class_labels, average=average, zero_division=0
+        )
+    )
 
 
-def precision(predictions: Any, labels: Any, average: str) -> float:
-    return float(precision_score(labels, predictions, average=average, zero_division=0))
+def precision(
+    predictions: Any,
+    labels: Any,
+    average: str,
+    *,
+    class_labels: Sequence[int] | None = None,
+) -> float:
+    return float(
+        precision_score(
+            labels, predictions, labels=class_labels, average=average, zero_division=0
+        )
+    )
 
 
-def recall(predictions: Any, labels: Any, average: str) -> float:
-    return float(recall_score(labels, predictions, average=average, zero_division=0))
+def recall(
+    predictions: Any,
+    labels: Any,
+    average: str,
+    *,
+    class_labels: Sequence[int] | None = None,
+) -> float:
+    return float(
+        recall_score(
+            labels, predictions, labels=class_labels, average=average, zero_division=0
+        )
+    )
 
 
 def _mcc_score(labels: Any, predictions: Any) -> float:

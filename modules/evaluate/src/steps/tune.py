@@ -573,7 +573,7 @@ class TuneStep:
         heads keep their final state.
         """
         inner = accelerator.unwrap_model(model)
-        task = get_task(workspace.task_type)
+        task = get_task(workspace.task_type, workspace.num_labels)
         optimizer = build_optimizer(
             self.config.optimizer,
             split_decay_parameters(inner.heads, self.config.weight_decay),
@@ -851,6 +851,7 @@ class TuneStep:
                 n_trials=search_config.n_trials if search_config.enabled else None,
                 seed=seed,
                 average=self.config.metric_aggregation,
+                num_labels=workspace.num_labels,
             )
             logger.info(
                 "Selected head_type=%s hparams=%s val_%s=%.4f",
@@ -891,6 +892,7 @@ class TuneStep:
                     search_pattern="grid",
                     seed=extra_seed,
                     average=self.config.metric_aggregation,
+                    num_labels=workspace.num_labels,
                 )[2]
                 for extra_seed in self.config.variance_seeds
             ]
@@ -1293,7 +1295,7 @@ class TuneStep:
                 "val_dataloader, but the Prepare step did not produce one "
                 "(no 'validation' split in the dataset)."
             )
-        task = get_task(workspace.task_type)
+        task = get_task(workspace.task_type, workspace.num_labels)
         if cached_val is None:
             cached_val = self._cached_embedding_split(
                 prepared.val_dataloader, accelerator.device
@@ -1343,6 +1345,10 @@ class TuneStep:
             if cached_val is not None and task.is_ragged
             else task.flatten_for_metrics(labels)
         )
+        if cached_val is not None and workspace.task_type == "token_classification":
+            valid = np.asarray(metric_labels) != IGNORE_INDEX
+            metric_predictions = np.asarray(metric_predictions)[valid]
+            metric_labels = np.asarray(metric_labels)[valid]
         scores = task.compute_metrics(
             predictions=metric_predictions,
             labels=metric_labels,
