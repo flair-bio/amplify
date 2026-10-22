@@ -107,7 +107,8 @@ steps:
         batch_size: null # optional cached-MLP training batches; null keeps tune.batch_size
         learning_rate: [1e-5, 1e-3] # TPE samples continuously on a log scale between these bounds
         max_epochs: [1, 2, 5, 10, 20, 40, 100]
-        weight_decay: [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1] # currently categorical; continuous log sampling needs code support
+        weight_decay: [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1] # TPE uses min/max bounds; random/grid use listed candidates
+        weight_decay_sampling: log # continuous log-scale TPE sampling; categorical also supports zero decay
         # Planned hidden_depth: [1, 2] requires schema and head/search implementation.
     # Planned train+validation refit requires implementation; current runs retain validation-selected weights.
   predict:

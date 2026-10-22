@@ -19,7 +19,7 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 from accelerate.utils import broadcast, broadcast_object_list
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -89,6 +89,14 @@ class HyperparameterSearchSpaceConfig(BaseModel):
     learning_rate: list[float] = [5e-4, 1e-4, 5e-5, 1e-5]
     max_epochs: list[int] = [5, 10, 20]
     weight_decay: list[float] = [0.0, 1e-4, 1e-3]
+    weight_decay_sampling: Literal["categorical", "log"] = Field(
+        "categorical",
+        description=(
+            "TPE weight-decay sampling: categorical candidates or continuous "
+            "log-scale min/max bounds. Random/grid searches retain the listed "
+            "candidates. Log sampling requires finite, positive bounds."
+        ),
+    )
     batch_size: list[PositiveInt] | None = Field(
         None,
         min_length=1,
@@ -99,6 +107,19 @@ class HyperparameterSearchSpaceConfig(BaseModel):
         min_length=1,
         description="Optional hidden widths for cached MLP probes; null keeps head.hidden_size.",
     )
+
+    @model_validator(mode="after")
+    def _validate_weight_decay_bounds(self) -> HyperparameterSearchSpaceConfig:
+        if self.weight_decay_sampling == "log" and (
+            not self.weight_decay
+            or any(
+                not math.isfinite(value) or value <= 0 for value in self.weight_decay
+            )
+        ):
+            raise ValueError(
+                "Log weight_decay sampling requires finite, positive bounds."
+            )
+        return self
 
 
 class HyperparameterSearchConfig(BaseModel):
@@ -1528,9 +1549,7 @@ class TuneStep:
                             max(space.learning_rate),
                             log=True,
                         ),
-                        "weight_decay": trial.suggest_categorical(
-                            "weight_decay", space.weight_decay
-                        ),
+                        "weight_decay": self._suggest_weight_decay(trial),
                         "max_epochs": trial.suggest_categorical(
                             "max_epochs", space.max_epochs
                         ),
@@ -1549,9 +1568,7 @@ class TuneStep:
                             max(space.learning_rate),
                             log=True,
                         ),
-                        "weight_decay": trial.suggest_categorical(
-                            "weight_decay", space.weight_decay
-                        ),
+                        "weight_decay": self._suggest_weight_decay(trial),
                         "max_epochs": trial.suggest_categorical(
                             "max_epochs", space.max_epochs
                         ),
@@ -1610,3 +1627,14 @@ class TuneStep:
         if space.hidden_size is not None:
             prepared.model = best_model
         return best_hparams
+
+    def _suggest_weight_decay(self, trial: Any) -> float:
+        space = self.config.hyperparameter_search.search_space
+        if space.weight_decay_sampling == "log":
+            return trial.suggest_float(
+                "weight_decay",
+                min(space.weight_decay),
+                max(space.weight_decay),
+                log=True,
+            )
+        return trial.suggest_categorical("weight_decay", space.weight_decay)

@@ -188,6 +188,99 @@ def test_random_candidates_are_unique_and_bounded_by_grid() -> None:
     assert len({tuple(candidate.items()) for candidate in candidates}) == 4
 
 
+@pytest.mark.parametrize(
+    "bounds", [[], [0.0, 0.1], [-1e-6, 0.1], [float("nan")], [float("inf")]]
+)
+def test_log_weight_decay_rejects_invalid_bounds(bounds):
+    with pytest.raises(ValueError, match="finite, positive bounds"):
+        HyperparameterSearchSpaceConfig(
+            weight_decay=bounds, weight_decay_sampling="log"
+        )
+
+
+@pytest.mark.parametrize("cached", [True, False])
+def test_tpe_samples_weight_decay_continuously_and_reproducibly(
+    monkeypatch, tmp_path, cached
+):
+    pytest.importorskip("optuna")
+    accelerator = Accelerator(cpu=True)
+    workspace = _make_workspace(tmp_path, "sequence_classification")
+    loader = DataLoader(
+        EmbeddingDataset(torch.ones(4, 3), list(range(4)), torch.tensor([0, 1, 0, 1]))
+        if cached
+        else [{"labels": 0}],
+        batch_size=2,
+    )
+    step = TuneStep(
+        TuneConfig(
+            hyperparameter_search=HyperparameterSearchConfig(
+                enabled=True,
+                n_trials=4,
+                search_space=HyperparameterSearchSpaceConfig(
+                    learning_rate=[1e-4],
+                    weight_decay=[1e-6, 1e-1],
+                    weight_decay_sampling="log",
+                    max_epochs=[1],
+                ),
+            ),
+        )
+    )
+    samples = []
+
+    def train(workspace, artifacts, accelerator, hparams, **kwargs):
+        distribution = kwargs["trial"].distributions["weight_decay"]
+        assert distribution.log
+        assert distribution.low == 1e-6
+        assert distribution.high == 1e-1
+        samples.append(hparams["weight_decay"])
+        return hparams["weight_decay"]
+
+    monkeypatch.setattr(step, "_train", train)
+    for _ in range(2):
+        prepared = PreparedArtifacts(
+            model=EmbeddingProbeHead(3, 2, "sequence_classification"),
+            tokenizer=MagicMock(),
+            train_dataloader=loader,
+            val_dataloader=loader,
+            test_dataloader=None,
+        )
+        best = step._search_hyperparameters(workspace, prepared, accelerator, seed=42)
+        assert best["weight_decay"] == max(samples[-4:])
+
+    assert samples[:4] == samples[4:]
+    assert all(1e-6 < value < 1e-1 for value in samples)
+    assert len(set(samples[:4])) > 1
+
+
+def test_categorical_weight_decay_preserves_zero_and_grid_candidates():
+    trial = MagicMock()
+    trial.suggest_categorical.return_value = 0.0
+    step = TuneStep(
+        TuneConfig(
+            hyperparameter_search=HyperparameterSearchConfig(
+                search_space=HyperparameterSearchSpaceConfig(
+                    learning_rate=[1e-4],
+                    weight_decay=[0.0, 1e-3],
+                    max_epochs=[1],
+                )
+            )
+        )
+    )
+    assert step._suggest_weight_decay(trial) == 0.0
+    trial.suggest_categorical.assert_called_once_with("weight_decay", [0.0, 1e-3])
+    trial.suggest_float.assert_not_called()
+    for pattern in ("random", "grid"):
+        candidates = step._generate_candidates(pattern, n_trials=10, seed=42)
+        assert {candidate["weight_decay"] for candidate in candidates} == {0.0, 1e-3}
+
+    space = step.config.hyperparameter_search.search_space
+    space.weight_decay = [1e-6, 1e-1]
+    space.weight_decay_sampling = "log"
+    for pattern in ("random", "grid"):
+        candidates = step._generate_candidates(pattern, n_trials=10, seed=42)
+        assert {candidate["weight_decay"] for candidate in candidates} == {1e-6, 1e-1}
+
+
 def test_removed_tuning_aliases_are_rejected() -> None:
     with pytest.raises(Exception, match="num_epochs"):
         TuneConfig(num_epochs=1)

@@ -168,6 +168,11 @@ instead of `run_evaluate.py`; see the [ProteinGym guide](docs/proteingym.md).
 
 ### Config files
 
+The default tuning overlay is [`configs/tuning/mlp.yaml`](configs/tuning/mlp.yaml):
+an MLP probe trained over cached embeddings from a frozen trunk. Add it after
+the base, model, and dataset configs when tuning; full trunk fine-tuning and
+other probe types remain explicit alternatives.
+
 Task overlays explicitly select the reported metric and the validation
 selection metric/direction: Macro-F1 for classification, R² for regression
 (ProtParams), pooled Spearman for the current stability dataset, long-range
@@ -182,9 +187,12 @@ The neural tuning overlays enable 100 TPE trials, with learning-rate bounds
 `[1e-5, 1e-3]`, epoch choices `[1, 2, 5, 10, 20, 40, 100]`, cosine decay,
 and no early stopping. The cached MLP searches widths `[128, 256, 512]` and
 batches `[8, 16, 32, 64, 128, 256]`; token batches count valid residues, not
-proteins. Weight decay currently uses categorical candidates from `1e-6`
-through `1e-1`; continuous log-scale weight-decay sampling, depth search
-`[1, 2]`, and train+validation final refitting remain implementation work.
+proteins. TPE samples weight decay continuously on a log scale from `1e-6`
+through `1e-1` (`weight_decay_sampling: log`). Set this to `categorical`
+for discrete candidates, including zero decay; log bounds must be finite and
+positive. Random/grid searches still use the listed candidates, as they do
+for learning rate. Depth search `[1, 2]` and train+validation final refitting
+remain implementation work.
 The base configuration leaves HPO disabled until a neural tuning overlay is
 selected. Classical-estimator overlays retain their estimator-specific spaces.
 
@@ -472,6 +480,7 @@ dataloaders.
 | `hyperparameter_search.metric` | `null` | Task-specific default metric unless overridden |
 | `hyperparameter_search.search_pattern` | `bohb` | `bohb` (Optuna TPE sampler with median pruning), `random`, or `grid` |
 | `hyperparameter_search.search_space.*` | see [`configs/config.yaml`](configs/config.yaml) | Candidate values for `learning_rate`, `max_epochs`, and `weight_decay`; optional cached-MLP dimensions are listed below |
+| `hyperparameter_search.search_space.weight_decay_sampling` | `log` | TPE: continuous log-scale sampling between min/max `weight_decay` bounds; `categorical` permits discrete candidates including zero. Random/grid always use the listed candidates |
 | `hyperparameter_search.search_space.hidden_size` | `null` | Optional hidden widths for cached MLP probes; `null` keeps the fixed `head.hidden_size` |
 | `hyperparameter_search.search_space.batch_size` | `null` | Optional cached MLP training batch sizes; `null` keeps `steps.tune.batch_size` or the prepared loader size |
 

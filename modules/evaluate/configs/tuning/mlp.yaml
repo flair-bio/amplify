@@ -20,5 +20,6 @@ steps:
         batch_size: [8, 16, 32, 64, 128, 256] # cached rows: proteins for sequence tasks, residues for token tasks
         learning_rate: [1e-5, 1e-3] # continuous log-scale TPE bounds
         max_epochs: [1, 2, 5, 10, 20, 40, 100]
-        weight_decay: [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1] # categorical until continuous log sampling is implemented
+        weight_decay: [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
+        weight_decay_sampling: log
         # Planned hidden_depth: [1, 2] is not yet supported.

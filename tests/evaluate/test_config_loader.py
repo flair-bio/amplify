@@ -12,6 +12,23 @@ from modules.evaluate.src.utils.config_loader import load_evaluation_config
 CONFIGS = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
 
 
+@pytest.mark.parametrize("tuning", ["mlp", "torch_linear", "mlp_finetuning"])
+def test_neural_overlays_select_continuous_log_weight_decay(tuning):
+    config = load_evaluation_config(
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "datasets/fold_prediction.yaml",
+            CONFIGS / "tuning" / f"{tuning}.yaml",
+        ]
+    )
+    search = config.steps.tune.hyperparameter_search
+    assert search.enabled
+    assert search.search_pattern == "bohb"
+    assert search.search_space.weight_decay_sampling == "log"
+    assert min(search.search_space.weight_decay) == 1e-6
+    assert max(search.search_space.weight_decay) == 1e-1
+
+
 @pytest.mark.parametrize(
     "dataset",
     sorted((CONFIGS / "datasets").glob("*.yaml")),
