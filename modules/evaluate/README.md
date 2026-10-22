@@ -198,7 +198,9 @@ proteins. TPE samples weight decay continuously on a log scale from `1e-6`
 through `1e-1` (`weight_decay_sampling: log`). Set this to `categorical`
 for discrete candidates, including zero decay; log bounds must be finite and
 positive. Random/grid searches still use the listed candidates, as they do
-for learning rate. Train+validation final refitting remains implementation work.
+for learning rate. Cached tuning overlays enable fresh train+validation final
+refitting after selection; live/native fine-tuning and layerwise refit remain
+implementation work.
 The base configuration leaves HPO disabled until a neural tuning overlay is
 selected. Classical-estimator overlays retain their estimator-specific spaces.
 
@@ -463,7 +465,8 @@ dataloaders.
 | Field | Default | Description |
 |---|---|---|
 | `head.head_type` | `mlp` | `mlp` (existing native model-head path), `torch_linear` (one `torch.nn.Linear` layer), `sklearn_linear` (sklearn logistic/ridge), `knn`, `random_forest`, or `xgboost` |
-| `head.search_space` | `{}` | Classical-estimator dimensions; candidates are selected on the validation split, and the winning estimator is used for test prediction after fitting on `train` only |
+| `head.search_space` | `{}` | Classical-estimator dimensions; candidates fit on train and are selected on validation, before optional final refitting |
+| `refit_on_train_validation` | `false` | Cached tuning overlays set `true`: rebuild the selected probe on train+validation without early stopping or validation selection. Requires nonempty development splits; live/native and layerwise refit are unsupported |
 | `metric_aggregation` | `weighted` | Averaging used for validation metric selection; automatically follows `steps.score.metric_aggregation` unless set explicitly; supports `micro`, `macro`, `weighted`, or `samples` |
 | `learning_rate` | `1e-4` | Used when `hyperparameter_search.enabled=false` |
 | `weight_decay` | `1e-4` | Used when `hyperparameter_search.enabled=false`; applies to matrices and `ZeroCenteredRMSNorm` gain offsets. Other one-dimensional parameters are excluded |
@@ -502,17 +505,29 @@ residues for token tasks. Each trial uses its batch size for training,
 validation, and the optimizer schedule; the selected batch is saved with the
 winning hyperparameters.
 Candidates reuse training-only feature standardization and are selected by the
-validation metric. The winning architecture and weights are retained for test
-prediction and saved together, including depth in the checkpoint metadata and
-control-cache identity. With no architecture search configured,
+validation metric. With `refit_on_train_validation: true`, a fresh head with the
+selected architecture is trained on combined train+validation data for the
+selected full epoch budget, using its selected batch size and a new optimizer
+and scheduler. Feature statistics are recomputed on that development union;
+test data is never used for fitting. Early stopping and pruning are disabled
+during refit. With HPO disabled, the configured fixed architecture and budget
+are fit directly on development data. Saved weights and preprocessing belong
+to the final refit; `final_fit_split` records its training scope in checkpoint
+metadata. With refit disabled, the selected trial's weights are retained.
+With no architecture search configured,
 `head.hidden_size` and `head.hidden_depth` set the fixed architecture.
+Seed-variance diagnostics still run on the original train/validation splits
+before refitting. Those loaders are retained for controls; `majority_class`
+and `train_mean` continue to use train-only labels. Random-trunk control
+training/refitting is a separate pending change.
 
 For classical `head_type` values, put fixed estimator settings in
 `head.hyperparameters` and swept dimensions in `head.search_space`. Every
-candidate trains only on `train` and is compared on `validation`; after
-selection, the winning estimator remains fit on `train` for the held-out
-`test` prediction, matching the torch probe paths. A validation split is
-therefore required when a classical search space is configured. With
+candidate trains only on `train` and is compared on `validation`. Cached
+classical overlays enable final refitting: a fresh estimator with the selected
+settings, including its scaler where applicable, is fit on train+validation.
+A validation split is required for search or refit; with refit disabled,
+the winning training-only estimator is retained. With
 `hyperparameter_search.enabled=false`, every combination is evaluated as a
 grid. With it enabled, `n_trials` and `search_pattern` select grid, random, or
 Optuna BOHB-style trials over those estimator parameters. Classical estimators
@@ -522,8 +537,10 @@ fit atomically, so BOHB cannot prune within a fit.
 hidden projection: it uses the selected cached embedding
 vector. For sequence-level classification/regression it requires
 `steps.prepare.embedding_cache.enabled=true`; for token classification it can
-also use a compatible native `nn.Linear` model head without the cache. Classical
-probes always require `steps.mode=tune_probe` and
+also use a compatible native `nn.Linear` model head without the cache.
+For native token probing, explicitly disable `refit_on_train_validation` when
+disabling the cache; final refitting currently supports cached probes only.
+Classical probes always require `steps.mode=tune_probe` and
 `steps.prepare.embedding_cache.enabled=true`. Set `embedding_cache.layers: [-1]`
 for the final layer, or list any valid model hidden-state indices to concatenate
 pooled representations from several layers.

@@ -8,6 +8,7 @@ steps:
       pooling: mean
       layers: [-1]
   tune:
+    refit_on_train_validation: true
     head:
       head_type: torch_linear
     hyperparameter_search:

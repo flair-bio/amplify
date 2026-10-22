@@ -758,7 +758,7 @@ class EmbeddingDataset(Dataset):
     """Wraps a cached ``(N, H)`` embedding tensor + aligned ids/labels."""
 
     def __init__(
-        self, embeddings: torch.Tensor, ids: list[Any], labels: list[Any]
+        self, embeddings: torch.Tensor, ids: list[Any], labels: list[Any] | torch.Tensor
     ) -> None:
         assert len(embeddings) == len(ids) == len(labels)
         self.embeddings = embeddings

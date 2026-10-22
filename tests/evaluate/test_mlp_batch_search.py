@@ -128,7 +128,7 @@ def test_cached_accumulated_gradients_match_full_batch(
     monkeypatch.setattr(accelerator, "clip_grad_norm_", record_gradients)
 
     step._train(
-        MagicMock(task_type="sequence_classification"),
+        MagicMock(task_type="sequence_classification", num_labels=2),
         prepared,
         accelerator,
         {"learning_rate": 1e-3, "weight_decay": 0.0, "max_epochs": 1},
@@ -248,7 +248,10 @@ def test_trial_batch_size_controls_training_validation_and_scheduler(
     }
 
     score = step._train(
-        MagicMock(task_type="sequence_classification"), prepared, accelerator, hparams
+        MagicMock(task_type="sequence_classification", num_labels=2),
+        prepared,
+        accelerator,
+        hparams,
     )
 
     assert score is not None and math.isfinite(score)
@@ -283,7 +286,7 @@ def test_fixed_batch_monitor_keeps_validation_loader_inheritance(
     monkeypatch.setattr(prepared.model, "forward", record_forward)
 
     step._train(
-        MagicMock(task_type="sequence_classification"),
+        MagicMock(task_type="sequence_classification", num_labels=2),
         prepared,
         Accelerator(cpu=True),
         {"learning_rate": 1e-3, "weight_decay": 0.0, "max_epochs": 1},
@@ -439,4 +442,4 @@ def test_mlp_overlay_enables_requested_batch_size_choices():
 
     search = config.steps.tune.hyperparameter_search
     assert search.enabled
-    assert search.search_space.batch_size == _BATCH_SIZES
+    assert search.search_space.batch_size == [*_BATCH_SIZES, 256]

@@ -174,6 +174,15 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
         raise ValueError(
             f"{dimension} search requires a cached MLP probe in tune_probe mode."
         )
+    if steps.tune.refit_on_train_validation and (
+        steps.mode != "tune_probe"
+        or not steps.prepare.embedding_cache.enabled
+        or steps.layerwise.enabled
+    ):
+        raise ValueError(
+            "refit_on_train_validation requires an ordinary cached probe "
+            "in tune_probe mode; live/native and layerwise refit are not supported."
+        )
     if search_config.enabled and search_config.direction == "maximize":
         # An explicit 'maximize' for a lower-is-better metric would select the
         # WORST trial as "best" with no useful result.

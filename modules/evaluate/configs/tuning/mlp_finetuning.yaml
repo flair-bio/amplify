@@ -8,6 +8,7 @@ steps:
     embedding_cache:
       enabled: false # Override probe defaults: trunk updates make cached embeddings stale.
   tune:
+    refit_on_train_validation: false # live/native refit is not implemented yet
     head:
       head_type: mlp
     hyperparameter_search:

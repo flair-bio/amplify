@@ -389,10 +389,9 @@ def sweep_classical_head(
 ) -> tuple[BaseEstimator, dict[str, Any], float]:
     """Fit and validate classical probe candidates, returning the best one.
 
-    Candidates are selected exclusively on ``val_X``/``val_y``, and the winner
-    is returned as fit on the training split alone -- matching the
-    mlp/torch_linear paths, so head types stay comparable rather than
-    differing in how much data they saw.
+    Candidates are selected exclusively on ``val_X``/``val_y``. This helper
+    returns the training-only winner; TuneStep optionally rebuilds it for
+    train+validation final refitting after selection and diagnostics.
 
     ``grid`` evaluates every ``ParameterGrid`` combination. ``random`` samples
     up to ``n_trials`` combinations without replacement. ``bohb`` uses the

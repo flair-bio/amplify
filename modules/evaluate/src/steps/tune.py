@@ -10,6 +10,7 @@ import itertools
 import logging
 import math
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Collection, Literal
@@ -42,6 +43,7 @@ from modules.evaluate.src.tasks import get_task
 from modules.evaluate.src.tasks.token_classification import IGNORE_INDEX
 from modules.evaluate.src.utils.controls import RANDOMIZED_TRUNK_CONTROLS
 from modules.evaluate.src.utils.embed import (
+    EmbeddingDataset,
     find_embedding_dataset,
 )
 from modules.evaluate.src.utils.hpo import (
@@ -216,6 +218,15 @@ class TuneConfig(BaseModel):
     hyperparameter_search: HyperparameterSearchConfig = Field(
         default_factory=HyperparameterSearchConfig
     )
+    refit_on_train_validation: bool = Field(
+        False,
+        description=(
+            "After validation selection, initialize a fresh cached probe and fit "
+            "on train+validation for the selected full epoch budget, without "
+            "early stopping. Requires nonempty train/validation embedding "
+            "datasets; live/native and layerwise probes are not yet supported."
+        ),
+    )
 
     save_best_model: bool = Field(
         True,
@@ -293,6 +304,30 @@ class TuneStep:
             raise ValueError(
                 f"{dimension} search requires a cached MLP probe in tune_probe mode."
             )
+        if self.config.refit_on_train_validation:
+            if (
+                self.train_trunk
+                or isinstance(prepared.model, LayerwiseProbeModel)
+                or find_embedding_dataset(prepared.train_dataloader) is None
+                or (
+                    self.config.head.head_type not in CLASSICAL_HEAD_TYPES
+                    and not isinstance(prepared.model, EmbeddingProbeHead)
+                )
+            ):
+                raise ValueError(
+                    "refit_on_train_validation requires an ordinary cached probe "
+                    "in tune_probe mode; live/native and layerwise refit are not supported."
+                )
+            for name, loader in (
+                ("train", prepared.train_dataloader),
+                ("validation", prepared.val_dataloader),
+            ):
+                dataset = find_embedding_dataset(loader)
+                if dataset is None or not len(dataset):
+                    raise ValueError(
+                        "refit_on_train_validation requires nonempty train and "
+                        f"validation embedding datasets; missing or empty {name} split."
+                    )
         if isinstance(prepared.model, LayerwiseProbeModel):
             return self._run_layerwise(workspace, prepared, accelerator, seed, controls)
 
@@ -366,21 +401,83 @@ class TuneStep:
                 "weight_decay": self.config.weight_decay,
                 "max_epochs": self.config.max_epochs,
             }
-            self._train(workspace, prepared, accelerator, best_hparams)
+            if not self.config.refit_on_train_validation:
+                self._train(workspace, prepared, accelerator, best_hparams)
 
         # Architecture search can replace the head.
-        model = prepared.model
         if self.config.variance_seeds and cached_probe:
             self._report_torch_seed_variance(
                 workspace, prepared, accelerator, best_hparams
             )
+        if self.config.refit_on_train_validation:
+            self._refit_cached_probe(
+                workspace, prepared, accelerator, best_hparams, seed
+            )
 
+        model = prepared.model
         model.eval()
         if self.config.save_best_model:
             self._save_model(
                 workspace, prepared, model, accelerator, best_hparams, seed
             )
         return prepared
+
+    def _refit_cached_probe(
+        self,
+        workspace: EvaluationWorkspace,
+        prepared: PreparedArtifacts,
+        accelerator: Accelerator,
+        hparams: dict[str, Any],
+        seed: int,
+    ) -> None:
+        """Fit a fresh selected head on development data, retaining split loaders."""
+        train = find_embedding_dataset(prepared.train_dataloader)
+        validation = find_embedding_dataset(prepared.val_dataloader)
+        selected = accelerator.unwrap_model(prepared.model)
+        assert train is not None and validation is not None
+        assert isinstance(selected, EmbeddingProbeHead)
+        development = EmbeddingDataset(
+            torch.cat([train.embeddings, validation.embeddings]),
+            list(train.ids) + list(validation.ids),
+            torch.cat(
+                [torch.as_tensor(train.labels), torch.as_tensor(validation.labels)]
+            ),
+        )
+        torch.manual_seed(seed)
+        fresh = EmbeddingProbeHead(
+            selected.embedding_size,
+            selected.num_labels,
+            selected.task_type,
+            probe_hidden_size=selected.probe_hidden_size,
+            probe_hidden_depth=selected.probe_hidden_depth,
+        ).to(selected.classifier.weight)
+        features = development.embeddings
+        if workspace.task_type == "token_classification":
+            features = features[torch.as_tensor(development.labels) != IGNORE_INDEX]
+        fresh.fit_standardization(features, enabled=self.config.standardize_features)
+        loader = DataLoader(
+            development,
+            batch_size=hparams.get("batch_size")
+            or self._cached_batch_size(prepared.train_dataloader),
+        )
+        refit_prepared = replace(
+            prepared,
+            model=fresh,
+            train_dataloader=loader,
+            val_dataloader=None,
+            test_dataloader=None,
+        )
+        logger.info(
+            "Refitting fresh cached probe on %d train+validation rows for %d epochs.",
+            len(development),
+            hparams["max_epochs"],
+        )
+        trainer = TuneStep(
+            self.config.model_copy(update={"early_stopping_patience": None})
+        )
+        torch.manual_seed(seed)
+        trainer._train(workspace, refit_prepared, accelerator, hparams)
+        prepared.model = fresh
 
     def _run_layerwise(
         self,
@@ -898,6 +995,19 @@ class TuneStep:
             ]
             self._log_seed_variance(metric_name, scores)
 
+        if self.config.refit_on_train_validation:
+            assert val_X is not None and val_y is not None
+            best_estimator = build_estimator(
+                head_config.head_type, workspace.task_type, best_hparams, seed=seed
+            )
+            best_estimator.fit(
+                np.concatenate([train_X, val_X]), np.concatenate([train_y, val_y])
+            )
+            logger.info(
+                "Refitted fresh %s estimator on %d train+validation rows.",
+                head_config.head_type,
+                len(train_y) + len(val_y),
+            )
         prepared.model = best_estimator
 
         if self.config.save_best_model and accelerator.is_main_process:
@@ -1013,6 +1123,9 @@ class TuneStep:
             seed,
             self.config.model_dump(mode="json"),
             best_hyperparameters=best_hyperparameters,
+            final_fit_split="train+validation"
+            if self.config.refit_on_train_validation
+            else "train",
             **extra,
         )
 
