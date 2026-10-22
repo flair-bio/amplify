@@ -1,3 +1,7 @@
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 import torch
 from torch._subclasses.fake_tensor import FakeTensorMode
@@ -7,19 +11,34 @@ from modules.pretrain.src.model import fa4
 
 def test_fake_matches_kernel_layout():
     """torch.compile traces the ops through their fake impls, so the shapes and
-    dtypes there must match what FA4 returns."""
-    total, heads, head_dim = 6, 4, 16
-    with FakeTensorMode():
-        q = torch.empty(total, heads, head_dim, dtype=torch.bfloat16)
-        cu_seqlens = torch.empty(3, dtype=torch.int32)
-        out, lse = fa4._fa4_varlen_fwd(q, q, q, cu_seqlens, cu_seqlens, 4, 4, False)
-        dq, dk, dv = fa4._fa4_varlen_bwd(
-            out, out, lse, q, q, q, cu_seqlens, cu_seqlens, 4, 4, False
-        )
+    dtypes there must match what FA4 returns. Run in a fresh interpreter because
+    other tests can disturb PyTorch's process-global custom-op registry."""
+    script = """
+import torch
+from torch._subclasses.fake_tensor import FakeTensorMode
+from modules.pretrain.src.model import fa4
 
-    assert out.shape == (total, heads, head_dim) and out.dtype == torch.bfloat16
-    assert lse.shape == (heads, total) and lse.dtype == torch.float32
-    assert dq.shape == dk.shape == dv.shape == q.shape
+total, heads, head_dim = 6, 4, 16
+with FakeTensorMode():
+    q = torch.empty(total, heads, head_dim, dtype=torch.bfloat16)
+    cu_seqlens = torch.empty(3, dtype=torch.int32)
+    out, lse = fa4._fa4_varlen_fwd(q, q, q, cu_seqlens, cu_seqlens, 4, 4, False)
+    dq, dk, dv = fa4._fa4_varlen_bwd(
+        out, out, lse, q, q, q, cu_seqlens, cu_seqlens, 4, 4, False
+    )
+
+assert out.shape == (total, heads, head_dim) and out.dtype == torch.bfloat16
+assert lse.shape == (heads, total) and lse.dtype == torch.float32
+assert dq.shape == dk.shape == dv.shape == q.shape
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _fa4_available() -> bool:

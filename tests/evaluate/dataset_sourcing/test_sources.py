@@ -22,8 +22,31 @@ from modules.evaluate.scripts.dataset_sourcing.source_uniprot_go import (
 from modules.evaluate.src.dataset_sourcing import hf_io, pipeline
 from modules.evaluate.src.dataset_sourcing.config import DatasetSourcingConfig
 from modules.evaluate.src.dataset_sourcing.spec import DatasetSourceSpec
+from modules.evaluate.scripts.dataset_sourcing.source_tape_proteinnet import (
+    _contact_record_from_raw,
+)
 
 _EVIDENCE = '/evidence="ECO:0000269|PubMed:1"'
+
+
+def test_proteinnet_contact_record_preserves_resolved_positions():
+    record = _contact_record_from_raw(
+        {
+            "id": "P1",
+            "primary": "AAAA",
+            "tertiary": [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+            ],
+            "valid_mask": [True, False, True, True],
+        },
+        split="test",
+    )
+
+    assert record["valid_positions"] == [0, 2, 3]
+    assert all(1 not in pair for pair in record["targets"])
 
 
 def test_disulfide_bond_labels_only_its_two_cysteines():

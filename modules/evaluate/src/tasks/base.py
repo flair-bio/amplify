@@ -273,6 +273,7 @@ class TaskHandler(ABC):
         res_start: int,
         res_end: int,
         example_id: Any,
+        example_index: int,
     ) -> list[dict[str, Any]]:
         """Return one or more tokenized rows for a source example."""
         return [

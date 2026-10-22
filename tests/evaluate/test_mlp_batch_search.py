@@ -68,6 +68,84 @@ def _batches(rows, batch_size):
     return [min(batch_size, rows - start) for start in range(0, rows, batch_size)]
 
 
+@pytest.mark.parametrize(
+    "accumulation_steps, microbatches",
+    [(1, 1), (2, 2), (4, 4), (2, 1), (4, 3)],
+)
+def test_cached_accumulated_gradients_match_full_batch(
+    monkeypatch, accumulation_steps, microbatches
+):
+    batch_size = 2
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(42)
+        prepared = _prepared(train_rows=batch_size * microbatches)
+    accelerator = Accelerator(
+        cpu=True, mixed_precision="no", gradient_accumulation_steps=accumulation_steps
+    )
+    step = TuneStep(
+        TuneConfig(
+            batch_size=batch_size,
+            accumulation_steps=accumulation_steps,
+            early_stopping_patience=None,
+            save_best_model=False,
+        )
+    )
+    dataset = prepared.train_dataloader.dataset
+    model = prepared.model
+    model.train()
+    model(
+        inputs_embeds=dataset.embeddings,
+        labels=torch.as_tensor(dataset.labels),
+    ).loss.backward()
+    expected = torch.cat(
+        [
+            parameter.grad.detach().clone().flatten()
+            for parameter in model.parameters()
+            if parameter.grad is not None
+        ]
+    )
+    # Partial windows retain the configured divisor rather than renormalizing
+    # by the number of microbatches actually present.
+    expected *= microbatches / accumulation_steps
+    assert expected.norm() > 0
+    model.zero_grad(set_to_none=True)
+    observed = []
+    clip_grad_norm = accelerator.clip_grad_norm_
+
+    def record_gradients(parameters, max_norm, **kwargs):
+        parameters = list(parameters)
+        observed.append(
+            torch.cat(
+                [
+                    parameter.grad.detach().clone().flatten()
+                    for parameter in parameters
+                    if parameter.grad is not None
+                ]
+            )
+        )
+        return clip_grad_norm(parameters, max_norm, **kwargs)
+
+    monkeypatch.setattr(accelerator, "clip_grad_norm_", record_gradients)
+
+    step._train(
+        MagicMock(task_type="sequence_classification"),
+        prepared,
+        accelerator,
+        {"learning_rate": 1e-3, "weight_decay": 0.0, "max_epochs": 1},
+    )
+
+    assert len(observed) == 1
+    torch.testing.assert_close(
+        observed[0],
+        expected,
+        msg=(
+            f"Accumulation {accumulation_steps}, {microbatches} microbatches: "
+            f"cached/reference gradient "
+            f"norm ratio = {(observed[0].norm() / expected.norm()).item():.6f}"
+        ),
+    )
+
+
 @pytest.mark.parametrize("batch_sizes", [[], [0], [-1], [8, 0]])
 def test_batch_search_rejects_empty_or_nonpositive_batches(batch_sizes):
     with pytest.raises(ValidationError, match="batch_size"):
@@ -133,7 +211,7 @@ def test_trial_batch_size_controls_training_validation_and_scheduler(
     monkeypatch, batch_size
 ):
     prepared = _prepared()
-    accelerator = Accelerator(cpu=True)
+    accelerator = Accelerator(cpu=True, gradient_accumulation_steps=3)
     step = TuneStep(
         TuneConfig(
             batch_size=3,

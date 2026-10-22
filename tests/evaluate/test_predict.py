@@ -802,6 +802,96 @@ def test_distributed_inference_deduplicates_aligned_rows():
     assert sequences == ["[2, 0]", "[0, 2]", "[0, 3]"]
 
 
+def test_contact_inference_preserves_true_cropped_length():
+    from modules.evaluate.src.tasks import get_task
+
+    class Model(torch.nn.Module):
+        def forward(self, input_ids, attention_mask):
+            batch_size, seq_len = input_ids.shape
+            return SimpleNamespace(logits=torch.zeros(batch_size, seq_len, seq_len))
+
+    class Accelerator:
+        num_processes = 1
+
+        @staticmethod
+        def gather_for_metrics(values, **kwargs):
+            return values
+
+    task = get_task("contact_prediction")
+    aligned = task.align_labels(
+        {"pairs": [[2, 9]], "valid_positions": [2, 9, 12]},
+        num_residues=15,
+        start=2,
+        kept=13,
+        offset=1,
+        input_len=15,
+        example_index=0,
+    )
+    labels = task.collate_labels([aligned], batch_size=1, seq_len=15)
+    batch = {
+        "input_ids": torch.ones((1, 15), dtype=torch.long),
+        "attention_mask": torch.ones((1, 15), dtype=torch.long),
+        "labels": labels,
+        "id": ["protein"],
+        "residue_lengths": torch.tensor([aligned["length"]]),
+    }
+
+    ids, predictions, labels, _, _ = run_inference(
+        Model(), [batch], "contact_prediction", Accelerator()
+    )
+
+    assert ids == ["protein"]
+    assert len(predictions) == len(labels) == 1
+    assert labels[0]["length"] == 13
+    assert labels[0]["values"] == [1, 0]
+
+
+def test_distributed_pseudo_perplexity_matches_full_residue_score():
+    class Model(torch.nn.Module):
+        def forward(self, input_ids, attention_mask):
+            logits = torch.zeros((*input_ids.shape, 4))
+            first_residue = input_ids[:, 0] == 10
+            second_residue = input_ids[:, 0] == 11
+            logits[first_residue, 0, 1] = 2.0
+            logits[second_residue, 0, 2] = 0.5
+            return SimpleNamespace(logits=logits)
+
+    class Accelerator:
+        num_processes = 2
+
+        @staticmethod
+        def pad_across_processes(tensor, **kwargs):
+            return tensor
+
+        @staticmethod
+        def gather_for_metrics(values, **kwargs):
+            return values
+
+    batch = {
+        "input_ids": torch.tensor([[10], [11], [10]]),
+        "attention_mask": torch.ones(3, 1, dtype=torch.long),
+        "labels": torch.tensor([[1], [2], [1]]),
+        "id": ["protein:0:0", "protein:0:1", "protein:0:0"],
+    }
+    ids, predictions, labels, _, _ = run_inference(
+        Model(), [batch], "pseudo_perplexity", Accelerator()
+    )
+
+    expected_predictions = [
+        float(torch.tensor([0.0, 2.0, 0.0, 0.0]).log_softmax(0)[1]),
+        float(torch.tensor([0.0, 0.0, 0.5, 0.0]).log_softmax(0)[2]),
+    ]
+    assert ids == ["protein:0:0", "protein:0:1"]
+    assert predictions == pytest.approx(expected_predictions)
+    assert labels == [1, 2]
+
+    actual_score = torch.exp(-torch.tensor(predictions).mean()).item()
+    expected_score = torch.exp(-torch.tensor(expected_predictions).mean()).item()
+    first_residue_only_score = torch.exp(-torch.tensor(predictions[0])).item()
+    assert actual_score == pytest.approx(expected_score)
+    assert actual_score != pytest.approx(first_residue_only_score)
+
+
 def test_packed_token_inference_keeps_example_rows():
     class Model(torch.nn.Module):
         def forward(

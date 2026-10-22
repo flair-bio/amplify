@@ -545,11 +545,13 @@ under `source_folder` (default `downloaded_datasets/`), then a
 - `targets` stores these raw pairs, and `valid_positions` lists resolved
   residues. Pairs involving unresolved residues are neither positive nor
   negative.
-- The minimum sequence separation of 6 is applied downstream, by evaluation's
-  `normalize_contact_record`, not here. Short-range pairs, such as helical
-  i/i+3 and i/i+4 pairs, are trivially in contact and would inflate scores.
-  Storing raw pairs matches the Biomap contact convention and leaves that
-  choice to evaluation.
+- The minimum sequence separation of 6 is applied downstream by the contact
+  task after cropping. Short-range pairs, such as helical i/i+3 and i/i+4
+  pairs, are trivially in contact and would inflate scores.
+- Evaluation carries `valid_positions` through cropping and collation, so pairs
+  involving unresolved residues remain unknown rather than becoming negatives.
+  Storing raw pairs matches the Biomap contact convention and leaves separation
+  filtering to evaluation.
 
 **Other choices:**
 

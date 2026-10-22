@@ -51,6 +51,25 @@ def test_align_labels_crops_and_shifts_pairs():
     )
 
 
+def test_unresolved_contact_pairs_are_ignored_after_crop():
+    task = _task()
+    aligned = task.align_labels(
+        {"pairs": [[2, 9]], "valid_positions": [2, 9, 12]},
+        num_residues=15,
+        start=2,
+        kept=13,
+        offset=1,
+        input_len=15,
+        example_index=0,
+    )
+    labels = task.collate_labels([aligned], batch_size=1, seq_len=15)
+
+    assert aligned["length"] == 13
+    assert labels[0, 1, 8] == 1
+    assert labels[0, 1, 7] == IGNORE_INDEX
+    assert labels[0, 1, 11] == 0
+
+
 def test_collate_labels_is_symmetric_and_masks_short_range_and_padding():
     task = _task()
     seq_len = 8
@@ -119,6 +138,27 @@ def test_split_batch_rows_returns_explicit_metric_metadata():
     assert label_row["values"].count(1) == 1
     positive_index = label_row["values"].index(1)
     assert pred_row["separations"][positive_index] == seq_len - 1
+
+
+def test_split_batch_rows_uses_cropped_length_with_unresolved_edges():
+    task = _task()
+    aligned = task.align_labels(
+        {"pairs": [[2, 9]], "valid_positions": [2, 9, 12]},
+        num_residues=15,
+        start=2,
+        kept=13,
+        offset=1,
+        input_len=15,
+        example_index=0,
+    )
+    labels = task.collate_labels([aligned], batch_size=1, seq_len=15)
+    rows = task.split_batch_rows(
+        torch.zeros((1, 15, 15)),
+        labels,
+        residue_lengths=torch.tensor([aligned["length"]]),
+    )
+
+    assert rows[0][1]["length"] == 13
 
 
 def test_split_batch_rows_length_uses_span_not_scored_count():

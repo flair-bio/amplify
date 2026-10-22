@@ -15,6 +15,7 @@ from modules.evaluate.src.dataset.collator import input_id_rows, unpack_packed
 from modules.evaluate.src.model.heads import EmbeddingProbeHead
 from modules.evaluate.src.model.layerwise import LayerwiseProbeModel
 from modules.evaluate.src.tasks import get_task
+from modules.evaluate.src.tasks.contact_prediction import ContactPredictionTask
 from modules.evaluate.src.tasks.token_classification import IGNORE_INDEX
 from modules.evaluate.src.utils.controls import (
     NO_INFERENCE_CONTROLS,
@@ -235,6 +236,7 @@ def run_layerwise_conditions(
             batch = dict(raw_batch)
             ids = batch.pop("id", None)
             labels = batch.pop("labels")
+            residue_lengths = batch.pop("residue_lengths", None)
             if batch_transform is not None:
                 batch = batch_transform(batch)
             outputs = inner.forward_conditions(head_sets, **batch)
@@ -247,6 +249,8 @@ def run_layerwise_conditions(
             targets: dict[str, torch.Tensor] = {
                 "labels": pad_for_gather(labels, accelerator, IGNORE_INDEX)
             }
+            if residue_lengths is not None:
+                targets["residue_lengths"] = residue_lengths
             for name, layer_outputs in outputs.items():
                 for layer, output in layer_outputs.items():
                     targets[f"pred_{name}_{layer}"] = pad_for_gather(
@@ -295,11 +299,21 @@ def run_layerwise_conditions(
             for name in head_sets:
                 for layer in layer_ids:
                     layer_rows = rows[name][layer]
-                    for index, (pred, label) in enumerate(
-                        task.split_batch_rows(
-                            gathered[f"pred_{name}_{layer}"], gathered["labels"]
-                        )
+                    predictions = gathered[f"pred_{name}_{layer}"]
+                    if (
+                        isinstance(task, ContactPredictionTask)
+                        and "residue_lengths" in gathered
                     ):
+                        layer_rows_data = task.split_batch_rows(
+                            predictions,
+                            gathered["labels"],
+                            residue_lengths=gathered["residue_lengths"],
+                        )
+                    else:
+                        layer_rows_data = task.split_batch_rows(
+                            predictions, gathered["labels"]
+                        )
+                    for index, (pred, label) in enumerate(layer_rows_data):
                         row_id = ids[index] if ids is not None else len(layer_rows.ids)
                         if flatten:
                             layer_rows.ids.extend([row_id] * len(pred))

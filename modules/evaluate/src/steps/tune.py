@@ -1114,8 +1114,9 @@ class TuneStep:
                             "inputs_embeds": inputs_embeds,
                             "labels": labels,
                         }
-                    elif "id" in batch:
-                        batch = {k: v for k, v in batch.items() if k != "id"}
+                    else:
+                        batch.pop("id", None)
+                        batch.pop("residue_lengths", None)
 
                     accumulation = (
                         nullcontext() if cached_probe else accelerator.accumulate(model)
@@ -1128,17 +1129,10 @@ class TuneStep:
                     with accumulation:
                         outputs = model(**batch)
                         loss = outputs.loss
-                        # accelerator.prepare()'d optimizer/scheduler (the
-                        # non-cached path) silently no-op step()/zero_grad()
-                        # until sync_gradients is True; the raw torch
-                        # optimizer/scheduler used for cached probes has no
-                        # such gating, so loss scaling and the step/zero_grad
-                        # gate below must be done explicitly here instead.
-                        accelerator.backward(
-                            loss / self.config.accumulation_steps
-                            if cached_probe
-                            else loss
-                        )
+                        # backward() applies accumulation scaling in both
+                        # paths. Cached probes use raw optimizers/schedulers,
+                        # so update gating must still be explicit below.
+                        accelerator.backward(loss)
                         if accelerator.sync_gradients:
                             accelerator.clip_grad_norm_(
                                 model.parameters(), self.config.max_grad_norm

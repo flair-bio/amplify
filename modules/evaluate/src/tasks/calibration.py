@@ -100,6 +100,7 @@ class CalibrationTask(TaskHandler):
         res_start: int,
         res_end: int,
         example_id: Any,
+        example_index: int,
     ) -> list[dict[str, Any]]:
         mask_token_id = tokenizer.mask_token_id
         if mask_token_id is None:

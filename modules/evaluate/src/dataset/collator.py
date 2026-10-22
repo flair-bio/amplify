@@ -99,6 +99,14 @@ class EvaluationCollator:
         output = (
             self._collate_packed(batch) if self.packed else self._collate_padded(batch)
         )
+        if self.task.pairwise:
+            label_entries = [example[self.label_column] for example in batch]
+            if all(
+                isinstance(entry, dict) and "length" in entry for entry in label_entries
+            ):
+                output["residue_lengths"] = torch.tensor(
+                    [entry["length"] for entry in label_entries], dtype=torch.long
+                )
         if self.id_column in batch[0]:
             # Left as a plain Python list (not a tensor): callers must pop it
             # before feeding the batch to the model.

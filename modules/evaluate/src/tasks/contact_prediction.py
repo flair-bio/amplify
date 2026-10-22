@@ -2,9 +2,9 @@
 
 Unlike ``token_classification``'s one-label-per-residue rows, labels here are
 one-label-per-*pair*: a dense ``(S, S)`` map per example, built from a sparse
-list of positive-contact ``[i, j]`` pairs (everything else at a valid
-separation is an implicit negative -- the standard convention for this
-dataset). Only pairs with tokenized separation ``>= MIN_SEP`` are scored;
+list of positive-contact ``[i, j]`` pairs (everything else between resolved
+residues at a valid separation is an implicit negative). Only pairs with
+tokenized separation ``>= MIN_SEP`` are scored;
 closer pairs (trivially "in contact" by sequence adjacency) are masked out
 via the ``-100`` ignore value, same as padding and leading/trailing
 special-token positions (CLS/BOS, EOS/SEP), which are not residues and are
@@ -102,19 +102,33 @@ class ContactPredictionTask(TaskHandler):
     ) -> Any:
         """Crop+shift raw ``[i, j]`` contact pairs into tokenized coordinates.
 
-        Returns a ``{"pairs": [...], "res_start": offset, "res_end": ...}``
-        dict (rather than just the pair list) so ``collate_labels`` knows
-        each example's real residue span -- i.e. excluding the leading/
-        trailing special tokens (CLS/BOS, EOS/SEP), which are not residues
-        and must never be scored as implicit negatives.
+        The aligned dict retains the cropped sequence length and resolved
+        residue positions, excluding special tokens from candidate pairs.
         """
         end = start + kept
+        if isinstance(label, dict):
+            pairs = label["pairs"]
+            source_valid_positions = label["valid_positions"] or []
+        else:
+            pairs = label
+            source_valid_positions = range(num_residues)
         pairs = [
             [offset + (i - start), offset + (j - start)]
-            for i, j in label
+            for i, j in pairs
             if start <= i < end and start <= j < end
         ]
-        return {"pairs": pairs, "res_start": offset, "res_end": offset + kept}
+        valid_positions = [
+            offset + (position - start)
+            for position in source_valid_positions
+            if start <= position < end
+        ]
+        return {
+            "pairs": pairs,
+            "valid_positions": valid_positions,
+            "res_start": offset,
+            "res_end": offset + kept,
+            "length": kept,
+        }
 
     def collate_labels(
         self, labels: list[Any], batch_size: int, seq_len: int
@@ -126,6 +140,8 @@ class ContactPredictionTask(TaskHandler):
         )
         for b, entry in enumerate(labels):
             res_start, res_end = entry["res_start"], entry["res_end"]
+            resolved = torch.zeros(seq_len, dtype=torch.bool)
+            resolved[entry.get("valid_positions", range(res_start, res_end))] = True
             valid = base_valid.clone()
             # Exclude padding *and* special-token positions (before res_start,
             # at/after res_end): only real residues can be scored, positive
@@ -134,6 +150,7 @@ class ContactPredictionTask(TaskHandler):
             valid[:, res_end:] = False
             valid[:res_start, :] = False
             valid[:, :res_start] = False
+            valid &= resolved[:, None] & resolved[None, :]
             collated[b][valid] = 0
             for i, j in entry["pairs"]:
                 if valid[i, j]:
@@ -147,10 +164,14 @@ class ContactPredictionTask(TaskHandler):
         return logits.sigmoid()
 
     def split_batch_rows(
-        self, predictions: torch.Tensor, labels: torch.Tensor
+        self,
+        predictions: torch.Tensor,
+        labels: torch.Tensor,
+        *,
+        residue_lengths: torch.Tensor | None = None,
     ) -> list[tuple[Any, Any]]:
         rows: list[tuple[Any, Any]] = []
-        for pred_mat, label_mat in zip(predictions, labels):
+        for row_index, (pred_mat, label_mat) in enumerate(zip(predictions, labels)):
             valid = label_mat != IGNORE_INDEX
             # Every scored pair appears twice (symmetric); count each once.
             upper = valid & torch.triu(torch.ones_like(valid), diagonal=1)
@@ -158,19 +179,15 @@ class ContactPredictionTask(TaskHandler):
             scores = [float(score) for score in pred_mat[i_idx, j_idx].tolist()]
             seps = [int(sep) for sep in (j_idx - i_idx).tolist()]
             values = [int(value) for value in label_mat[i_idx, j_idx].tolist()]
-            # The real residue span is contiguous, but a residue in a short
-            # chain can have every partner closer than MIN_SEP (so no scored
-            # pair of its own) without being outside the span -- e.g. the
-            # middle residues of an 8-residue chain. Counting scored columns
-            # would undercount L there, so take the min/max scored index's
-            # span instead (both true edges always have a scored partner
-            # whenever the chain has any scored pair at all).
-            scored_cols = valid.any(dim=0).nonzero(as_tuple=True)[0]
-            length = (
-                int(scored_cols.max() - scored_cols.min() + 1)
-                if scored_cols.numel()
-                else 0
-            )
+            if residue_lengths is not None:
+                length = int(residue_lengths[row_index])
+            else:
+                scored_cols = valid.any(dim=0).nonzero(as_tuple=True)[0]
+                length = (
+                    int(scored_cols.max() - scored_cols.min() + 1)
+                    if scored_cols.numel()
+                    else 0
+                )
             pred_row = {"scores": scores, "separations": seps}
             label_row = {"length": length, "values": values}
             rows.append((pred_row, label_row))
