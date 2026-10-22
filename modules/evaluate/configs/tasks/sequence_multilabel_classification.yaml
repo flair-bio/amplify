@@ -2,6 +2,13 @@ workspace:
   task_type: sequence_multilabel_classification
 
 steps:
+  tune:
+    hyperparameter_search:
+      metric: f1
+      direction: maximize
+  score:
+    metrics: [f1]
+    metric_aggregation: macro # equal weight per label column
   prepare:
     embedding_cache:
       enabled: true

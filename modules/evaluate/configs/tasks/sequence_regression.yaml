@@ -2,6 +2,12 @@ workspace:
   task_type: sequence_regression
 
 steps:
+  tune:
+    hyperparameter_search:
+      metric: r2
+      direction: maximize
+  score:
+    metrics: [r2] # property-level ProtParams default; stability overrides this
   prepare:
     embedding_cache:
       enabled: true

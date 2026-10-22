@@ -90,24 +90,26 @@ steps:
     accumulation_steps: 1 # effective batches accumulated per optimizer step
     batch_size: null # cached-embedding probe batch size; null keeps the prepared loader size
     standardize_features: true # ordinary cached MLP/torch_linear probes; fit on train only
-    early_stopping_patience: 5 # stop early after this many epochs with no val improvement
+    early_stopping_patience: null # disable early stopping; TPE trials can still be pruned
     optimizer: adamw # one of adamw, adam, sgd, rmsprop, adagrad, adafactor
     optimizer_kwargs: {} # extra optimizer constructor kwargs, e.g. {momentum: 0.9} for sgd
-    lr_scheduler_type: linear # any name accepted by transformers.get_scheduler, e.g. linear, cosine, cosine_with_restarts, polynomial, constant, constant_with_warmup, inverse_sqrt
+    lr_scheduler_type: cosine # any name accepted by transformers.get_scheduler
     scheduler_kwargs: {} # extra scheduler-specific kwargs, e.g. {num_cycles: 3}
     save_best_model: true # persist the best model + tokenizer to workspace.model_path after tuning, for later reuse
     hyperparameter_search:
-      enabled: false
-      n_trials: 15
-      metric: null # task-specific defaults; direction is inferred
-      direction: null # inferred from the target metric when omitted
+      enabled: false # use tuning/mlp.yaml to enable the planned cached-MLP search
+      n_trials: 100
+      metric: null # task overlays set the selection metric explicitly
+      direction: null # task overlays set the optimization direction explicitly
       search_pattern: bohb # one of bohb (Optuna TPE + median pruning), random, grid
       search_space:
         hidden_size: null # optional cached-MLP widths; null keeps head.hidden_size
         batch_size: null # optional cached-MLP training batches; null keeps tune.batch_size
-        learning_rate: [5e-4, 1e-4, 5e-5, 1e-5]
-        max_epochs: [5, 10, 20]
-        weight_decay: [0, 1e-4, 1e-3]
+        learning_rate: [1e-5, 1e-3] # TPE samples continuously on a log scale between these bounds
+        max_epochs: [1, 2, 5, 10, 20, 40, 100]
+        weight_decay: [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1] # currently categorical; continuous log sampling needs code support
+        # Planned hidden_depth: [1, 2] requires schema and head/search implementation.
+    # Planned train+validation refit requires implementation; current runs retain validation-selected weights.
   predict:
     embedding_batch_size: null # cached rows per batch (residues for token tasks); null inherits prepare.batch_size
     collect_probabilities: false # auto-enabled when effective metrics need probabilities, e.g. roc_auc or multilabel average_precision
@@ -115,7 +117,7 @@ steps:
     store_sequences: false # include decoded input sequences in main predictions parquet (larger output)
     controls: [untrained] # subset of: untrained, random_trunk, random_head, random_both, scrambled_labels, scrambled_sequences, majority_class, train_mean, separation_prior
   score:
-    metrics: null # computes all supported metrics for task_type; set explicitly only to override
+    metrics: null # task overlays declare reported metrics explicitly
     metric_aggregation: macro # one of micro, macro, weighted, samples
     bootstrap_enabled: true
     n_samples: 1000 # bootstrap CI resamples; 1000 is the standard minimum for stable percentile CIs

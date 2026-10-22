@@ -6,6 +6,12 @@ workspace:
 
 steps:
   mode: evaluate_as_is
+  tune:
+    hyperparameter_search:
+      metric: contact_auc_long
+      direction: maximize
+  score:
+    metrics: [contact_auc_long]
   prepare:
     embedding_cache:
       enabled: false

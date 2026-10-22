@@ -168,6 +168,26 @@ instead of `run_evaluate.py`; see the [ProteinGym guide](docs/proteingym.md).
 
 ### Config files
 
+Task overlays explicitly select the reported metric and the validation
+selection metric/direction: Macro-F1 for classification, R² for regression
+(ProtParams), pooled Spearman for the current stability dataset, long-range
+contact AUC for contacts, calibration agreement, and pseudo-perplexity.
+Only the selected metric is reported by default; override `steps.score.metrics`
+to request diagnostic metrics. Stability's intended grouped Macro-Spearman
+still requires verified parent-design metadata and scorer support. Calibration
+currently reports `mean(exp(-KL))` on a 0–1 scale, not the planned 0–100 scale.
+Classification still uses the existing observed-class inclusion rules.
+
+The neural tuning overlays enable 100 TPE trials, with learning-rate bounds
+`[1e-5, 1e-3]`, epoch choices `[1, 2, 5, 10, 20, 40, 100]`, cosine decay,
+and no early stopping. The cached MLP searches widths `[128, 256, 512]` and
+batches `[8, 16, 32, 64, 128, 256]`; token batches count valid residues, not
+proteins. Weight decay currently uses categorical candidates from `1e-6`
+through `1e-1`; continuous log-scale weight-decay sampling, depth search
+`[1, 2]`, and train+validation final refitting remain implementation work.
+The base configuration leaves HPO disabled until a neural tuning overlay is
+selected. Classical-estimator overlays retain their estimator-specific spaces.
+
 | File | Use |
 |---|---|
 | `configs/config.yaml` | Base config: every section, with every field documented. Runnable baseline |

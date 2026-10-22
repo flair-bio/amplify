@@ -11,7 +11,12 @@ steps:
     head:
       head_type: torch_linear
     hyperparameter_search:
+      enabled: true
+      n_trials: 100
+      search_pattern: bohb
       search_space:
-        learning_rate: [1e-3, 5e-4, 1e-4]
-        max_epochs: [10, 20, 40]
-        weight_decay: [1e-4, 1e-3]
+        hidden_size: null # linear heads have no hidden layer
+        batch_size: null # batch search currently supports cached MLPs only
+        learning_rate: [1e-5, 1e-3]
+        max_epochs: [1, 2, 5, 10, 20, 40, 100]
+        weight_decay: [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1]

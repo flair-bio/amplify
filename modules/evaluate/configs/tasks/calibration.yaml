@@ -3,6 +3,12 @@ workspace:
 
 steps:
   mode: evaluate_as_is
+  tune:
+    hyperparameter_search:
+      metric: calibration
+      direction: maximize
+  score:
+    metrics: [calibration] # currently mean(exp(-KL)) on 0-1; planned x100 scaling is pending
   prepare:
     # The handler cuts its own 512-residue window centred on each scored
     # position, so the dataloader must keep full sequences (longest ~7k).

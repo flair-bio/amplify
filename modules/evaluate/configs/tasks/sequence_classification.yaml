@@ -2,6 +2,13 @@ workspace:
   task_type: sequence_classification
 
 steps:
+  tune:
+    hyperparameter_search:
+      metric: f1
+      direction: maximize
+  score:
+    metrics: [f1]
+    metric_aggregation: macro # equal weight per evaluated class; fixed vocabulary inclusion is pending
   prepare:
     embedding_cache:
       enabled: true

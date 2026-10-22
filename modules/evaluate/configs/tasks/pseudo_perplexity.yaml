@@ -3,6 +3,12 @@ workspace:
 
 steps:
   mode: evaluate_as_is
+  tune:
+    hyperparameter_search:
+      metric: pseudo_perplexity
+      direction: minimize
+  score:
+    metrics: [pseudo_perplexity]
   prepare:
     # Prepare still requires three roles; only the test loader is scored.
     split:
