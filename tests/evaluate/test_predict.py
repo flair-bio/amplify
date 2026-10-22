@@ -373,6 +373,13 @@ def test_cached_token_controls_preserve_extraction_order(
             expected_labels.extend([[value] for value in valid_labels])
             example_offset += 1
 
+    TuneStep(
+        TuneConfig(
+            head=HeadConfig(head_type="torch_linear"),
+            max_epochs=1,
+            save_best_model=False,
+        )
+    ).run(workspace, prepared, controls=["random_trunk"], accelerator=Accelerator(cpu=True))
     result = PredictStep(
         PredictConfig(controls=["untrained", "random_head", "random_trunk", "random_both"])
     ).run(workspace, prepared, accelerator=Accelerator(cpu=True))
@@ -398,6 +405,13 @@ def test_cached_prediction_batching_is_independent_of_protein_batches(
     loader = prepared.test_dataloader
     backend = prepared.embedding_backend
     controls = ["untrained", "random_head", "random_trunk", "random_both"]
+    TuneStep(
+        TuneConfig(
+            head=HeadConfig(head_type="torch_linear"),
+            max_epochs=1,
+            save_best_model=False,
+        )
+    ).run(workspace, prepared, controls=controls, accelerator=Accelerator(cpu=True))
     with caplog.at_level("INFO"):
         baseline = PredictStep(
             PredictConfig(controls=controls, collect_probabilities=True)
@@ -743,6 +757,14 @@ def test_cached_multilabel_control_probabilities_persist_sigmoid(
     workspace = _make_workspace(
         tmp_path, "sequence_multilabel_classification", num_labels=2
     )
+    if control == "random_trunk":
+        TuneStep(
+            TuneConfig(
+                head=HeadConfig(head_type="torch_linear"),
+                max_epochs=1,
+                save_best_model=False,
+            )
+        ).run(workspace, prepared, controls=[control], accelerator=Accelerator(cpu=True))
     result = PredictStep(
         PredictConfig(controls=[control], collect_probabilities=True)
     ).run(workspace, prepared, accelerator=Accelerator(cpu=True))
@@ -996,7 +1018,7 @@ class TestPredictConfig:
         cfg = PredictConfig()
         assert cfg.collect_probabilities is False
         assert cfg.store_sequences is False
-        assert cfg.controls == ["untrained"]
+        assert cfg.controls == ["random_trunk"]
         assert cfg.predictions_filename == "predictions.parquet"
 
     def test_extra_fields_forbidden(self):

@@ -75,13 +75,13 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
         config.workspace.num_labels,
         config.workspace.dataset_name,
     )
-    if task.name in {"pseudo_perplexity", "calibration"}:
-        if steps.mode != "evaluate_as_is":
-            raise ValueError(
-                f"task_type='{task.name}' requires steps.mode='evaluate_as_is'."
-            )
-        if "controls" not in steps.predict.model_fields_set:
-            steps.predict.controls = []
+    if (
+        task.name in {"pseudo_perplexity", "calibration"}
+        and steps.mode != "evaluate_as_is"
+    ):
+        raise ValueError(
+            f"task_type='{task.name}' requires steps.mode='evaluate_as_is'."
+        )
     if config.workspace.task_type == "categorical_jacobian" and steps.mode != (
         "evaluate_as_is"
     ):

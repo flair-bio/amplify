@@ -84,6 +84,14 @@ RANDOMIZED_HEAD_CONTROLS = frozenset(
 NO_INFERENCE_CONTROLS = frozenset({SCRAMBLED_LABELS_CONTROL})
 
 
+def build_random_trunk(trunk: torch.nn.Module, seed: int) -> torch.nn.Module:
+    """Use identical random weights for development and test extraction."""
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(seed)
+        random_trunk = type(trunk)(copy.deepcopy(trunk.config))
+    return random_trunk.to(next(trunk.parameters()).device).eval()
+
+
 class ControlBuilder:
     """Builds predictions for every model-based/non-model-baseline control
     condition. Expensive trunk features are reused through the embedding cache;
@@ -433,6 +441,17 @@ class ControlBuilder:
             if is_classical_head
             else accelerator.unwrap_model(prepared.model)
         )
+        if control == RANDOM_TRUNK_CONTROL:
+            if prepared.random_trunk_model is None:
+                raise ValueError(
+                    "Cached random_trunk requires a fitted probe; pass the predict "
+                    "controls to TuneStep before prediction."
+                )
+            if prepared.random_trunk_seed != seed:
+                raise ValueError(
+                    "Cached random_trunk prediction seed must match its tuning seed."
+                )
+            trained_head = prepared.random_trunk_model
         needs_fresh_head = control in RANDOMIZED_HEAD_CONTROLS
         if needs_fresh_head and not isinstance(trained_head, EmbeddingProbeHead):
             raise ValueError(
@@ -445,10 +464,7 @@ class ControlBuilder:
 
         if control in RANDOMIZED_TRUNK_CONTROLS:
             trained_trunk = accelerator.unwrap_model(backend.trunk)
-            trunk = type(trained_trunk)(copy.deepcopy(trained_trunk.config)).to(
-                next(trained_trunk.parameters()).device
-            )
-            trunk.eval()
+            trunk = build_random_trunk(trained_trunk, seed)
         else:
             # "untrained"/"random_head": trunk unchanged, only the head
             # differs. "scrambled_sequences": trunk unchanged, only the

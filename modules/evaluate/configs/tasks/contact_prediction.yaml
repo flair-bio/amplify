@@ -15,4 +15,4 @@ steps:
   score:
     metrics: [contact_auc_long] # existing precision-decile summary; CASP protocol integration is pending
   predict:
-    controls: [untrained, scrambled_labels, separation_prior]
+    controls: [random_trunk, separation_prior]

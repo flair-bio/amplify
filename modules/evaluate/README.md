@@ -518,8 +518,10 @@ With no architecture search configured,
 `head.hidden_size` and `head.hidden_depth` set the fixed architecture.
 Seed-variance diagnostics still run on the original train/validation splits
 before refitting. Those loaders are retained for controls; `majority_class`
-and `train_mean` continue to use train-only labels. Random-trunk control
-training/refitting is a separate pending change.
+and `train_mean` continue to use train-only labels. Cached `random_trunk`
+independently selects and refits its own probe with the same search budget
+and training protocol on random-trunk features, including its own preprocessing.
+Its checkpoint is saved under `<variant>-random_trunk` when saving is enabled.
 
 For classical `head_type` values, put fixed estimator settings in
 `head.hyperparameters` and swept dimensions in `head.search_space`. Every
@@ -548,9 +550,10 @@ pooled representations from several layers.
 Ordinary cached `mlp` and `torch_linear` probes standardize each feature with
 the training-set mean and population standard deviation. Sequence tasks use
 pooled embeddings; token tasks use valid training residues, excluding ignored
-labels. Constant features use a standard-deviation floor of `1e-6`. Validation,
-test, controls, and HPO trials reuse the fitted transformation; no statistics
-are fitted on validation or test data. Each CV fold fits its own training
+labels. Constant features use a standard-deviation floor of `1e-6`. Validation
+and HPO trials reuse the training transformation; final refitting recomputes it
+on train+validation. Random-trunk probes fit their own transformation on random
+features. Test data never contributes statistics. Each CV fold fits its own training
 statistics. Set `steps.tune.standardize_features=false` to use raw features.
 
 The fitted statistics are saved in `probe_head.pt`, and
@@ -590,7 +593,7 @@ conditions sharing a forward pass; validation loops remain quiet.
 |---|---|
 | `untrained` | Pretrained checkpoint with a fresh head |
 | `random_head` | Trained trunk, re-initialized head |
-| `random_trunk` | Re-initialized trunk, trained head (probes retrained in layerwise mode) |
+| `random_trunk` | Random trunk with independently tuned/refitted cached probe; retrained layerwise probes; trunk-replacement ablation in live/native runs |
 | `random_both` | Trunk and head re-initialized |
 | `scrambled_sequences` | Residues shuffled within each sequence |
 | `scrambled_labels` | Trained predictions scored against permuted labels |
@@ -608,7 +611,7 @@ Per-task presets, invalid combinations, and how to read the results are in
 | `predictions_filename` | `predictions.parquet` | Output filename under `<workspace>/runs/<variant>/preds/` |
 | `persist_to_disk` | `true` | Write predictions and the prediction manifest; disable for fast in-process evaluation |
 | `store_sequences` | `false` | Decode and include source sequences in the main predictions table |
-| `controls` | `[untrained]` | Any of the controls above; task configs set per-task presets |
+| `controls` | `[random_trunk]` | Per-model control; task configs add supported train-only baselines |
 | `embedding_batch_size` | `null` | Cached-feature rows per prediction batch, including model-based controls; `null` inherits the prepared loader size. Does not change live trunk batches. |
 
 Cached token probes batch **residues**, not proteins. The token-classification
@@ -985,7 +988,7 @@ Shared config loading helpers live in `modules/core/utils/config_loader.py`.
 
 The four steps are separate objects (`PrepareStep`/`TuneStep`/`PredictStep`/`ScoreStep`) chained by `run_evaluate.py`:
 
-- **Prepare → Tune → Predict** share an in-memory `PreparedArtifacts` (`schemas/artifacts.py`): model, tokenizer, and train/validation/test dataloaders. When the embedding cache is on, `embedding_backend` also carries the frozen trunk and token dataloader, because `random_trunk` and `scrambled_sequences` controls must re-embed the test split; only `ControlBuilder` (`utils/controls.py`) reaches into it.
+- **Prepare → Tune → Predict** share an in-memory `PreparedArtifacts` (`schemas/artifacts.py`): model, tokenizer, and train/validation/test dataloaders. With embedding caching, `embedding_backend` retains the frozen trunk and token loaders: Tune trains a separate random-trunk probe on development features, and Predict re-embeds test tokens for model-based controls.
 - **Score** runs on rank 0 only, as a plain CPU step. `run_evaluate.py` passes it the in-memory `PredictOutput`; without one, it rebuilds predictions from `run_manifest.json` and the parquet files it lists, so scoring can be rerun standalone.
 
 #### Distributed execution (`accelerate`) patterns

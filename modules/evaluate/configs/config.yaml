@@ -117,7 +117,7 @@ steps:
     collect_probabilities: false # auto-enabled when effective metrics need probabilities, e.g. roc_auc or multilabel average_precision
     predictions_filename: predictions.parquet
     store_sequences: false # include decoded input sequences in main predictions parquet (larger output)
-    controls: [untrained] # subset of: untrained, random_trunk, random_head, random_both, scrambled_labels, scrambled_sequences, majority_class, train_mean, separation_prior
+    controls: [random_trunk] # optional: untrained, random_head, random_both, scrambled_labels, scrambled_sequences, majority_class, train_mean, separation_prior
   score:
     metrics: null # task overlays declare reported metrics explicitly
     metric_aggregation: macro # one of micro, macro, weighted, samples

@@ -15,5 +15,4 @@ steps:
     metric_aggregation: macro # pool valid residues, then average classes; -100 positions are excluded
   predict:
     embedding_batch_size: 16384 # cached residues only; trunk extraction keeps protein batches
-    controls:
-      [untrained, random_trunk, random_head, random_both, scrambled_labels]
+    controls: [random_trunk, majority_class]

@@ -103,9 +103,10 @@ class PredictConfig(BaseModel):
     # the trained model against them:
     # - "untrained": the pretrained trunk with a freshly-initialized head,
     #   i.e. the model as it was before fine-tuning.
-    # - "random_trunk"/"random_head"/"random_both": the trained model with
-    #   its trunk/head/both randomly re-initialized (isolates how much of
-    #   the trained trunk vs. head drives performance).
+    # - "random_trunk": independently tuned/refitted probe on random features
+    #   for cached probes; a trunk-replacement ablation for live/native runs.
+    # - "random_head"/"random_both": the trained model with its head/both
+    #   randomly re-initialized, without retraining.
     # - "scrambled_labels": no inference needed -- ScoreStep derives this
     #   directly from the trained model's own predictions/labels.
     # - "scrambled_sequences": the trained model's predictions on inputs
@@ -115,7 +116,7 @@ class PredictConfig(BaseModel):
     # - "train_mean": a constant regression predictor equal to the
     #   training split's label mean (the regression counterpart to
     #   "majority_class").
-    controls: list[ControlCondition] = Field(default_factory=lambda: ["untrained"])
+    controls: list[ControlCondition] = Field(default_factory=lambda: ["random_trunk"])
 
 
 def persist_predictions(

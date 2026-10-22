@@ -44,6 +44,42 @@ def test_dataset_default_matches_explicit_task_config(dataset):
     assert actual.model_dump() == expected.model_dump()
 
 
+@pytest.mark.parametrize(
+    "task,dataset,controls",
+    [
+        (
+            "sequence_classification",
+            "fold_prediction",
+            ["random_trunk", "majority_class"],
+        ),
+        ("sequence_multilabel_classification", "GO_bp", ["random_trunk"]),
+        ("sequence_regression", "stability_prediction", ["random_trunk", "train_mean"]),
+        ("token_classification", "ssp_q3", ["random_trunk", "majority_class"]),
+        (
+            "contact_prediction",
+            "contact_prediction_binary",
+            ["random_trunk", "separation_prior"],
+        ),
+        (
+            "categorical_jacobian",
+            "contact_prediction_binary",
+            ["random_trunk", "separation_prior"],
+        ),
+        ("pseudo_perplexity", "uniprot_protparams", ["random_trunk"]),
+        ("calibration", "human_calibration", ["random_trunk"]),
+    ],
+)
+def test_task_control_defaults(task, dataset, controls):
+    config = load_evaluation_config(
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "tasks" / f"{task}.yaml",
+            CONFIGS / "datasets" / f"{dataset}.yaml",
+        ]
+    )
+    assert config.steps.predict.controls == controls
+
+
 @pytest.mark.parametrize("task_first", [True, False])
 @pytest.mark.parametrize(
     "dataset,task",
@@ -101,7 +137,7 @@ def test_cli_task_selection_loads_method_behavior():
     assert config.workspace.task_type == "categorical_jacobian"
     assert config.steps.mode == "evaluate_as_is"
     assert not config.steps.prepare.embedding_cache.enabled
-    assert config.steps.predict.controls == ["scrambled_labels", "separation_prior"]
+    assert config.steps.predict.controls == ["random_trunk", "separation_prior"]
 
 
 def test_unknown_default_fails_before_loading_task_file():

@@ -43,8 +43,11 @@ class PreparedArtifacts:
     # building needs (a re-embeddable trunk, the original tokenized test
     # data, pooling/layers/dtype/hidden size) lives behind this one field --
     # see :class:`~modules.evaluate.src.utils.embed.EmbeddingBackend`.
-    # TuneStep/ScoreStep never need to look at it.
+    # TuneStep also uses it to extract random-trunk development features.
     embedding_backend: EmbeddingBackend | None = None
+    # Independently selected/refitted ordinary cached probe on random features.
+    random_trunk_model: nn.Module | BaseEstimator | None = None
+    random_trunk_seed: int | None = None
     # Accelerator-prepared token batches keyed by split ("train", "validation",
     # "test") for cached layerwise runs, whose main loaders yield features.
     layerwise_token_dataloaders: dict[str, DataLoader | None] | None = None

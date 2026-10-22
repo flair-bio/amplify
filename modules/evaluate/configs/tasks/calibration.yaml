@@ -16,4 +16,4 @@ steps:
     embedding_cache:
       enabled: false
   predict:
-    controls: ["random_both"]
+    controls: ["random_trunk"]

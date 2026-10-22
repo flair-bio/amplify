@@ -41,9 +41,14 @@ from modules.evaluate.src.model.layerwise import LayerwiseProbeModel
 from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
 from modules.evaluate.src.tasks import get_task
 from modules.evaluate.src.tasks.token_classification import IGNORE_INDEX
-from modules.evaluate.src.utils.controls import RANDOMIZED_TRUNK_CONTROLS
+from modules.evaluate.src.utils.controls import (
+    RANDOMIZED_TRUNK_CONTROLS,
+    build_random_trunk,
+)
 from modules.evaluate.src.utils.embed import (
+    EmbeddingCacheConfig,
     EmbeddingDataset,
+    build_embedding_dataloaders,
     find_embedding_dataset,
 )
 from modules.evaluate.src.utils.hpo import (
@@ -334,7 +339,11 @@ class TuneStep:
         # If we're using a classical head (e.g. logistic regression, random forest, etc.) we bypass the epoch/optimizer loop entirely and fit it directly on cached pooled embeddings.
         # Embeddings dataloaders were prepared in the previous step.
         if self.config.head.head_type in CLASSICAL_HEAD_TYPES:
-            return self._run_classical_head(workspace, prepared, seed, accelerator)
+            self._run_classical_head(workspace, prepared, seed, accelerator)
+            self._fit_cached_random_trunk(
+                workspace, prepared, accelerator, seed, controls
+            )
+            return prepared
 
         if not isinstance(prepared.model, nn.Module):
             raise TypeError("Torch probe tuning requires a torch.nn.Module model.")
@@ -420,7 +429,97 @@ class TuneStep:
             self._save_model(
                 workspace, prepared, model, accelerator, best_hparams, seed
             )
+        self._fit_cached_random_trunk(workspace, prepared, accelerator, seed, controls)
         return prepared
+
+    def _fit_cached_random_trunk(
+        self,
+        workspace: EvaluationWorkspace,
+        prepared: PreparedArtifacts,
+        accelerator: Accelerator,
+        seed: int,
+        controls: Collection[str],
+    ) -> None:
+        """Select and refit a separate probe with the same budget on random features."""
+        backend = prepared.embedding_backend
+        if "random_trunk" not in controls or backend is None:
+            return
+        if backend.token_train_dataloader is None or backend.cache is None:
+            raise ValueError(
+                "Cached random_trunk tuning requires retained train tokens and an embedding cache backend."
+            )
+        if (
+            backend.model_id is None
+            or backend.dataset_id is None
+            or backend.max_length is None
+        ):
+            raise ValueError(
+                "Cached random_trunk tuning requires model/dataset cache metadata."
+            )
+        trunk = build_random_trunk(accelerator.unwrap_model(backend.trunk), seed)
+        logger.info(
+            "Selecting a separate random-trunk probe with the configured tuning protocol."
+        )
+        loaders = build_embedding_dataloaders(
+            model=trunk,
+            splits={
+                "train": (
+                    backend.token_train_dataloader,
+                    backend.train_random_truncate,
+                ),
+                "validation": (
+                    backend.token_val_dataloader,
+                    backend.validation_random_truncate,
+                ),
+            },
+            accelerator=accelerator,
+            cache=backend.cache,
+            cache_config=EmbeddingCacheConfig(
+                enabled=True,
+                pooling=backend.pooling,
+                layers=backend.layers,
+                dtype=backend.dtype,
+                autocast_dtype=backend.autocast_dtype,
+                normalize_before_pooling=backend.normalize_before_pooling,
+                cache_policy=backend.cache_policy,
+            ),
+            model_id=backend.model_id,
+            dataset_id=backend.dataset_id,
+            max_length=backend.max_length,
+            seed=seed,
+            batch_size=self._cached_batch_size(prepared.train_dataloader),
+            extraction_batch_size=backend.extraction_batch_size,
+            embedding_size=backend.hidden_size,
+            label_dtype=get_task(workspace.task_type).label_dtype,
+            is_ragged=get_task(workspace.task_type).is_ragged,
+            length_grouped_sampling=backend.length_grouped_sampling,
+        )
+        torch.manual_seed(seed)
+        baseline = replace(
+            prepared,
+            model=EmbeddingProbeHead(
+                backend.hidden_size,
+                get_task(workspace.task_type).resolve_num_labels(
+                    workspace.num_labels, workspace.dataset_name
+                ),
+                workspace.task_type,
+            ).to(accelerator.device),
+            train_dataloader=loaders["train"],
+            val_dataloader=loaders["validation"],
+            test_dataloader=None,
+            embedding_backend=None,
+            random_trunk_model=None,
+            random_trunk_seed=None,
+        )
+        baseline_workspace = get_evaluation_workspace(
+            workspace.config, variant=f"{workspace.variant or 'probe'}-random_trunk"
+        )
+        baseline_workspace.setup_directories()
+        TuneStep(self.config.model_copy(update={"variance_seeds": []})).run(
+            baseline_workspace, baseline, seed=seed, accelerator=accelerator
+        )
+        prepared.random_trunk_model = baseline.model
+        prepared.random_trunk_seed = seed
 
     def _refit_cached_probe(
         self,

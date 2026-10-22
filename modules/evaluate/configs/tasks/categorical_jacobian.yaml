@@ -16,4 +16,4 @@ steps:
     embedding_cache:
       enabled: false
   predict:
-    controls: [scrambled_labels, separation_prior]
+    controls: [random_trunk, separation_prior]
