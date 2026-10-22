@@ -219,8 +219,9 @@ def test_pseudo_perplexity_bounds_expansion_batches(
 ):
     tokenizer = request.getfixturevalue(tokenizer_fixture)
     sequences = [SHORT_SEQUENCE, "A" * 600, "MKT"]
+    source_ids = ["a", "b", "a"]
     raw = DatasetDict(
-        {"test": Dataset.from_dict({"sequence": sequences, "id": ["a", "b", "c"]})}
+        {"test": Dataset.from_dict({"sequence": sequences, "id": source_ids})}
     )
     original_map = Dataset.map
 
@@ -247,7 +248,8 @@ def test_pseudo_perplexity_bounds_expansion_batches(
 
     assert len(result) == len(SHORT_SEQUENCE) + 510 + 3
     row_index = 0
-    for sequence, example_id in zip(sequences, ["a", "b", "c"]):
+    expanded_ids = []
+    for source_index, (sequence, example_id) in enumerate(zip(sequences, source_ids)):
         residue_ids = tokenizer(sequence, add_special_tokens=False)["input_ids"][:510]
         leading_id = tokenizer.bos_token_id
         if leading_id is None:
@@ -262,8 +264,10 @@ def test_pseudo_perplexity_bounds_expansion_batches(
             assert row["input_ids"] == expected_ids
             assert row["targets"] == expected_labels
             assert row["attention_mask"] == [1] * len(input_ids)
-            assert row["id"] == example_id
+            assert row["id"] == f"{example_id}:{source_index}:{position - 1}"
+            expanded_ids.append(row["id"])
             row_index += 1
+    assert len(expanded_ids) == len(set(expanded_ids))
 
 
 class TestTokenizeDatasetSequenceTasks:

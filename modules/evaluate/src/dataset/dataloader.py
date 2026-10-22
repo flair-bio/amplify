@@ -473,6 +473,7 @@ def tokenize_dataset(
                 res_start=offset,
                 res_end=offset + len(residue_ids),
                 example_id=original_id if original_id is not None else indices[i],
+                example_index=indices[i],
             ):
                 input_ids_batch.append(row["input_ids"])
                 attention_mask_batch.append(row["attention_mask"])
