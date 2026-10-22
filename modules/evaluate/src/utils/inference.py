@@ -111,6 +111,7 @@ def run_inference(
     label_batches: list[torch.Tensor] = []
     prob_batches: list[torch.Tensor] | None = [] if collect_probabilities else None
     input_ids_batches: list[torch.Tensor] | None = [] if tokenizer is not None else None
+    residue_length_batches: list[torch.Tensor] | None = None
     id_batches: list[Any] = []
 
     started = last_log = monotonic()
@@ -128,6 +129,7 @@ def run_inference(
                 batch = dict(batch)
             ids = batch.pop("id", None)
             labels = batch.pop("labels")
+            residue_lengths = batch.pop("residue_lengths", None)
             if batch_transform is not None:
                 batch = batch_transform(batch)
             outputs = model(**batch)
@@ -159,20 +161,29 @@ def run_inference(
                     input_id_rows(batch, pad_token_id), accelerator, pad_token_id
                 )
                 gather_targets = gather_targets + (input_ids,)
+            if residue_lengths is not None:
+                gather_targets = gather_targets + (residue_lengths,)
 
             # Gathers across processes (and drops padding introduced by
             # the distributed sampler) so metrics reflect the full test
             # set exactly once, regardless of world size.
             gathered = accelerator.gather_for_metrics(gather_targets)
             preds, labels, *rest = gathered
+            rest_index = 0
             pred_batches.append(preds.cpu())
             label_batches.append(labels.cpu())
             if prob_batches is not None:
-                probs, *rest = rest
+                probs = rest[rest_index]
+                rest_index += 1
                 prob_batches.append(probs.cpu())
             if input_ids_batches is not None:
-                (input_ids_gathered,) = rest
+                input_ids_gathered = rest[rest_index]
+                rest_index += 1
                 input_ids_batches.append(input_ids_gathered.cpu())
+            if residue_lengths is not None:
+                if residue_length_batches is None:
+                    residue_length_batches = []
+                residue_length_batches.append(rest[rest_index].cpu())
             if ids is not None:
                 has_ids = True
                 ids = accelerator.gather_for_metrics(ids, use_gather_object=True)
@@ -207,7 +218,15 @@ def run_inference(
                 input_ids_batches[batch_idx].cpu().tolist(), skip_special_tokens=True
             )
         ids = id_batches[batch_idx]
-        for i, (pred_row, label_row) in enumerate(task.split_batch_rows(preds, labels)):
+        if residue_length_batches is None:
+            rows = task.split_batch_rows(preds, labels)
+        else:
+            rows = task.split_batch_rows(
+                preds,
+                labels,
+                residue_lengths=residue_length_batches[batch_idx],
+            )
+        for i, (pred_row, label_row) in enumerate(rows):
             all_predictions.append(pred_row)
             all_labels.append(label_row)
             if ids is not None:

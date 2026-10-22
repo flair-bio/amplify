@@ -235,6 +235,7 @@ def run_layerwise_conditions(
             batch = dict(raw_batch)
             ids = batch.pop("id", None)
             labels = batch.pop("labels")
+            residue_lengths = batch.pop("residue_lengths", None)
             if batch_transform is not None:
                 batch = batch_transform(batch)
             outputs = inner.forward_conditions(head_sets, **batch)
@@ -247,6 +248,8 @@ def run_layerwise_conditions(
             targets: dict[str, torch.Tensor] = {
                 "labels": pad_for_gather(labels, accelerator, IGNORE_INDEX)
             }
+            if residue_lengths is not None:
+                targets["residue_lengths"] = residue_lengths
             for name, layer_outputs in outputs.items():
                 for layer, output in layer_outputs.items():
                     targets[f"pred_{name}_{layer}"] = pad_for_gather(
@@ -295,9 +298,18 @@ def run_layerwise_conditions(
             for name in head_sets:
                 for layer in layer_ids:
                     layer_rows = rows[name][layer]
+                    row_args = (
+                        {
+                            "residue_lengths": gathered["residue_lengths"],
+                        }
+                        if "residue_lengths" in gathered
+                        else {}
+                    )
                     for index, (pred, label) in enumerate(
                         task.split_batch_rows(
-                            gathered[f"pred_{name}_{layer}"], gathered["labels"]
+                            gathered[f"pred_{name}_{layer}"],
+                            gathered["labels"],
+                            **row_args,
                         )
                     ):
                         row_id = ids[index] if ids is not None else len(layer_rows.ids)

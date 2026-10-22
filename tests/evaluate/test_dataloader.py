@@ -270,6 +270,49 @@ def test_pseudo_perplexity_bounds_expansion_batches(
     assert len(expanded_ids) == len(set(expanded_ids))
 
 
+def test_contact_tokenization_preserves_valid_positions_and_length(protein_tokenizer):
+    raw = DatasetDict(
+        {
+            "test": Dataset.from_dict(
+                {
+                    "sequence": ["A" * 15],
+                    "targets": [[[2, 9]]],
+                    "valid_positions": [[2, 9, 12]],
+                }
+            )
+        }
+    )
+
+    row = tokenize_dataset(
+        raw,
+        tokenizer=protein_tokenizer,
+        task_type="contact_prediction",
+        sequence_column="sequence",
+        label_column="targets",
+        max_length=20,
+        num_proc=1,
+        random_truncate=False,
+    )["test"][0]
+
+    assert row["targets"] == {
+        "pairs": [[3, 10]],
+        "valid_positions": [3, 10, 13],
+        "res_start": 1,
+        "res_end": 16,
+        "length": 15,
+    }
+    collator = EvaluationCollator(
+        tokenizer=protein_tokenizer,
+        task_type="contact_prediction",
+        config=EvaluationCollatorConfig(label_column="targets"),
+    )
+    batch = collator([row])
+    assert batch["residue_lengths"].tolist() == [15]
+    assert batch["labels"][0, 3, 10] == 1
+    assert batch["labels"][0, 3, 9] == -100
+    assert batch["labels"][0, 3, 13] == 0
+
+
 class TestTokenizeDatasetSequenceTasks:
     def test_rejects_max_length_without_room_for_residues(self, protein_tokenizer):
         raw = build_raw_dataset_dict("sequence_classification", splits=("train",))

@@ -194,8 +194,8 @@ def _contact_record_from_raw(raw: dict[str, Any], split: str) -> dict[str, Any]:
     """Build a raw contact record from TAPE coordinates and residue validity.
 
     Targets include valid upper-triangle C-alpha pairs below the distance
-    cutoff, including self and near-diagonal pairs; downstream normalization
-    applies the minimum sequence separation used by evaluation.
+    cutoff, including self and near-diagonal pairs. Evaluation applies the
+    minimum sequence separation and uses valid_positions to mask unknown pairs.
     """
     coordinates = raw.get("tertiary")
     valid_mask = raw.get("valid_mask")
@@ -213,8 +213,8 @@ def _contact_record_from_raw(raw: dict[str, Any], split: str) -> dict[str, Any]:
     mask = np.asarray(valid_mask, dtype=bool)
     length = len(sequence)
     distances = np.linalg.norm(coords[:, None, :] - coords[None, :, :], axis=-1)
-    # Raw, unfiltered pairs (incl. self/near-diagonal) to match the biomap-research sourcing
-    # convention; separation filtering happens later in normalize_contact_record.
+    # Keep raw pairs (including self and near-diagonal pairs); the evaluation
+    # task applies its separation threshold after cropping.
     upper_triangle = np.triu(np.ones((length, length), dtype=bool), k=0)
     contacts = (
         upper_triangle
@@ -289,7 +289,7 @@ The file includes row counts by split, columns, and SeqKit sequence-length metri
 
 ## Contact definition
 
-Positive contacts are upper-triangle residue pairs (including self-pairs) with valid coordinates and C-alpha Euclidean distance below {CONTACT_DISTANCE_ANGSTROM:g} Angstroms. Rows store raw pairs in `targets` and valid residue indices in `valid_positions`; sequence-separation filtering (at least 6) is applied downstream by `normalize_contact_record`.
+Positive contacts are upper-triangle residue pairs (including self-pairs) with valid coordinates and C-alpha Euclidean distance below {CONTACT_DISTANCE_ANGSTROM:g} Angstroms. Rows store raw pairs in `targets` and resolved residue indices in `valid_positions`. Evaluation preserves unresolved pairs as unknown and applies the minimum sequence separation of 6 after cropping.
 
 ## Processing and splits
 

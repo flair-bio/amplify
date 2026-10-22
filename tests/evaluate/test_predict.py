@@ -802,6 +802,50 @@ def test_distributed_inference_deduplicates_aligned_rows():
     assert sequences == ["[2, 0]", "[0, 2]", "[0, 3]"]
 
 
+def test_contact_inference_preserves_true_cropped_length():
+    from modules.evaluate.src.tasks import get_task
+
+    class Model(torch.nn.Module):
+        def forward(self, input_ids, attention_mask):
+            batch_size, seq_len = input_ids.shape
+            return SimpleNamespace(logits=torch.zeros(batch_size, seq_len, seq_len))
+
+    class Accelerator:
+        num_processes = 1
+
+        @staticmethod
+        def gather_for_metrics(values, **kwargs):
+            return values
+
+    task = get_task("contact_prediction")
+    aligned = task.align_labels(
+        {"pairs": [[2, 9]], "valid_positions": [2, 9, 12]},
+        num_residues=15,
+        start=2,
+        kept=13,
+        offset=1,
+        input_len=15,
+        example_index=0,
+    )
+    labels = task.collate_labels([aligned], batch_size=1, seq_len=15)
+    batch = {
+        "input_ids": torch.ones((1, 15), dtype=torch.long),
+        "attention_mask": torch.ones((1, 15), dtype=torch.long),
+        "labels": labels,
+        "id": ["protein"],
+        "residue_lengths": torch.tensor([aligned["length"]]),
+    }
+
+    ids, predictions, labels, _, _ = run_inference(
+        Model(), [batch], "contact_prediction", Accelerator()
+    )
+
+    assert ids == ["protein"]
+    assert len(predictions) == len(labels) == 1
+    assert labels[0]["length"] == 13
+    assert labels[0]["values"] == [1, 0]
+
+
 def test_distributed_pseudo_perplexity_matches_full_residue_score():
     class Model(torch.nn.Module):
         def forward(self, input_ids, attention_mask):

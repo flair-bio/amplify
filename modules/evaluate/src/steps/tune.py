@@ -1114,8 +1114,9 @@ class TuneStep:
                             "inputs_embeds": inputs_embeds,
                             "labels": labels,
                         }
-                    elif "id" in batch:
-                        batch = {k: v for k, v in batch.items() if k != "id"}
+                    else:
+                        batch.pop("id", None)
+                        batch.pop("residue_lengths", None)
 
                     accumulation = (
                         nullcontext() if cached_probe else accelerator.accumulate(model)

@@ -453,6 +453,11 @@ def tokenize_dataset(
             input_ids = leading_special_ids + residue_ids + trailing_special_ids
             attention_mask = [1] * len(input_ids)
             label = examples[label_column][i] if label_column in examples else None
+            if task.pairwise and "valid_positions" in examples:
+                label = {
+                    "pairs": label,
+                    "valid_positions": examples["valid_positions"][i],
+                }
             if task.aligns_labels:
                 label = task.align_labels(
                     label,
