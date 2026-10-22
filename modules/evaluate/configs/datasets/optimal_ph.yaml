@@ -1,7 +1,0 @@
-workspace:
-  default_task_type: sequence_regression
-  dataset_name: optimal_ph
-  dataset_repo_id: flair-bio/biomap-research-optimal_ph
-  target_type: continuous
-  label_format: scalar
-  num_labels: null
