@@ -1,7 +1,7 @@
 # Dataset Sourcing
 
 Sourcing turns an upstream protein dataset (a Hugging Face repo, a UniProt
-query, an LMDB archive, or a zip of assay CSVs) into the artifact that the
+query, or a zip of assay CSVs) into the artifact that the
 evaluation [Prepare](../README.md#step-1--prepare) step loads: a Hugging Face
 dataset with `id`/`sequence`/`targets`/`split` columns and
 `train`/`validation`/`test` splits, plus a dataset card and `stats.json`.
@@ -26,7 +26,6 @@ details are in the [ProteinGym guide](proteingym.md).
   - [Caching, outputs, and upload](#caching-outputs-and-upload)
 - [Sources](#sources)
   - [Biomap-research](#biomap-research)
-  - [TAPE ProteinNet](#tape-proteinnet)
   - [UniProtKB background](#uniprotkb-background)
   - [UniProt Gene Ontology](#uniprot-gene-ontology)
   - [UniProt residue annotations](#uniprot-residue-annotations)
@@ -53,7 +52,6 @@ S=modules/evaluate/scripts/dataset_sourcing
 C=modules/evaluate/configs/dataset_sourcing
 
 uv run python             $S/source_biomap_datasets.py     $C/source_biomap_datasets.yaml
-uv run --with lmdb        $S/source_tape_proteinnet.py     $C/source_tape_proteinnet.yaml
 uv run python             $S/source_uniprot_go.py          $C/source_uniprot_go.yaml
 uv run python             $S/source_uniprot_annotations.py $C/source_uniprot_annotations.yaml
 uv run python             $S/source_interpro.py            $C/source_interpro.yaml
@@ -70,7 +68,7 @@ By default, the commands write local artifacts only, under
 
 | Goal | Override |
 |---|---|
-| Build only some datasets | `all_datasets=false 'datasets=[metal_ion_binding,ssp_q3]'` |
+| Build only some datasets | `all_datasets=false 'datasets=[localization_prediction,ssp_q3]'` |
 | Drop long proteins | `max_sequence_length=512` |
 | Publish to the Hub (**public** repos) | `repo_owner=<your-hf-username-or-org>` |
 | Refresh cached UniProt/InterPro/GO downloads | `force_download=true` |
@@ -140,8 +138,7 @@ differs, that is noted.
 
 | Shipped config | Builds by default |
 |---|---|
-| [`source_biomap_datasets.yaml`](../configs/dataset_sourcing/source_biomap_datasets.yaml) | All 13 Biomap-research datasets |
-| [`source_tape_proteinnet.yaml`](../configs/dataset_sourcing/source_tape_proteinnet.yaml) | `proteinnet_contact_prediction` from LMDBs staged in `downloaded_datasets/` |
+| [`source_biomap_datasets.yaml`](../configs/dataset_sourcing/source_biomap_datasets.yaml) | All 8 retained Biomap-research datasets |
 | [`source_uniprot_go.yaml`](../configs/dataset_sourcing/source_uniprot_go.yaml) | All 3 GO aspects, human Swiss-Prot |
 | [`source_uniprot_annotations.yaml`](../configs/dataset_sourcing/source_uniprot_annotations.yaml) | All 12 residue-annotation groups, human Swiss-Prot |
 | [`source_interpro.yaml`](../configs/dataset_sourcing/source_interpro.yaml) | All 7 InterPro entry types, human Swiss-Prot |
@@ -159,8 +156,8 @@ differs, that is noted.
 | `work_dir` | `eval_datasets/<source>_sourcing` | Root for `downloads/` and `outputs/`. ProteinGym appends `/<track>` |
 | `dataset_name` | `null` | GO only: output-name override, valid with a single aspect |
 
-TAPE always builds `proteinnet_contact_prediction`, and ProtParam always
-builds `uniprot_protparams`; the selection fields have no effect for them.
+ProtParam always builds `uniprot_protparams`; the selection fields have no
+effect for that standalone source.
 
 **Preprocessing and splits**
 
@@ -213,7 +210,7 @@ human-only label distribution. `organism_id=null` covers all of Swiss-Prot.
 | `upload_layout` | `per_dataset_repo` | `per_dataset_repo`: one repo per dataset; `single_repo`: all datasets in `repo_id` under `<repo_prefix>/<dataset>` |
 | `repo_owner` | `null` | `per_dataset_repo` target: `<repo_owner>/<repo_name_prefix><dataset>` |
 | `repo_id` | `null` | `single_repo` target |
-| `repo_name_prefix`, `repo_prefix` | per source | e.g. `biomap-research-`, `uniprot-`, `tape-`, `proteingym-`, or empty |
+| `repo_name_prefix`, `repo_prefix` | per source | e.g. `biomap-research-`, `uniprot-`, `proteingym-`, or empty |
 | `revision` | `null` | Hub **branch** to commit to; unrelated to `source_revision` |
 | `private` | `false` (schema: `true`) | Visibility applied when the repo is created |
 | `token` | `null` | Falls back to `HF_TOKEN` / `HUGGINGFACE_HUB_TOKEN` |
@@ -228,10 +225,9 @@ If neither `repo_owner` nor `repo_id` is set, the upload is skipped.
 | `overwrite_output` | `false` (GO, ProteinGym: `true`) | HF-repository flow: never reuse existing outputs. Other sources always rebuild, so this only deletes the output dir first (clearing stale files) |
 | `stats_threads` | `8` | SeqKit threads for `stats.json` |
 
-**Source-specific fields:** TAPE has `source_folder`, `archive_path`,
-`archive_url`, and `include_train_unfiltered` (see [TAPE ProteinNet](#tape-proteinnet)).
-ProteinGym has `track`, `version`, `base_url`, `reference_base_url`,
-`combine_assays`, `train_fraction`, and `validation_fraction` (see the
+**Source-specific fields:** ProteinGym has `track`, `version`, `base_url`,
+`reference_base_url`, `combine_assays`, `train_fraction`, and
+`validation_fraction` (see the
 [ProteinGym guide](proteingym.md#sourcing)).
 
 ---
@@ -266,9 +262,8 @@ disagreements become ignored. Without this step, one sequence could count
 twice toward label support or land on both sides of a split, which is a
 trivial leak.
 
-**TAPE and ProteinGym** apply no deduplication. TAPE rows stay as published.
-ProteinGym variants are already distinct within each assay (duplicate variant
-IDs fail).
+**ProteinGym** applies no deduplication. Its variants are already distinct
+within each assay (duplicate variant IDs fail).
 
 ### Canonical splits
 
@@ -278,7 +273,6 @@ default. Sources build them in one of three ways:
 | Source | Canonical splits | Why |
 |---|---|---|
 | Biomap | Upstream splits; `validation` synthesized from `train` only when missing | Results stay comparable with published benchmarks |
-| TAPE ProteinNet | Upstream TAPE splits (`valid` → `validation`) | Same |
 | GO, InterPro, residue annotations, ProtParam | Whole MMseqs2 clusters, 80/10/10 | A fresh UniProt query has no splits, so homology-aware ones are built |
 | ProteinGym | Seeded random 80/10/10 per assay | Variants share one wild type; see the [ProteinGym guide](proteingym.md#sourcing) |
 
@@ -362,7 +356,7 @@ views contain the same rows, not extra examples: `stats.json` reports
 |---|---|---|---|
 | Random | `*_random` | Seeded uniform shuffle | Homology-leaky reference: the gap between `_random` and `_cluster` scores shows how much performance depends on close homologs |
 | Stratified | `*_stratified` | Each stratum greedily balanced across splits | Every split covers the label or target range, which reduces variance from a rare class missing in a small test set |
-| Hold-cluster-out | `*_cluster` | Whole MMseqs2 clusters, same algorithm as cluster-built canonical splits | Homology-controlled generalization; for Biomap and TAPE, a stricter alternative to the upstream splits |
+| Hold-cluster-out | `*_cluster` | Whole MMseqs2 clusters, same algorithm as cluster-built canonical splits | Homology-controlled generalization; for Biomap, a stricter alternative to the upstream splits |
 
 The `_cluster` views need MMseqs2 and at least three clusters (otherwise they
 are skipped with a warning). For UniProt sources, the canonical splits are
@@ -375,11 +369,11 @@ sizes. The group depends on what the target looks like:
 
 | Target | Examples | Group |
 |---|---|---|
-| A class label (or a number with at most 20 distinct values) | `localization_prediction`, `metal_ion_binding` | The class |
-| A continuous number | `optimal_ph`, `stability_prediction` | Which tenth of the value range it falls in (10 equal-sized bins, by rank), so every split covers low, middle, and high values |
+| A class label (or a number with at most 20 distinct values) | `localization_prediction`, `temperature_stability` | The class |
+| A continuous number | `stability_prediction` | Which tenth of the value range it falls in (10 equal-sized bins, by rank), so every split covers low, middle, and high values |
 | One label per residue | `ssp_q3`, `uniprot_*` | The protein's most common residue label |
 | A set of labels per protein | GO, InterPro | The protein's rarest label, counted over the whole dataset |
-| Contact pairs | `contact_prediction_binary`, TAPE | No sensible group, so no stratified view |
+| Contact pairs | `contact_prediction_binary` | No sensible group, so no stratified view |
 
 Notes:
 
@@ -398,7 +392,7 @@ Notes:
 | Source | `_random` | `_stratified` | `_cluster` |
 |---|---|---|---|
 | Biomap (scalar or residue targets) | yes | yes | yes |
-| Biomap `contact_prediction_binary`, TAPE | yes | no | yes |
+| Biomap `contact_prediction_binary` | yes | no | yes |
 | GO, InterPro, residue annotations, ProtParam | yes | yes | yes |
 | ProteinGym | yes | yes (`dms_id`) | no |
 
@@ -410,7 +404,7 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
     modules/evaluate/configs/config.yaml \
     modules/evaluate/configs/models/amplify_120m.yaml \
     modules/evaluate/configs/tasks/sequence_classification.yaml \
-    modules/evaluate/configs/datasets/metal_ion_binding.yaml \
+    modules/evaluate/configs/datasets/localization_prediction.yaml \
     steps.prepare.split.name=cluster
 ```
 
@@ -495,13 +489,11 @@ Hub mirrors the local artifact.
 
 ### Biomap-research
 
-Thirteen datasets from the `biomap-research` Hugging Face organization:
-`ssp_q3`, `ssp_q8`, `fold_prediction`, `fitness_prediction`,
-`metal_ion_binding`, `localization_prediction`, `enzyme_catalytic_efficiency`,
-`optimal_ph`, `optimal_temperature`, `temperature_stability`,
-`stability_prediction`, `solubility_prediction`, and
-`contact_prediction_binary`. They go through the HF-repository flow with
-`seq` → `sequence` and `label` → `targets`.
+Eight retained datasets from the `biomap-research` Hugging Face organization:
+`ssp_q3`, `ssp_q8`, `fold_prediction`, `localization_prediction`,
+`temperature_stability`, `stability_prediction`, `solubility_prediction`, and
+`contact_prediction_binary`. The configured datasets use the HF-repository
+flow with `seq` → `sequence` and `label` → `targets`.
 
 Choices:
 
@@ -517,58 +509,16 @@ Choices:
   subsets.
 
 ```bash
-# All 13, local only
+# All 8 retained datasets, local only
 uv run python modules/evaluate/scripts/dataset_sourcing/source_biomap_datasets.py \
     modules/evaluate/configs/dataset_sourcing/source_biomap_datasets.yaml
 
-# One dataset, pinned, published to <owner>/biomap-research-metal_ion_binding
+# One retained dataset, pinned, published to <owner>/biomap-research-localization_prediction
 uv run python modules/evaluate/scripts/dataset_sourcing/source_biomap_datasets.py \
     modules/evaluate/configs/dataset_sourcing/source_biomap_datasets.yaml \
-    all_datasets=false 'datasets=[metal_ion_binding]' \
+    all_datasets=false 'datasets=[localization_prediction]' \
     source_revision=<upstream-commit-sha> \
     repo_owner=<your-hf-username-or-org>
-```
-
-### TAPE ProteinNet
-
-Converts TAPE's ProteinNet LMDB splits into `proteinnet_contact_prediction`.
-
-**Input resolution:** `archive_path`, then `*.lmdb` splits found recursively
-under `source_folder` (default `downloaded_datasets/`), then a
-`proteinnet.tar.gz` in that folder, then a download from `archive_url`.
-
-**Contact labels:**
-
-- A contact is an upper-triangle residue pair (self-pairs included) with both
-  residues resolved and a C-alpha distance below 8 Å, the conventional
-  contact cutoff used by CASP and TAPE.
-- `targets` stores these raw pairs, and `valid_positions` lists resolved
-  residues. Pairs involving unresolved residues are neither positive nor
-  negative.
-- The minimum sequence separation of 6 is applied downstream by the contact
-  task after cropping. Short-range pairs, such as helical i/i+3 and i/i+4
-  pairs, are trivially in contact and would inflate scores.
-- Evaluation carries `valid_positions` through cropping and collation, so pairs
-  involving unresolved residues remain unknown rather than becoming negatives.
-  Storing raw pairs matches the Biomap contact convention and leaves separation
-  filtering to evaluation.
-
-**Other choices:**
-
-- Upstream splits are kept for comparability with TAPE, without
-  deduplication.
-- `max_sequence_length` is applied before distance matrices are computed,
-  which are O(L²) per protein.
-- `include_train_unfiltered` adds TAPE's unfiltered train split, but it is
-  dropped whenever `create_split_subsets` is true, because subset generation
-  keeps only the canonical roles.
-- LMDB records are pickles, and unpickling can execute code. Only use archives
-  from a trusted source.
-
-```bash
-uv run --with lmdb modules/evaluate/scripts/dataset_sourcing/source_tape_proteinnet.py \
-    modules/evaluate/configs/dataset_sourcing/source_tape_proteinnet.yaml \
-    source_folder=/path/to/proteinnet
 ```
 
 ### UniProtKB background

@@ -1,7 +1,6 @@
 """Evaluate module: the evaluation datasets, grouped by source and coloured by task type.
 
-Mirrors modules/evaluate/configs/datasets/*.yaml (28 overlays) plus the ProteinGym runners and
-the TAPE ProteinNet sourcing script (configs/dataset_sourcing/).
+Mirrors the evaluation dataset overlays plus the ProteinGym runners.
 
     python figures/plot_eval_datasets.py --outdir figures
 """
@@ -30,8 +29,8 @@ TASK_COLORS = {
 LANES = [
     ("Biomap research", "per protein · per residue · per pair", LANE1_BG, [
         ("Localization", "10 classes", "classification"),
-        ("Metal ion binding", "binary", "classification"),
-        ("Optimal temperature", "°C", "regression"),
+        ("Solubility", "binary", "classification"),
+        ("Stability", "designed proteins", "regression"),
         ("SSP-Q3", "helix / strand / coil", "per-residue"),
         ("Contact map", "pairs with |i−j| ≥ 6", "contacts"),
     ]),
@@ -66,7 +65,6 @@ LANES = [
 
 EXTRA = [
     ("ProteinGym", ["variant effects", "DMS + clinical", "zero-shot +", "supervised"]),
-    ("TAPE ProteinNet", ["3D contacts", "from structures", "sourcing script", "→ Hub"]),
 ]
 
 
@@ -97,7 +95,7 @@ def plot(out: Path, transparent: bool, dpi: int):
     # Header: Hub + legend.
     hy = top - 0.6
     ax.add_artist(AnnotationBbox(OffsetImage(plt.imread(LOGO), zoom=50 / 1024), (0.55, hy), frameon=False))
-    ax.text(1.25, hy, "28 dataset configs, all on the Hugging Face Hub", ha="left", va="center", fontsize=22,
+    ax.text(1.25, hy, "32 dataset configs, all on the Hugging Face Hub", ha="left", va="center", fontsize=22,
             fontweight="bold", color=TEXT_COLOR)
     lx = W
     for kind in reversed(list(TASK_COLORS)):

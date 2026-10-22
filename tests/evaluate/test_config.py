@@ -281,14 +281,14 @@ class TestShippedConfigOverlays:
         _CONFIG_ROOT / "config.yaml",
         _CONFIG_ROOT / "models" / "esm2_35m.yaml",
         _CONFIG_ROOT / "tasks" / "sequence_classification.yaml",
-        _CONFIG_ROOT / "datasets" / "metal_ion_binding.yaml",
+        _CONFIG_ROOT / "datasets" / "localization_prediction.yaml",
     ]
 
     @pytest.mark.parametrize(
         ("task_name", "dataset_name"),
         [
-            ("sequence_classification", "metal_ion_binding"),
-            ("sequence_regression", "optimal_temperature"),
+            ("sequence_classification", "localization_prediction"),
+            ("sequence_regression", "stability_prediction"),
             ("sequence_multilabel_classification", "GO_mf"),
             ("token_classification", "ssp_q3"),
         ],
@@ -318,29 +318,6 @@ class TestShippedConfigOverlays:
         assert smoke.steps.mode == "evaluate_as_is"
         assert not smoke.steps.prepare.embedding_cache.enabled
 
-    @pytest.mark.parametrize(
-        "task_name", ["contact_prediction", "categorical_jacobian"]
-    )
-    def test_tape_overlay_supports_both_contact_tasks(self, task_name):
-        config = load_and_parse(
-            [
-                self._CONFIG_ROOT / "config.yaml",
-                self._CONFIG_ROOT / "tasks" / f"{task_name}.yaml",
-                self._CONFIG_ROOT
-                / "datasets"
-                / "tape_proteinnet_contact_prediction.yaml",
-            ],
-            EvaluationConfig,
-        )
-        assert config.workspace.task_type == task_name
-        assert (
-            config.workspace.dataset_repo_id
-            == "flair-bio/tape-proteinnet_contact_prediction"
-        )
-        assert config.workspace.label_format == "contact_pairs"
-        assert config.workspace.num_labels is None
-        assert not config.steps.prepare.embedding_cache.enabled
-
     def test_pseudo_perplexity_defaults_to_deterministic_test_data(self):
         config = load_and_parse(
             [
@@ -359,15 +336,12 @@ class TestShippedConfigOverlays:
     @pytest.mark.parametrize(
         ("task_name", "dataset_name"),
         [
-            ("sequence_classification", "metal_ion_binding"),
             ("sequence_classification", "localization_prediction"),
-            ("sequence_regression", "optimal_temperature"),
+            ("sequence_regression", "stability_prediction"),
             ("token_classification", "ssp_q3"),
             ("contact_prediction", "contact_prediction_binary"),
             ("categorical_jacobian", "contact_prediction_binary"),
-            ("pseudo_perplexity", "metal_ion_binding"),
             ("pseudo_perplexity", "localization_prediction"),
-            ("pseudo_perplexity", "optimal_temperature"),
             ("pseudo_perplexity", "ssp_q3"),
             ("pseudo_perplexity", "contact_prediction_binary"),
             ("calibration", "human_calibration"),
@@ -406,7 +380,7 @@ class TestShippedConfigOverlays:
                     self._CONFIG_ROOT / "config.yaml",
                     self._CONFIG_ROOT / "models" / "esm2_35m.yaml",
                     self._CONFIG_ROOT / "tasks" / "sequence_regression.yaml",
-                    self._CONFIG_ROOT / "datasets" / "metal_ion_binding.yaml",
+                    self._CONFIG_ROOT / "datasets" / "ssp_q3.yaml",
                 ],
                 model_cls=EvaluationConfig,
             )
@@ -540,24 +514,6 @@ class TestShippedConfigOverlays:
                 "fold_prediction",
                 "sequence_classification",
                 "categorical",
-                "scalar",
-            ),
-            (
-                "fitness_prediction",
-                "sequence_regression",
-                "continuous",
-                "scalar",
-            ),
-            (
-                "enzyme_catalytic_efficiency",
-                "sequence_regression",
-                "continuous",
-                "scalar",
-            ),
-            (
-                "optimal_ph",
-                "sequence_regression",
-                "continuous",
                 "scalar",
             ),
             (
