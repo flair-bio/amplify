@@ -1,14 +1,13 @@
 # One-off biomap sourcing configuration.
 # Run from the repository root and pass this file as a config argument.
 
-# Dataset selection: all_datasets=true processes all 13 source datasets and
-# takes precedence over datasets. Set it to false to use selected names below.
+# Dataset selection: all_datasets=true processes all 8 retained source datasets
+# and takes precedence over datasets. Set it to false to use selected names below.
 # Available names:
-# ssp_q3, ssp_q8, fold_prediction, fitness_prediction, metal_ion_binding,
-# localization_prediction, enzyme_catalytic_efficiency, optimal_ph, optimal_temperature,
+# ssp_q3, ssp_q8, fold_prediction, localization_prediction,
 # temperature_stability, stability_prediction, solubility_prediction,
 # contact_prediction_binary.
-# Example CLI selection: all_datasets=false datasets=[ssp_q3,metal_ion_binding]
+# Example CLI selection: all_datasets=false datasets=[ssp_q3,localization_prediction]
 
 # Seeds random splits, validation synthesis, and cluster tie-breaks.
 seed: 1957723
@@ -18,12 +17,7 @@ datasets:
   - ssp_q3
   - ssp_q8
   - fold_prediction
-  - fitness_prediction
-  - metal_ion_binding
   - localization_prediction
-  - enzyme_catalytic_efficiency
-  - optimal_ph
-  - optimal_temperature
   - temperature_stability
   - stability_prediction
   - solubility_prediction

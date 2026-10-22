@@ -1,7 +1,0 @@
-workspace:
-  default_task_type: sequence_classification
-  dataset_name: metal_ion_binding
-  dataset_repo_id: flair-bio/biomap-research-metal_ion_binding
-  target_type: categorical
-  label_format: scalar
-  num_labels: 2

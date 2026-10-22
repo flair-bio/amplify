@@ -2,8 +2,8 @@
 
 This catalog lists every evaluation dataset: what question it asks about a
 protein, what one target looks like, where the question comes up in the real
-world, and which task consumes it. Each standard dataset has an overlay
-YAML in [`configs/datasets/`](../configs/datasets/) that plugs it into the
+world, and which task consumes it. Each active dataset has an overlay YAML in
+[`configs/datasets/`](../configs/datasets/) that plugs it into the
 `run_evaluate.py` pipeline; how overlays are combined with the base, model,
 and task configs is covered in the evaluation README's
 [Config files](../README.md#config-files) section. How the underlying
@@ -101,22 +101,20 @@ be selected.
 
 | Source | Datasets | Task | Default metrics |
 |---|---|---|---|
-| Biomap-research | `fold_prediction`, `localization_prediction`, `metal_ion_binding`, `solubility_prediction`, `temperature_stability` | `sequence_classification` | `f1`, `accuracy`, `mcc`, `roc_auc` |
-| Biomap-research | `enzyme_catalytic_efficiency`, `fitness_prediction`, `optimal_ph`, `optimal_temperature`, `stability_prediction` | `sequence_regression` | `mse`, `mae`, `r2`, `pearsonr`, `spearmanr` |
+| Biomap-research | `fold_prediction`, `localization_prediction`, `solubility_prediction`, `temperature_stability` | `sequence_classification` | `f1`, `accuracy`, `mcc`, `roc_auc` |
+| Biomap-research | `stability_prediction` | `sequence_regression` | `mse`, `mae`, `r2`, `pearsonr`, `spearmanr` |
 | Biomap-research | `ssp_q3`, `ssp_q8` | `token_classification` | `f1`, `accuracy`, `precision`, `recall`, `mcc` |
 | Biomap-research | `contact_prediction_binary` | `contact_prediction`, `categorical_jacobian` | Contact precision at top L, L/2, L/5 and contact AUC, per short / medium / long range |
 | UniProt GO | `GO_mf`, `GO_bp`, `GO_cc` | `sequence_multilabel_classification` | `f1`, `multilabel_mcc`, `average_precision` |
 | InterPro | 7 `interpro_*` entry types | `sequence_multilabel_classification` | `f1`, `multilabel_mcc`, `average_precision` |
 | UniProt features | 12 `uniprot_*` residue overlays | `token_classification` | `f1`, `accuracy`, `precision`, `recall`, `mcc` |
 | UniProt ProtParam | `uniprot_protparams` (one property per run) | `sequence_regression` | `mse`, `mae`, `r2`, `pearsonr`, `spearmanr` |
-| TAPE ProteinNet | [`tape_proteinnet_contact_prediction`](../configs/datasets/tape_proteinnet_contact_prediction.yaml) | `contact_prediction`, `categorical_jacobian` | As for contacts above |
 | Any sequence dataset | MLM models with a mask token | `pseudo_perplexity` | `pseudo_perplexity` |
 | HHblits/BFD homolog profiles | `human_calibration` (test split only) | `calibration` | `kl`, `kl_t`, `kl_nt`, `calibration`, `calibration_t`, `calibration_nt`, `accuracy_t`, `accuracy_nt`, `memorization_nt` |
 | ProteinGym | 4 assay tracks | Separate runners | Spearman (DMS), AUC (clinical), per assay |
 
-ProteinGym uses separate runners; TAPE ProteinNet has a shared contact dataset overlay. See
-[Separate Dataset Workflows](#separate-dataset-workflows). The next section
-describes each overlay.
+ProteinGym uses separate runners. The next section describes the active
+evaluation overlays.
 
 ---
 
@@ -139,13 +137,10 @@ splits. Recheck them when hosted artifacts change.
 
 ### Biomap-Research
 
-Thirteen benchmark datasets from the `biomap-research` Hugging Face
-organization (assembled for the xTrimoPGLM paper from earlier published
-benchmarks), with their published splits
+Eight retained benchmark datasets from the `biomap-research` Hugging Face
+organization, with their published splits
 ([sourcing](dataset-sourcing.md#biomap-research)). Each entry names the
 original study, whose dataset card has the full label definitions.
-
-![Cartoons of the 13 Biomap-research datasets](../../../figures/dataset_cartoons_biomap.png)
 
 #### Per protein: one class
 
@@ -189,23 +184,6 @@ original study, whose dataset card has the full label definitions.
   with `sequence_classification` ·
   [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-localization_prediction)
 
-##### `metal_ion_binding`
-
-**Question:** does this protein bind a metal ion?
-
-- **Readout:** yes or no (2 classes, balanced), for proteins from the Protein
-  Data Bank curated by Cheng et al.
-- **Used for:** many enzymes need a metal (zinc, iron, magnesium, copper…)
-  to work. Knowing which proteins bind one guides metalloenzyme design,
-  explains metal toxicity, and flags candidates for metal-dependent
-  catalysis.
-- **Why it matters:** binding depends on a handful of residues (often
-  cysteine, histidine, aspartate, glutamate) placed together in 3D. A
-  whole-protein embedding must pick up that small local pattern.
-- **Run:** [`metal_ion_binding.yaml`](../configs/datasets/metal_ion_binding.yaml)
-  with `sequence_classification` ·
-  [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-metal_ion_binding)
-
 ##### `solubility_prediction`
 
 **Question:** will this protein stay dissolved when produced in bacteria, or
@@ -241,77 +219,6 @@ clump into insoluble aggregates?
   [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-temperature_stability)
 
 #### Per protein: one number
-
-##### `enzyme_catalytic_efficiency`
-
-**Question:** how fast does this enzyme convert its substrate?
-
-- **Readout:** one turnover number (k<sub>cat</sub>: reactions per second per
-  enzyme molecule) per sequence, on the scale published upstream. Data from
-  BRENDA, SABIO-RK, and other databases, curated by Li et al. (DLKcat).
-- **Used for:** metabolic engineering and genome-scale metabolic models,
-  which need rate constants for thousands of enzymes that were never
-  measured.
-- **Why it matters:** activity depends on exact active-site chemistry.
-  **Caveat:** the original data pairs each enzyme with a substrate, but only
-  the protein sequence is given here, so part of the variation cannot be
-  predicted from the input.
-- **Run:** [`enzyme_catalytic_efficiency.yaml`](../configs/datasets/enzyme_catalytic_efficiency.yaml)
-  with `sequence_regression` ·
-  [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-enzyme_catalytic_efficiency)
-
-##### `fitness_prediction`
-
-**Question:** how well does this variant of protein GB1 still do its job?
-
-GB1 is a small domain (56 residues) of protein G, a protein that
-*Streptococcus* bacteria use to grab antibodies by their Fc stem. It is
-used in labs to purify antibodies, and because it is small, stable, and easy
-to make, it is a classic model protein for folding and engineering studies.
-
-- **Readout:** one fitness score per variant: how well that GB1 variant binds
-  antibodies (IgG-Fc), from the FLIP benchmark. The variants differ only at
-  four positions (V39, D40, G41, V54), each mutated to other amino acids.
-- **Used for:** machine-learning-guided protein engineering: predicting which
-  mutants are worth making, instead of testing all 160,000 combinations.
-- **Why it matters:** the sequences are almost identical, and mutations at
-  the four sites interact (epistasis). The embedding must separate sequences
-  that differ by a few residues.
-- **Run:** [`fitness_prediction.yaml`](../configs/datasets/fitness_prediction.yaml)
-  with `sequence_regression` ·
-  [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-fitness_prediction)
-- **Note:** the hosted targets are numeric strings; the regression task
-  converts them to floats during collation.
-
-##### `optimal_ph`
-
-**Question:** at what pH does this enzyme work best?
-
-- **Readout:** one optimal pH per enzyme, from the EpHod dataset.
-- **Used for:** matching enzymes to process conditions: alkaline laundry
-  detergents, acidic food processing, or the pH of a particular cell
-  compartment.
-- **Why it matters:** the pH optimum depends on which charged residues sit in
-  and around the active site, so it tests whether the embedding tracks
-  charge and its location.
-- **Run:** [`optimal_ph.yaml`](../configs/datasets/optimal_ph.yaml) with
-  `sequence_regression` ·
-  [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-optimal_ph)
-
-##### `optimal_temperature`
-
-**Question:** at what temperature is this enzyme most active?
-
-- **Readout:** one optimal temperature in °C per enzyme, from the DeepET
-  dataset.
-- **Used for:** designing industrial processes and picking enzymes for hot or
-  cold conditions.
-- **Why it matters:** enzymes adapt to their organism's temperature, which
-  leaves traces across the whole sequence. Complements
-  `temperature_stability` with a continuous, enzyme-specific measurement.
-- **Run:** [`optimal_temperature.yaml`](../configs/datasets/optimal_temperature.yaml)
-  with `sequence_regression` ·
-  [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-optimal_temperature)
 
 ##### `stability_prediction`
 
@@ -738,15 +645,11 @@ consensus at conserved positions, or the human residue it saw in training?
 ## Separate Dataset Workflows
 
 ProteinGym has no dataset overlays; see the [ProteinGym guide](proteingym.md)
-for its sourcing and scoring workflow. TAPE ProteinNet uses
-[`tape_proteinnet_contact_prediction.yaml`](../configs/datasets/tape_proteinnet_contact_prediction.yaml)
-with either contact task; its source preparation is covered in the
-[dataset-sourcing guide](dataset-sourcing.md#tape-proteinnet).
+for its sourcing and scoring workflow.
 Development-only test datasets are not listed here.
 
 | Dataset | What it measures | Hub repository | Workflow |
 |---|---|---|---|
-| TAPE ProteinNet | Structural contacts derived from residue coordinates; contact pairs are the positive labels. | Configured upload target: `flair-bio/tape-proteinnet_contact_prediction` | Use the `tape_proteinnet_contact_prediction` dataset overlay with `contact_prediction` or `categorical_jacobian`. |
 | ProteinGym DMS substitutions | Per-assay variant-effect measurements for single/double substitutions. | [flair-bio/proteingym-dms_substitutions](https://huggingface.co/datasets/flair-bio/proteingym-dms_substitutions) | Dedicated zero-shot and supervised ProteinGym runners. |
 | ProteinGym DMS indels | Per-assay variant-effect measurements for insertions and deletions. | [flair-bio/proteingym-dms_indels](https://huggingface.co/datasets/flair-bio/proteingym-dms_indels) | Dedicated zero-shot and supervised ProteinGym runners. |
 | ProteinGym clinical substitutions | Per-assay clinical labels for substitutions. | [flair-bio/proteingym-clinical_substitutions](https://huggingface.co/datasets/flair-bio/proteingym-clinical_substitutions) | Dedicated zero-shot and supervised ProteinGym runners. |

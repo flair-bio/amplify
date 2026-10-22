@@ -22,9 +22,9 @@ class EvaluationWorkspaceConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    dataset_name: str  # dataset name that serves as a mnemonic for the dataset being evaluated, e.g. "enzyme_catalytic_efficiency"
+    dataset_name: str  # dataset name that serves as a mnemonic for the dataset being evaluated, e.g. "stability_prediction"
     dataset_repo_id: str | None = (
-        None  # path to HuggingFace dataset repo e.g. biomap-research/enzyme_catalytic_efficiency
+        None  # path to HuggingFace dataset repo e.g. biomap-research/stability_prediction
     )
     model_name: str  # model name that serves as a mnemonic for the model being evaluated, e.g. "amplify-120m"
     model_repo_id: str | None = (

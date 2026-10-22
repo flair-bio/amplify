@@ -32,7 +32,6 @@ def test_dataset_default_matches_explicit_task_config(dataset):
     "dataset,task",
     [
         ("contact_prediction_binary", "categorical_jacobian"),
-        ("tape_proteinnet_contact_prediction", "categorical_jacobian"),
         ("uniprot_protparams", "pseudo_perplexity"),
     ],
 )

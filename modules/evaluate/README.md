@@ -259,7 +259,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 MODELS=(amplify_120m amplify_350m esm2_35m)
-DATASETS=(localization_prediction metal_ion_binding solubility_prediction)
+DATASETS=(fold_prediction localization_prediction solubility_prediction)
 model=${MODELS[$((SLURM_ARRAY_TASK_ID / ${#DATASETS[@]}))]}
 dataset=${DATASETS[$((SLURM_ARRAY_TASK_ID % ${#DATASETS[@]}))]}
 
@@ -712,7 +712,7 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
     modules/evaluate/configs/smoke_test.yaml \
     modules/evaluate/configs/models/amplify_120m.yaml \
     modules/evaluate/configs/tasks/sequence_classification.yaml \
-    modules/evaluate/configs/datasets/metal_ion_binding.yaml \
+    modules/evaluate/configs/datasets/localization_prediction.yaml \
     modules/evaluate/configs/tuning/random_forest.yaml
 ```
 

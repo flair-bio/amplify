@@ -525,7 +525,7 @@ class TestPoolHiddenStates:
 class TestEmbeddingCacheKey:
     _BASE_KWARGS = dict(
         model_id="flair-bio/amplify-120m",
-        dataset_id="biomap-research/metal_ion_binding",
+        dataset_id="biomap-research/localization_prediction",
         split="train",
         max_length=512,
         random_truncate=True,
