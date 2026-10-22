@@ -21,6 +21,7 @@ from accelerate import Accelerator
 
 from modules.evaluate.src.dataset.collator import input_id_rows, unpack_packed
 from modules.evaluate.src.tasks import TaskType, get_task
+from modules.evaluate.src.tasks.contact_prediction import ContactPredictionTask
 
 logger = logging.getLogger(__name__)
 
@@ -218,14 +219,17 @@ def run_inference(
                 input_ids_batches[batch_idx].cpu().tolist(), skip_special_tokens=True
             )
         ids = id_batches[batch_idx]
-        if residue_length_batches is None:
-            rows = task.split_batch_rows(preds, labels)
-        else:
+        if (
+            isinstance(task, ContactPredictionTask)
+            and residue_length_batches is not None
+        ):
             rows = task.split_batch_rows(
                 preds,
                 labels,
                 residue_lengths=residue_length_batches[batch_idx],
             )
+        else:
+            rows = task.split_batch_rows(preds, labels)
         for i, (pred_row, label_row) in enumerate(rows):
             all_predictions.append(pred_row)
             all_labels.append(label_row)
