@@ -152,6 +152,7 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
         search_config.enabled
         and (
             search_config.search_space.hidden_size is not None
+            or search_config.search_space.hidden_depth is not None
             or search_config.search_space.batch_size is not None
         )
         and (
@@ -164,7 +165,11 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
         dimension = (
             "hidden_size"
             if search_config.search_space.hidden_size is not None
-            else "batch_size"
+            else (
+                "hidden_depth"
+                if search_config.search_space.hidden_depth is not None
+                else "batch_size"
+            )
         )
         raise ValueError(
             f"{dimension} search requires a cached MLP probe in tune_probe mode."

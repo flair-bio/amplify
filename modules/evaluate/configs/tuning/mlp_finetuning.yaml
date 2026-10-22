@@ -16,6 +16,7 @@ steps:
       search_pattern: bohb
       search_space:
         hidden_size: null
+        hidden_depth: null # native head architecture is fixed
         batch_size: null
         learning_rate: [1e-5, 1e-3]
         max_epochs: [1, 2, 5, 10, 20, 40, 100]

@@ -1,7 +1,7 @@
 """
 Pluggable prediction heads for the evaluation probe.
 
-``EmbeddingProbeHead`` is a linear or two-layer torch probe over precomputed
+``EmbeddingProbeHead`` is a linear or MLP torch probe over precomputed
 embeddings. ``"torch_linear"`` is a single :class:`torch.nn.Linear` layer trained by
 backpropagation through
 :class:`~modules.evaluate.src.steps.tune.TuneStep`'s existing epoch/optimizer
@@ -13,7 +13,7 @@ hidden-state depths, using live or cached features. The native-head path
 supports AMPLIFY sequence heads and all shipped token heads while
 rejecting composite heads such as ESM's sequence-classification head.
 ``"mlp"`` remains the
-existing native model-head path, and can also train a two-layer probe on
+existing native model-head path, and can also train an MLP probe on
 frozen cached embeddings. Every classical
 head type (``"sklearn_linear"``, ``"knn"``, ``"random_forest"``,
 ``"xgboost"``) is a
@@ -140,6 +140,14 @@ class HeadConfig(BaseModel):
             "ignored for other head types."
         ),
     )
+    hidden_depth: int = Field(
+        1,
+        gt=0,
+        description=(
+            "Number of hidden Linear-GELU layers for a cached MLP probe; "
+            "ignored for other head types and native model heads."
+        ),
+    )
     hyperparameters: dict[str, Any] = Field(
         default_factory=dict,
         description="Constructor kwargs for the chosen estimator (ignored for 'mlp').",
@@ -156,22 +164,29 @@ class HeadConfig(BaseModel):
 
 
 def build_probe_layers(
-    input_dim: int, hidden_size: int | None, output_dim: int
+    input_dim: int, hidden_size: int | None, output_dim: int, hidden_depth: int = 1
 ) -> tuple[nn.Module, nn.Module]:
-    """(projection, classifier) pair: identity+linear, or Linear-GELU-Linear
-    when ``hidden_size`` is set. Shared shape for every torch probe head,
-    including the standalone one in ``proteingym/supervised.py``.
-    """
+    """Build a linear head or repeated hidden Linear-GELU layers plus output."""
     if hidden_size is None:
         return nn.Identity(), nn.Linear(input_dim, output_dim)
+    if hidden_depth < 1:
+        raise ValueError("MLP hidden_depth must be positive.")
+    layers: list[nn.Module] = []
+    for index in range(hidden_depth):
+        layers.extend(
+            [
+                nn.Linear(input_dim if index == 0 else hidden_size, hidden_size),
+                nn.GELU(),
+            ]
+        )
     return (
-        nn.Sequential(nn.Linear(input_dim, hidden_size), nn.GELU()),
+        nn.Sequential(*layers),
         nn.Linear(hidden_size, output_dim),
     )
 
 
 class EmbeddingProbeHead(nn.Module):
-    """A linear or two-layer probe over cached or live frozen features.
+    """A linear or MLP probe over cached or live frozen features.
 
     Cached probing uses this instead of the trunk and native task head;
     layerwise probing attaches one instance per selected depth. It returns
@@ -186,14 +201,16 @@ class EmbeddingProbeHead(nn.Module):
         task_type: str,
         probe_hidden_size: int | None = None,
         standardize_features: bool = False,
+        probe_hidden_depth: int = 1,
     ) -> None:
         super().__init__()
         self.num_labels = num_labels
         self.task_type = task_type
         self.embedding_size = hidden_size
         self.probe_hidden_size = probe_hidden_size
+        self.probe_hidden_depth = probe_hidden_depth
         self.projection, self.classifier = build_probe_layers(
-            hidden_size, probe_hidden_size, num_labels
+            hidden_size, probe_hidden_size, num_labels, probe_hidden_depth
         )
         self.standardize_features = standardize_features
         self.register_buffer(
@@ -227,7 +244,10 @@ class EmbeddingProbeHead(nn.Module):
 
     def cache_identity(self) -> str:
         """Return the shape identity used by control-output caching."""
-        return f"embedding_probe:{self.embedding_size}:{self.probe_hidden_size}:{self.num_labels}"
+        return (
+            f"embedding_probe:{self.embedding_size}:{self.probe_hidden_size}:"
+            f"{self.probe_hidden_depth}:{self.num_labels}"
+        )
 
     def forward(
         self,

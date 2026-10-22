@@ -107,6 +107,11 @@ class HyperparameterSearchSpaceConfig(BaseModel):
         min_length=1,
         description="Optional hidden widths for cached MLP probes; null keeps head.hidden_size.",
     )
+    hidden_depth: list[PositiveInt] | None = Field(
+        None,
+        min_length=1,
+        description="Optional hidden depths for cached MLP probes; null keeps head.hidden_depth.",
+    )
 
     @model_validator(mode="after")
     def _validate_weight_decay_bounds(self) -> HyperparameterSearchSpaceConfig:
@@ -266,6 +271,7 @@ class TuneStep:
             search.enabled
             and (
                 search.search_space.hidden_size is not None
+                or search.search_space.hidden_depth is not None
                 or search.search_space.batch_size is not None
             )
             and (
@@ -278,7 +284,11 @@ class TuneStep:
             dimension = (
                 "hidden_size"
                 if search.search_space.hidden_size is not None
-                else "batch_size"
+                else (
+                    "hidden_depth"
+                    if search.search_space.hidden_depth is not None
+                    else "batch_size"
+                )
             )
             raise ValueError(
                 f"{dimension} search requires a cached MLP probe in tune_probe mode."
@@ -294,7 +304,7 @@ class TuneStep:
         if not isinstance(prepared.model, nn.Module):
             raise TypeError("Torch probe tuning requires a torch.nn.Module model.")
         # PrepareStep creates a linear probe for cached representations.
-        # Rebuild it with the configured MLP width; cached embeddings remain unchanged.
+        # Rebuild the configured MLP architecture; cached embeddings remain unchanged.
         if self.config.head.head_type == "mlp" and isinstance(
             prepared.model, EmbeddingProbeHead
         ):
@@ -303,6 +313,7 @@ class TuneStep:
                 prepared.model.num_labels,
                 prepared.model.task_type,
                 probe_hidden_size=self.config.head.hidden_size,
+                probe_hidden_depth=self.config.head.hidden_depth,
             ).to(accelerator.device)
 
         model = prepared.model
@@ -357,7 +368,7 @@ class TuneStep:
             }
             self._train(workspace, prepared, accelerator, best_hparams)
 
-        # Width search can replace the head with a different architecture.
+        # Architecture search can replace the head.
         model = prepared.model
         if self.config.variance_seeds and cached_probe:
             self._report_torch_seed_variance(
@@ -959,6 +970,7 @@ class TuneStep:
                     best_hparams,
                     embedding_size=unwrapped_model.embedding_size,
                     probe_hidden_size=unwrapped_model.probe_hidden_size,
+                    probe_hidden_depth=unwrapped_model.probe_hidden_depth,
                     standardize_features=unwrapped_model.standardize_features,
                     num_labels=unwrapped_model.num_labels,
                     task_type=unwrapped_model.task_type,
@@ -1340,16 +1352,27 @@ class TuneStep:
         )
         return scores[metric_name]
 
-    def _probe_search_starters(self) -> list[tuple[int | None, int | None]]:
-        """Initial width/batch pairs that cover each configured value."""
+    def _probe_search_starters(
+        self,
+    ) -> list[tuple[int | None, int | None, int | None]]:
+        """Initial width/batch/depth combinations covering each configured value."""
         space = self.config.hyperparameter_search.search_space
-        if space.hidden_size is None and space.batch_size is None:
+        if (
+            space.hidden_size is None
+            and space.batch_size is None
+            and space.hidden_depth is None
+        ):
             return []
         widths = space.hidden_size or [None]
         batches = space.batch_size or [None]
+        depths = space.hidden_depth or [None]
         return [
-            (widths[index % len(widths)], batches[index % len(batches)])
-            for index in range(max(len(widths), len(batches)))
+            (
+                widths[index % len(widths)],
+                batches[index % len(batches)],
+                depths[index % len(depths)],
+            )
+            for index in range(max(len(widths), len(batches), len(depths)))
         ]
 
     def _generate_candidates(
@@ -1367,6 +1390,7 @@ class TuneStep:
                 space.max_epochs,
                 space.hidden_size or [None],
                 space.batch_size or [None],
+                space.hidden_depth or [None],
             )
         )
 
@@ -1390,7 +1414,7 @@ class TuneStep:
                     n_trials,
                     len(combos),
                 )
-            if space.hidden_size is None and space.batch_size is None:
+            if not self._probe_search_starters():
                 candidates = sample_candidates(combos, n_trials, seed)
             else:
                 shuffled = sample_candidates(combos, len(combos), seed)
@@ -1401,8 +1425,9 @@ class TuneStep:
                         space.max_epochs[0],
                         width,
                         batch,
+                        depth,
                     )
-                    for width, batch in self._probe_search_starters()
+                    for width, batch, depth in self._probe_search_starters()
                 ]
                 candidates = (
                     starters + [item for item in shuffled if item not in starters]
@@ -1416,8 +1441,9 @@ class TuneStep:
                 "seed": seed,
                 **({"hidden_size": hidden_size} if hidden_size is not None else {}),
                 **({"batch_size": batch_size} if batch_size is not None else {}),
+                **({"hidden_depth": hidden_depth} if hidden_depth is not None else {}),
             }
-            for lr, wd, max_epochs, hidden_size, batch_size in candidates
+            for lr, wd, max_epochs, hidden_size, batch_size, hidden_depth in candidates
         ]
 
     def _search_hyperparameters(
@@ -1435,6 +1461,9 @@ class TuneStep:
         model = accelerator.unwrap_model(prepared.model)
         initial_state = checkpoint_state(model)
         initial_model = model
+        architecture_search = (
+            space.hidden_size is not None or space.hidden_depth is not None
+        )
 
         best_score: float | None = None
         best_hparams: dict[str, Any] | None = None
@@ -1456,16 +1485,21 @@ class TuneStep:
             hparams: dict[str, Any], trial: Any = None, prune_enabled: bool = False
         ) -> float:
             nonlocal model
-            if space.hidden_size is not None:
+            if architecture_search:
                 assert isinstance(initial_model, EmbeddingProbeHead)
-                # Match initialization across trials of the same width, then
-                # reset the training RNG below so width cannot alter batch order.
+                # Match initialization for the same architecture, then reset
+                # the training RNG so architecture cannot alter batch order.
                 torch.manual_seed(hparams["seed"])
                 model = EmbeddingProbeHead(
                     initial_model.embedding_size,
                     initial_model.num_labels,
                     initial_model.task_type,
-                    probe_hidden_size=hparams["hidden_size"],
+                    probe_hidden_size=hparams.get(
+                        "hidden_size", initial_model.probe_hidden_size
+                    ),
+                    probe_hidden_depth=hparams.get(
+                        "hidden_depth", initial_model.probe_hidden_depth
+                    ),
                     standardize_features=initial_model.standardize_features,
                 ).to(initial_model.classifier.weight)
                 if initial_model.standardize_features:
@@ -1482,7 +1516,7 @@ class TuneStep:
                 train_generator = getattr(prepared.train_dataloader, "generator", None)
                 if train_generator is not None:
                     train_generator.manual_seed(hparams["seed"])
-            if space.hidden_size is None:
+            if not architecture_search:
                 load_checkpoint_state(model, initial_state)
             try:
                 training_score = self._train(
@@ -1577,6 +1611,10 @@ class TuneStep:
                 else:
                     hparams = None
                 if hparams is not None:
+                    if space.hidden_depth is not None:
+                        hparams["hidden_depth"] = trial.suggest_categorical(
+                            "hidden_depth", space.hidden_depth
+                        )
                     if space.hidden_size is not None:
                         hparams["hidden_size"] = trial.suggest_categorical(
                             "hidden_size", space.hidden_size
@@ -1602,8 +1640,8 @@ class TuneStep:
                 return score
 
             study = create_optuna_study(direction, seed, search_config.n_trials)
-            # Initial trials cover each width and batch within n_trials.
-            for hidden_size, batch_size in self._probe_search_starters():
+            # Initial trials cover each width, batch and depth within n_trials.
+            for hidden_size, batch_size, hidden_depth in self._probe_search_starters():
                 params = {
                     "learning_rate": space.learning_rate[0],
                     "weight_decay": space.weight_decay[0],
@@ -1613,6 +1651,8 @@ class TuneStep:
                     params["hidden_size"] = hidden_size
                 if batch_size is not None:
                     params["batch_size"] = batch_size
+                if hidden_depth is not None:
+                    params["hidden_depth"] = hidden_depth
                 study.enqueue_trial(params)
             study.optimize(objective, n_trials=search_config.n_trials)
 
@@ -1624,7 +1664,7 @@ class TuneStep:
         )
         assert best_hparams is not None and best_state is not None  # >= 1 trial run
         load_checkpoint_state(best_model, best_state)
-        if space.hidden_size is not None:
+        if architecture_search:
             prepared.model = best_model
         return best_hparams
 

@@ -477,6 +477,7 @@ class ControlBuilder:
                 trained_head.num_labels,
                 workspace.task_type,
                 probe_hidden_size=trained_head.probe_hidden_size,
+                probe_hidden_depth=trained_head.probe_hidden_depth,
                 standardize_features=trained_head.standardize_features,
             ).to(accelerator.device)
             if trained_head.standardize_features:

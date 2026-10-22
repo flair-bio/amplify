@@ -24,8 +24,9 @@ class _ControlTrunk(nn.Module):
 @pytest.mark.parametrize("control", ["untrained", "random_head", "random_both"])
 @pytest.mark.parametrize("probe_hidden_size", [None, 3])
 @pytest.mark.parametrize("standardize_features", [False, True])
+@pytest.mark.parametrize("probe_hidden_depth", [1, 2])
 def test_randomized_heads_preserve_training_feature_statistics(
-    monkeypatch, control, probe_hidden_size, standardize_features
+    monkeypatch, control, probe_hidden_size, standardize_features, probe_hidden_depth
 ):
     trained_head = EmbeddingProbeHead(
         4,
@@ -33,6 +34,7 @@ def test_randomized_heads_preserve_training_feature_statistics(
         "sequence_classification",
         probe_hidden_size=probe_hidden_size,
         standardize_features=standardize_features,
+        probe_hidden_depth=probe_hidden_depth,
     )
     if standardize_features:
         trained_head.fit_standardization(
@@ -80,6 +82,9 @@ def test_randomized_heads_preserve_training_feature_statistics(
     assert actual_ids == ids
     (control_head,) = control_heads
     assert control_head is not trained_head
+    assert control_head.probe_hidden_depth == trained_head.probe_hidden_depth
+    assert control_head.probe_hidden_size == trained_head.probe_hidden_size
+    assert set(control_head.state_dict()) == set(trained_head.state_dict())
     assert control_head.standardize_features is standardize_features
     if standardize_features:
         torch.testing.assert_close(control_head.feature_mean, trained_head.feature_mean)

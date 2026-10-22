@@ -185,14 +185,14 @@ Classification still uses the existing observed-class inclusion rules.
 
 The neural tuning overlays enable 100 TPE trials, with learning-rate bounds
 `[1e-5, 1e-3]`, epoch choices `[1, 2, 5, 10, 20, 40, 100]`, cosine decay,
-and no early stopping. The cached MLP searches widths `[128, 256, 512]` and
+and no early stopping. The cached MLP searches widths `[128, 256, 512]`,
+hidden depths `[1, 2]` (each hidden layer is Linear-GELU), and
 batches `[8, 16, 32, 64, 128, 256]`; token batches count valid residues, not
 proteins. TPE samples weight decay continuously on a log scale from `1e-6`
 through `1e-1` (`weight_decay_sampling: log`). Set this to `categorical`
 for discrete candidates, including zero decay; log bounds must be finite and
 positive. Random/grid searches still use the listed candidates, as they do
-for learning rate. Depth search `[1, 2]` and train+validation final refitting
-remain implementation work.
+for learning rate. Train+validation final refitting remains implementation work.
 The base configuration leaves HPO disabled until a neural tuning overlay is
 selected. Classical-estimator overlays retain their estimator-specific spaces.
 
@@ -482,21 +482,24 @@ dataloaders.
 | `hyperparameter_search.search_space.*` | see [`configs/config.yaml`](configs/config.yaml) | Candidate values for `learning_rate`, `max_epochs`, and `weight_decay`; optional cached-MLP dimensions are listed below |
 | `hyperparameter_search.search_space.weight_decay_sampling` | `log` | TPE: continuous log-scale sampling between min/max `weight_decay` bounds; `categorical` permits discrete candidates including zero. Random/grid always use the listed candidates |
 | `hyperparameter_search.search_space.hidden_size` | `null` | Optional hidden widths for cached MLP probes; `null` keeps the fixed `head.hidden_size` |
+| `hyperparameter_search.search_space.hidden_depth` | `null` | Optional hidden-layer counts for cached MLP probes; `null` keeps `head.hidden_depth` (default 1). Native heads and layerwise probes do not support this search |
 | `hyperparameter_search.search_space.batch_size` | `null` | Optional cached MLP training batch sizes; `null` keeps `steps.tune.batch_size` or the prepared loader size |
 
-`configs/tuning/mlp.yaml` searches hidden widths `[128, 256, 512, 1024]`
-and probe batch sizes `[8, 16, 32, 64, 128]` jointly with learning rate, weight
-decay, and epochs in 50 trials total. BOHB and random search cover each width
-and batch size in the initial trials when the budget permits; grid search
-evaluates every combination. Width and batch-size search require cached MLP
+`configs/tuning/mlp.yaml` searches hidden widths `[128, 256, 512]`,
+hidden depths `[1, 2]`, and probe batch sizes `[8, 16, 32, 64, 128, 256]`
+jointly with learning rate, weight decay, and epochs in 100 trials total.
+BOHB and random search cover each width, depth, and batch size in the initial
+trials when the budget permits; grid search evaluates every combination.
+Width, depth, and batch-size search require cached MLP
 probes. Probe batches contain sequences for sequence tasks and individual
 residues for token tasks. Each trial uses its batch size for training,
 validation, and the optimizer schedule; the selected batch is saved with the
 winning hyperparameters.
 Candidates reuse training-only feature standardization and are selected by the
 validation metric. The winning architecture and weights are retained for test
-prediction and saved together. With no width search configured, the fixed
-`head.hidden_size` behavior is unchanged.
+prediction and saved together, including depth in the checkpoint metadata and
+control-cache identity. With no architecture search configured,
+`head.hidden_size` and `head.hidden_depth` set the fixed architecture.
 
 For classical `head_type` values, put fixed estimator settings in
 `head.hyperparameters` and swept dimensions in `head.search_space`. Every
