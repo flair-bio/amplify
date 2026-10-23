@@ -45,12 +45,12 @@ from sklearn.preprocessing import StandardScaler
 from torch import nn
 from tqdm import tqdm
 
+from modules.evaluate.src.utils.hpo import create_optuna_study, sample_candidates
+
 _FEATURE_STANDARDIZATION_CHUNK_SIZE = 65_536
 
 if TYPE_CHECKING:
     import optuna
-
-from modules.evaluate.src.utils.hpo import create_optuna_study, sample_candidates
 
 logger = logging.getLogger(__name__)
 
