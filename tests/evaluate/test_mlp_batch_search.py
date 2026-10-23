@@ -428,14 +428,13 @@ def test_disabled_batch_search_keeps_fixed_training_configuration(
     assert step.config.batch_size == 32
 
 
-def test_mlp_overlay_enables_requested_batch_size_choices():
+def test_default_mlp_enables_requested_batch_size_choices():
     root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
     config = load_and_parse(
         path=[
             root / "config.yaml",
             root / "tasks/sequence_classification.yaml",
             root / "datasets/localization_prediction.yaml",
-            root / "tuning/mlp.yaml",
         ],
         model_cls=EvaluationConfig,
     )

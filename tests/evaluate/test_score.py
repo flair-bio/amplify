@@ -1029,7 +1029,13 @@ class TestScoreStepBootstrap:
         assert 0.0 <= comparison["p_value"] <= 1.0
         assert 0.0 <= comparison["p_value_adjusted"] <= 1.0
 
-        # Control comparisons are only persisted in tidy form, via long_df.
+        manifest = json.loads(workspace.run_manifest_path.read_text())
+        assert manifest["bootstrap"]["confidence_intervals"] == result.confidence_intervals
+        assert manifest["bootstrap"]["control_comparisons"] == result.control_comparisons
+        assert "predict" in manifest
+        assert "score" in manifest
+
+        # The same comparisons remain available in tidy form.
         assert result.long_path is not None
         on_disk = pl.read_parquet(result.long_path)
         assert control in on_disk["control"].to_list()
@@ -1104,6 +1110,8 @@ class TestScoreStepBootstrap:
 
         assert result.control_comparisons is None
         assert set(result.confidence_intervals) == {"accuracy"}
+        manifest = json.loads(workspace.run_manifest_path.read_text())
+        assert manifest["bootstrap"]["control_comparisons"] == {}
 
 
 # ---------------------------------------------------------------------------

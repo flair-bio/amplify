@@ -296,7 +296,6 @@ def test_refit_config_rejects_unsupported_paths(unsupported):
                 root / "config.yaml",
                 root / "tasks/sequence_classification.yaml",
                 root / "datasets/fold_prediction.yaml",
-                root / "tuning/mlp.yaml",
             ],
             EvaluationConfig,
             overrides=overrides,

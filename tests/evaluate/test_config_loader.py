@@ -12,21 +12,91 @@ from modules.evaluate.src.utils.config_loader import load_evaluation_config
 CONFIGS = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
 
 
-@pytest.mark.parametrize("tuning", ["mlp", "torch_linear", "mlp_finetuning"])
+@pytest.mark.parametrize("tuning", [None, "torch_linear", "mlp_finetuning"])
 def test_neural_overlays_select_continuous_log_weight_decay(tuning):
-    config = load_evaluation_config(
-        [
-            CONFIGS / "config.yaml",
-            CONFIGS / "datasets/fold_prediction.yaml",
-            CONFIGS / "tuning" / f"{tuning}.yaml",
-        ]
-    )
+    paths = [CONFIGS / "config.yaml", CONFIGS / "datasets/fold_prediction.yaml"]
+    if tuning is not None:
+        paths.append(CONFIGS / "tuning" / f"{tuning}.yaml")
+    config = load_evaluation_config(paths)
     search = config.steps.tune.hyperparameter_search
     assert search.enabled
     assert search.search_pattern == "bohb"
     assert search.search_space.weight_decay_sampling == "log"
     assert min(search.search_space.weight_decay) == 1e-6
     assert max(search.search_space.weight_decay) == 1e-1
+
+
+def test_default_protocol_needs_only_base_model_and_dataset():
+    config = load_evaluation_config(
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "models/amplify_120m.yaml",
+            CONFIGS / "datasets/localization_prediction.yaml",
+        ]
+    )
+    assert config.steps.mode == "tune_probe"
+    assert config.steps.prepare.embedding_cache.enabled
+    assert config.steps.tune.head.head_type == "mlp"
+    assert config.steps.tune.refit_on_train_validation
+    assert config.steps.tune.standardize_features
+    assert config.steps.tune.early_stopping_patience is None
+    assert config.steps.tune.lr_scheduler_type == "cosine"
+    search = config.steps.tune.hyperparameter_search
+    assert search.enabled
+    assert search.n_trials == 100
+    assert search.search_space.hidden_size == [128, 256, 512]
+    assert search.search_space.hidden_depth == [1, 2]
+    assert search.search_space.batch_size == [8, 16, 32, 64, 128, 256]
+    assert search.metric == "f1"
+
+
+def test_token_classification_uses_residue_scale_hpo():
+    config = load_evaluation_config(
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "tasks/token_classification.yaml",
+            CONFIGS / "datasets/uniprot_secondary_structure.yaml",
+        ]
+    )
+    search = config.steps.tune.hyperparameter_search
+    assert config.workspace.task_type == "token_classification"
+    assert search.n_trials == 100
+    assert search.search_space.batch_size == [1024, 2048, 4096]
+    assert search.search_space.max_epochs == [1, 2, 5, 10]
+
+
+@pytest.mark.parametrize(
+    "task,dataset",
+    [
+        ("calibration", "human_calibration"),
+        ("pseudo_perplexity", "uniprot_protparams"),
+        ("categorical_jacobian", "contact_prediction_binary"),
+    ],
+)
+def test_zero_shot_tasks_disable_default_training(task, dataset):
+    config = load_evaluation_config(
+        [CONFIGS / "config.yaml", CONFIGS / "datasets" / f"{dataset}.yaml"],
+        overrides=[f"workspace.task_type={task}"],
+    )
+    assert config.steps.mode == "evaluate_as_is"
+    assert not config.steps.prepare.embedding_cache.enabled
+    assert not config.steps.tune.hyperparameter_search.enabled
+    assert not config.steps.tune.refit_on_train_validation
+
+
+def test_contact_probe_does_not_inherit_cached_mlp_search():
+    config = load_evaluation_config(
+        [CONFIGS / "config.yaml", CONFIGS / "datasets/contact_prediction_binary.yaml"]
+    )
+    assert config.steps.mode == "tune_probe"
+    assert not config.steps.prepare.embedding_cache.enabled
+    assert not config.steps.tune.refit_on_train_validation
+    search = config.steps.tune.hyperparameter_search
+    assert search.enabled
+    assert search.metric == "contact_auc_long"
+    assert search.search_space.hidden_size is None
+    assert search.search_space.hidden_depth is None
+    assert search.search_space.batch_size is None
 
 
 @pytest.mark.parametrize(

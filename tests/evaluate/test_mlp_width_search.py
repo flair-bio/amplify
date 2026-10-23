@@ -404,13 +404,12 @@ def test_width_search_trains_cached_heads_end_to_end(monkeypatch, tmp_path):
         "steps.mode=finetune",
     ],
 )
-def test_mlp_width_overlay_validates_supported_configuration(override):
+def test_default_mlp_width_search_validates_supported_configuration(override):
     root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
     paths = [
         root / "config.yaml",
         root / "tasks/sequence_classification.yaml",
         root / "datasets/localization_prediction.yaml",
-        root / "tuning/mlp.yaml",
     ]
     if override is not None:
         overrides = [override]
@@ -449,7 +448,6 @@ def test_depth_only_search_config_rejects_unsupported_paths(overrides):
                 root / "config.yaml",
                 root / "tasks/sequence_classification.yaml",
                 root / "datasets/localization_prediction.yaml",
-                root / "tuning/mlp.yaml",
             ],
             model_cls=EvaluationConfig,
             overrides=[

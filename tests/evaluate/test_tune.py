@@ -766,7 +766,7 @@ def test_cached_training_features_are_transferred_only_when_training(
     result = step.run(workspace, prepared, accelerator=accelerator)
 
     assert result is prepared
-    prepare_split.assert_called_once_with(prepared.train_dataloader, accelerator.device)
+    prepare_split.assert_called_once_with(prepared.train_dataloader)
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
@@ -873,9 +873,7 @@ def test_cached_mlp_checkpoint_reloads_trained_head(
     reloaded.load_state_dict(state, strict=True)
     for name, tensor in trained.model.state_dict().items():
         torch.testing.assert_close(state[name], tensor)
-    features, _ = step._cached_embedding_split(
-        prepared.val_dataloader, torch.device("cpu")
-    )
+    features, _ = step._cached_embedding_split(prepared.val_dataloader)
     with torch.inference_mode():
         torch.testing.assert_close(
             reloaded(inputs_embeds=features).logits,
