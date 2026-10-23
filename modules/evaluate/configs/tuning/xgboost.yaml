@@ -16,3 +16,8 @@ steps:
         n_estimators: [100, 300]
         max_depth: [3, 6, 9]
         learning_rate: [0.3, 0.1, 0.03]
+    hyperparameter_search:
+      search_space:
+        hidden_size: null
+        hidden_depth: null
+        batch_size: null

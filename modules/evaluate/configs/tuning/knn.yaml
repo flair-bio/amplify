@@ -14,3 +14,8 @@ steps:
       head_type: knn
       search_space:
         n_neighbors: [1, 3, 5, 10, 20]
+    hyperparameter_search:
+      search_space:
+        hidden_size: null
+        hidden_depth: null
+        batch_size: null

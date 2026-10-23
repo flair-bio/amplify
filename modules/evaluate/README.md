@@ -77,7 +77,9 @@ uv sync --extra evaluate
 The smoke tests add [`configs/smoke_test.yaml`](configs/smoke_test.yaml) to a
 model, task, and dataset overlay. It shrinks batch size, sequence length, and
 bootstrap resamples, and sets `steps.mode=evaluate_as_is`, so Tune is skipped
-and only Prepare → Predict → Score run. A CUDA GPU is only needed for packed
+and only Prepare → Predict → Score run. It resets the head to the native MLP
+path and disables caching, HPO, and refitting, including when layered after an
+alternative probe. A CUDA GPU is only needed for packed
 batches (`steps.prepare.packed=true`, off by default).
 
 ### Sequence classification
@@ -168,10 +170,13 @@ instead of `run_evaluate.py`; see the [ProteinGym guide](docs/proteingym.md).
 
 ### Config files
 
-The default tuning overlay is [`configs/tuning/mlp.yaml`](configs/tuning/mlp.yaml):
-an MLP probe trained over cached embeddings from a frozen trunk. Add it after
-the base, model, and dataset configs when tuning; full trunk fine-tuning and
-other probe types remain explicit alternatives.
+The base [`configs/config.yaml`](configs/config.yaml) defines the complete default
+protocol: an MLP probe trained over cached embeddings from a frozen trunk, with
+100-trial hyperparameter search and fresh train+validation refitting. Supply the
+base, model, and dataset configs; no MLP tuning overlay is needed. Full trunk
+fine-tuning and other probe types remain explicit alternatives in `configs/tuning/`.
+Composition is base → model/task → dataset → optional alternative → smoke
+settings → CLI overrides; later values win.
 
 Task overlays explicitly select the reported metric and the validation
 selection metric/direction: Macro-F1 for classification, R² for regression
@@ -191,7 +196,8 @@ columns, including zero-only columns. Validation selection, final scores,
 controls, bootstrap, and permutations share this policy; token positions
 labelled `-100` remain excluded. Precision and recall use the same vocabulary.
 
-The neural tuning overlays enable 100 TPE trials, with learning-rate bounds
+The base MLP protocol and neural tuning alternatives enable 100 TPE trials,
+with learning-rate bounds
 `[1e-5, 1e-3]`, epoch choices `[1, 2, 5, 10, 20, 40, 100]`, cosine decay,
 and no early stopping. The cached MLP searches widths `[128, 256, 512]`,
 hidden depths `[1, 2]` (each hidden layer is Linear-GELU), and
@@ -200,20 +206,26 @@ proteins. TPE samples weight decay continuously on a log scale from `1e-6`
 through `1e-1` (`weight_decay_sampling: log`). Set this to `categorical`
 for discrete candidates, including zero decay; log bounds must be finite and
 positive. Random/grid searches still use the listed candidates, as they do
-for learning rate. Cached tuning overlays enable fresh train+validation final
-refitting after selection; live/native fine-tuning and layerwise refit remain
+for learning rate. The default MLP and cached tuning alternatives enable fresh
+train+validation final refitting after selection; live/native fine-tuning and layerwise refit remain
 implementation work.
-The base configuration leaves HPO disabled until a neural tuning overlay is
-selected. Classical-estimator overlays retain their estimator-specific spaces.
+To use fixed training settings instead, set
+`steps.tune.hyperparameter_search.enabled=false`;
+`steps.tune.learning_rate`, `weight_decay`, `max_epochs`, and `batch_size` then
+apply. During HPO, searched values replace their fixed counterparts, not cap them.
+Classical-estimator overlays retain their estimator-specific spaces.
+Calibration, pseudo-perplexity, and categorical Jacobian task overlays disable
+caching, HPO, and refitting. The live contact probe disables cached refitting and
+MLP architecture/batch search; its replacement CASP protocol remains pending.
 
 | File | Use |
 |---|---|
-| `configs/config.yaml` | Base config: every section, with every field documented. Runnable baseline |
+| `configs/config.yaml` | Complete default cached-MLP benchmark protocol |
 | `configs/smoke_test.yaml` | Overlay for a quick, bounded smoke test |
 | `configs/models/*.yaml` | One overlay per evaluated model (name, repo) |
 | `configs/tasks/*.yaml` | Task type, behavior, and default controls |
 | `configs/datasets/*.yaml` | One overlay per dataset; see the [catalog](docs/datasets.md) |
-| `configs/tuning/*.yaml` | One probe/HPO overlay per `steps.tune.head.head_type` |
+| `configs/tuning/*.yaml` | Explicit alternatives to the default cached MLP |
 | `configs/accelerate/*.yaml` | `accelerate launch` configs (e.g. single-process local runs) |
 
 Dataset overlays declare `workspace.default_task_type`, for example
@@ -322,8 +334,8 @@ Append these overrides to any launch command, or put them in an overlay YAML.
 
 | Goal | Overrides |
 |---|---|
-| Skip tuning and score the checkpoint as-is | `steps.mode=evaluate_as_is steps.prepare.embedding_cache.enabled=false`. For supervised tasks the head comes from the checkpoint; a pretrained-only checkpoint gets a randomly initialized head, so use this for fine-tuned checkpoints or zero-shot tasks |
-| Fine-tune the trunk and native MLP head | `steps.mode=finetune steps.prepare.embedding_cache.enabled=false`, or append `configs/tuning/mlp_finetuning.yaml` |
+| Skip tuning and score the checkpoint as-is | `steps.mode=evaluate_as_is steps.prepare.embedding_cache.enabled=false steps.tune.hyperparameter_search.enabled=false steps.tune.refit_on_train_validation=false`. For supervised tasks the head comes from the checkpoint; a pretrained-only checkpoint gets a randomly initialized head, so use this for fine-tuned checkpoints or zero-shot tasks |
+| Fine-tune the trunk and native MLP head | Append `configs/tuning/mlp_finetuning.yaml`; it disables caching/refitting and clears cached-MLP search dimensions |
 | Bootstrap confidence intervals and control tests | `steps.score.bootstrap_enabled=true` |
 | Disable TF32 for CUDA FP32 operations | `tf32=false` (default: `tf32=true`) |
 | Use a generated split instead of the default | `steps.prepare.split.name=stratified` (see [Named benchmark splits](#named-benchmark-splits)) |
@@ -395,9 +407,11 @@ For positional labels, tokenization preserves ambiguous residues by disabling
 | `packed` | `false` | Pack multiple sequences into one forward pass; requires CUDA and a compatible AMPLIFY checkpoint |
 | `max_tokens_per_batch` | `null` | Optional packed token budget; single-process only and supersedes `batch_size` |
 
-Sequence and token probe task YAMLs enable embedding caching. For `finetune`
-or `evaluate_as_is`, disable it or load the finetuning/smoke overlay **after**
-the task YAML. Sequence features support disk reuse; token features stay in
+The base protocol enables embedding caching. For `finetune` or `evaluate_as_is`,
+use the finetuning/smoke overlay **after** the task YAML, or explicitly disable
+caching and refitting (and disable HPO or clear cached-MLP search dimensions).
+Zero-shot task YAMLs already handle these exceptions. Sequence features support
+disk reuse; token features stay in
 RAM with no cap (`max_cache_gb` limits disk writes only). Disable token caching
 if host memory is insufficient.
 
@@ -464,11 +478,11 @@ dataloaders.
 
 **Key config fields (`steps.tune`):**
 
-| Field | Default | Description |
+| Field | Schema default | Description |
 |---|---|---|
-| `head.head_type` | `mlp` | `mlp` (existing native model-head path), `torch_linear` (one `torch.nn.Linear` layer), `sklearn_linear` (sklearn logistic/ridge), `knn`, `random_forest`, or `xgboost` |
+| `head.head_type` | `mlp` | `mlp` (cached MLP by default; native head without caching), `torch_linear` (one `torch.nn.Linear` layer), `sklearn_linear` (sklearn logistic/ridge), `knn`, `random_forest`, or `xgboost` |
 | `head.search_space` | `{}` | Classical-estimator dimensions; candidates fit on train and are selected on validation, before optional final refitting |
-| `refit_on_train_validation` | `false` | Cached tuning overlays set `true`: rebuild the selected probe on train+validation without early stopping or validation selection. Requires nonempty development splits; live/native and layerwise refit are unsupported |
+| `refit_on_train_validation` | `false` | Base YAML sets `true`: rebuild the selected probe on train+validation without early stopping or validation selection. Requires nonempty development splits; live/native and layerwise refit are unsupported |
 | `metric_aggregation` | `weighted` | Averaging used for validation metric selection; automatically follows `steps.score.metric_aggregation` unless set explicitly; supports `micro`, `macro`, `weighted`, or `samples` |
 | `learning_rate` | `1e-4` | Used when `hyperparameter_search.enabled=false` |
 | `weight_decay` | `1e-4` | Used when `hyperparameter_search.enabled=false`; applies to matrices and `ZeroCenteredRMSNorm` gain offsets. Other one-dimensional parameters are excluded |
@@ -496,7 +510,7 @@ dataloaders.
 | `hyperparameter_search.search_space.hidden_depth` | `null` | Optional hidden-layer counts for cached MLP probes; `null` keeps `head.hidden_depth` (default 1). Native heads and layerwise probes do not support this search |
 | `hyperparameter_search.search_space.batch_size` | `null` | Optional cached MLP training batch sizes; `null` keeps `steps.tune.batch_size` or the prepared loader size |
 
-`configs/tuning/mlp.yaml` searches hidden widths `[128, 256, 512]`,
+The base `configs/config.yaml` searches hidden widths `[128, 256, 512]`,
 hidden depths `[1, 2]`, and probe batch sizes `[8, 16, 32, 64, 128, 256]`
 jointly with learning rate, weight decay, and epochs in 100 trials total.
 BOHB and random search cover each width, depth, and batch size in the initial
@@ -630,8 +644,9 @@ continue to use protein batches.
 
 For cached sequence classification, multilabel classification, and regression,
 the task overlays set prediction batches to 1,024 examples. Cached probe tuning
-inherits the prepared loader batch size (16 examples by default); embedding
-extraction has its own `steps.prepare.embedding_batch_size` setting.
+uses the searched batch size by default. With HPO disabled, it uses
+`steps.tune.batch_size`, falling back to the prepared loader batch size when
+null. Embedding extraction has its own `steps.prepare.embedding_batch_size` setting.
 
 **Input:** `PreparedArtifacts` (trained model + test dataloader) from Prepare/Tune
 **Output:** `<workspace>/runs/<variant>/preds/predictions.parquet`; settings are also recorded in `<workspace>/runs/<variant>/run_manifest.json`'s "predict" section
@@ -668,7 +683,11 @@ custom metrics, and unsupported aggregation modes retain the existing path.
 | `long_filename` | `scores_long.parquet` | Tidy/long-format sidecar written on every run, with or without bootstrap — concatenable across (model, dataset) runs for plotting |
 
 **Input:** `<workspace>/runs/<variant>/preds/predictions.parquet`
-**Output:** `<workspace>/scores/scores_long.parquet` (always, shared across run variants), plus `<workspace>/runs/<variant>/scores/bootstrap_results.parquet` when `bootstrap_enabled=true`; scores/confidence intervals are also recorded in `<workspace>/runs/<variant>/run_manifest.json` under the `score`/`bootstrap` sections
+**Output:** `<workspace>/scores/scores_long.parquet` (always, shared across run variants), plus `<workspace>/runs/<variant>/scores/bootstrap_results.parquet` when `bootstrap_enabled=true`; scores/confidence intervals are also recorded in `<workspace>/runs/<variant>/run_manifest.json` under the `score`/`bootstrap` sections.
+`bootstrap.control_comparisons` records each control's bootstrap mean, the
+trained-minus-control mean difference and confidence interval, and raw/adjusted
+permutation p-values (an empty object when there are no comparisons). These
+intervals describe the paired differences, not standalone control-score intervals.
 
 ---
 
@@ -762,8 +781,9 @@ normal run.
 
 ### Frozen-trunk probe overlays (`configs/tuning/`)
 
-Each probe overlay (`knn.yaml`, `sklearn_linear.yaml`, `random_forest.yaml`,
-`xgboost.yaml`, `mlp.yaml`, `torch_linear.yaml`) is self-contained: it sets
+Cached MLP probing is already the base default. Each alternative probe overlay
+(`knn.yaml`, `sklearn_linear.yaml`, `random_forest.yaml`,
+`xgboost.yaml`, `torch_linear.yaml`) is self-contained: it sets
 `steps.mode=tune_probe` and the embedding cache itself, so it is just one more
 file after the dataset overlay:
 
@@ -795,6 +815,8 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
     steps.layerwise.enabled=true \
     steps.layerwise.layers=all \
     steps.tune.head.head_type=torch_linear \
+    steps.tune.hyperparameter_search.enabled=false \
+    steps.tune.refit_on_train_validation=false \
     steps.prepare.embedding_cache.enabled=true
 ```
 

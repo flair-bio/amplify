@@ -307,8 +307,19 @@ class PredictStep:
             accelerator = Accelerator()
 
         started = monotonic()
+        test_dataset = getattr(prepared.test_dataloader, "dataset", None)
+        progress_total_batches = len(prepared.test_dataloader)
+        progress_total_rows = len(test_dataset) if test_dataset is not None else None
+        progress_unit = get_task(workspace.task_type).prediction_progress_unit
         if accelerator.is_main_process:
             logger.info("Trained prediction started")
+            if progress_total_rows is not None:
+                logger.info(
+                    "Prediction workload: %d %s across %d batches.",
+                    progress_total_rows,
+                    progress_unit,
+                    progress_total_batches,
+                )
         progress_label = "Trained prediction" if accelerator.is_main_process else None
         # steps.prepare.embedding_cache.enabled=True: test_dataloader yields
         # pooled inputs_embeds, not tokens, so sequences can't be decoded
@@ -385,6 +396,9 @@ class PredictStep:
                     else (prepared.tokenizer if self.config.store_sequences else None)
                 ),
                 progress_label=progress_label,
+                progress_total_batches=progress_total_batches,
+                progress_total_rows=progress_total_rows,
+                progress_unit=progress_unit,
             )
 
         # Keep track of conditions for reproducibility and downstream steps like ScoreStep

@@ -2,17 +2,16 @@ workspace:
   task_type: token_classification
 
 steps:
-  prepare:
-    embedding_cache:
-      enabled: true # RAM-only per-residue features; disable when host memory is insufficient
   tune:
-    batch_size: 1024 # cached residues, not proteins; ignored without the embedding cache
     hyperparameter_search:
       metric: f1
       direction: maximize
+      n_trials: 100
+      search_space:
+        batch_size: [1024, 2048, 4096] # valid residues per optimizer batch
+        max_epochs: [1, 2, 5, 10]
   score:
     metrics: [f1]
     metric_aggregation: macro # pool valid residues, then average classes; -100 positions are excluded
   predict:
-    embedding_batch_size: 16384 # cached residues only; trunk extraction keeps protein batches
     controls: [random_trunk, majority_class]

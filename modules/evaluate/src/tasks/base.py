@@ -72,6 +72,9 @@ class TaskHandler(ABC):
     #: the tokenized (and possibly cropped) residue span.
     aligns_labels: ClassVar[bool] = False
 
+    #: Human-readable unit for rows reported by prediction progress logs.
+    prediction_progress_unit: ClassVar[str] = "examples"
+
     #: Whether the raw dataset must provide the configured label column.
     requires_source_labels: ClassVar[bool] = True
 

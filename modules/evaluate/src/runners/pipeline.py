@@ -70,6 +70,10 @@ def run_pipeline(
         )
         logger.info("=== Completed Fine-tune Step ===")
     else:
+        logger.info(
+            "=== Skipping Tune Step (steps.mode=evaluate_as_is; "
+            "hyperparameter search not applicable) ==="
+        )
         # evaluate_as_is returns a raw model from PrepareStep, so it still
         # needs accelerator.prepare() before Predict/Score can use it.
         prepared_artifacts.model = accelerator.prepare(prepared_artifacts.model)

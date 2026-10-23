@@ -12,6 +12,7 @@ import math
 from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Collection, Literal
 
@@ -365,17 +366,22 @@ class TuneStep:
         cached_probe = embedding_dataset is not None
         if embedding_dataset is not None and isinstance(model, EmbeddingProbeHead):
             features = embedding_dataset.embeddings
+            row_mask = None
             if self.config.standardize_features:
                 if workspace.task_type == "token_classification":
-                    valid = torch.as_tensor(embedding_dataset.labels) != IGNORE_INDEX
-                    if not valid.all():
-                        features = features[valid]
+                    row_mask = torch.as_tensor(embedding_dataset.labels) != IGNORE_INDEX
+                    num_rows = int(row_mask.sum().item())
+                else:
+                    num_rows = features.shape[0]
                 logger.info(
                     "Standardizing cached probe features using %d training rows.",
-                    features.shape[0],
+                    num_rows,
                 )
             model.fit_standardization(
-                features, enabled=self.config.standardize_features
+                features,
+                enabled=self.config.standardize_features,
+                row_mask=row_mask,
+                show_progress=accelerator.is_main_process,
             )
         if not cached_probe and not self.train_trunk:
             logger.warning(
@@ -550,10 +556,20 @@ class TuneStep:
             probe_hidden_size=selected.probe_hidden_size,
             probe_hidden_depth=selected.probe_hidden_depth,
         ).to(selected.classifier.weight)
-        features = development.embeddings
+        row_mask = None
         if workspace.task_type == "token_classification":
-            features = features[torch.as_tensor(development.labels) != IGNORE_INDEX]
-        fresh.fit_standardization(features, enabled=self.config.standardize_features)
+            row_mask = (
+                torch.as_tensor(
+                    development.labels, device=development.embeddings.device
+                )
+                != IGNORE_INDEX
+            )
+        fresh.fit_standardization(
+            development.embeddings,
+            enabled=self.config.standardize_features,
+            row_mask=row_mask,
+            show_progress=accelerator.is_main_process,
+        )
         loader = DataLoader(
             development,
             batch_size=hparams.get("batch_size")
@@ -943,15 +959,15 @@ class TuneStep:
 
     @staticmethod
     def _cached_embedding_split(
-        dataloader: Any, device: torch.device
+        dataloader: Any,
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """Return cached features on *device*, or ``None`` for token batches."""
+        """Return cached features in storage, or ``None`` for token batches."""
         dataset = find_embedding_dataset(dataloader)
         if dataset is None:
             return None
         return (
-            dataset.embeddings.to(device=device),
-            torch.as_tensor(dataset.labels, device=device),
+            dataset.embeddings,
+            torch.as_tensor(dataset.labels, device=dataset.embeddings.device),
         )
 
     def _cached_batches(
@@ -959,6 +975,7 @@ class TuneStep:
         split: tuple[torch.Tensor, torch.Tensor],
         batch_size: int,
         shuffle: bool,
+        device: torch.device,
     ) -> Any:
         embeddings, labels = split
         indices = (
@@ -969,8 +986,8 @@ class TuneStep:
         for start in range(0, len(indices), batch_size):
             batch_indices = indices[start : start + batch_size]
             yield {
-                "inputs_embeds": embeddings[batch_indices],
-                "labels": labels[batch_indices],
+                "inputs_embeds": embeddings[batch_indices].to(device=device),
+                "labels": labels[batch_indices].to(device=device),
             }
 
     def _run_classical_head(
@@ -1048,6 +1065,7 @@ class TuneStep:
                 seed=seed,
                 average=self.config.metric_aggregation,
                 num_labels=workspace.num_labels,
+                is_main_process=accelerator.is_main_process,
             )
             logger.info(
                 "Selected head_type=%s hparams=%s val_%s=%.4f",
@@ -1089,6 +1107,7 @@ class TuneStep:
                     seed=extra_seed,
                     average=self.config.metric_aggregation,
                     num_labels=workspace.num_labels,
+                    is_main_process=accelerator.is_main_process,
                 )[2]
                 for extra_seed in self.config.variance_seeds
             ]
@@ -1269,13 +1288,12 @@ class TuneStep:
         hparams: dict[str, Any],
         trial: Any = None,
         prune_enabled: bool = False,
+        hpo_trial: tuple[int, int] | None = None,
     ) -> float | None:
         model = prepared.model
         train_dataloader = prepared.train_dataloader
         assert train_dataloader is not None
-        cached_train = self._cached_embedding_split(
-            train_dataloader, accelerator.device
-        )
+        cached_train = self._cached_embedding_split(train_dataloader)
         cached_probe = cached_train is not None
 
         patience = self.config.early_stopping_patience
@@ -1291,11 +1309,9 @@ class TuneStep:
             )
         metric_name = self._resolve_metric_name(workspace) if monitor else None
         direction = self._resolve_direction(metric_name) if metric_name else "maximize"
-        # Keep cached validation features on the device for this training run.
+        # Keep validation features in storage; transfer each batch when scoring.
         cached_val = (
-            self._cached_embedding_split(prepared.val_dataloader, accelerator.device)
-            if monitor
-            else None
+            self._cached_embedding_split(prepared.val_dataloader) if monitor else None
         )
 
         param_groups = split_decay_parameters(model, hparams["weight_decay"])
@@ -1335,9 +1351,15 @@ class TuneStep:
         last_epoch_score: float | None = None
         epochs_without_improvement = 0
 
+        training_started = monotonic()
         self._set_train_mode(model, accelerator)
         try:
             for epoch in range(max_epochs):
+                epoch_started = monotonic()
+                last_progress_logged = epoch_started
+                progress_interval = max(1, math.ceil(steps_per_epoch / 10))
+                time_check_interval = min(100, progress_interval)
+                next_progress_batch = progress_interval
                 # Accumulate a batch-size-weighted loss sum and sample count as
                 # device tensors and only sync to host once per epoch (below),
                 # rather than calling .item() every step, which would force a
@@ -1350,11 +1372,17 @@ class TuneStep:
                 running_loss = torch.zeros((), device=accelerator.device)
                 running_count = torch.zeros((), device=accelerator.device)
                 batches = (
-                    self._cached_batches(cached_train, batch_size, shuffle=True)
+                    self._cached_batches(
+                        cached_train,
+                        batch_size,
+                        shuffle=True,
+                        device=accelerator.device,
+                    )
                     if cached_train is not None
                     else train_dataloader
                 )
                 for batch_index, batch in enumerate(batches):
+                    completed_batches = batch_index + 1
                     if isinstance(batch, (tuple, list)):
                         inputs_embeds, labels = batch
                         batch = {
@@ -1393,6 +1421,43 @@ class TuneStep:
                     )
                     running_loss += loss.detach() * current_batch_size
                     running_count += current_batch_size
+
+                    if (
+                        hpo_trial is not None
+                        and accelerator.is_main_process
+                        and (
+                            completed_batches == steps_per_epoch
+                            or completed_batches % time_check_interval == 0
+                        )
+                    ):
+                        now = monotonic()
+                        elapsed = now - epoch_started
+                        if (
+                            completed_batches >= next_progress_batch
+                            or now - last_progress_logged >= 60
+                            or completed_batches == steps_per_epoch
+                        ):
+                            batches_per_second = completed_batches / max(elapsed, 1e-9)
+                            remaining_batches = steps_per_epoch - completed_batches
+                            eta = remaining_batches / max(batches_per_second, 1e-9)
+                            logger.info(
+                                "HPO trial %d/%d | epoch %d/%d | batches "
+                                "%d/%d (%.0f%%) | %.1f batches/s | elapsed=%.1fs | "
+                                "ETA=%.1fs",
+                                hpo_trial[0],
+                                hpo_trial[1],
+                                epoch + 1,
+                                max_epochs,
+                                completed_batches,
+                                steps_per_epoch,
+                                100 * completed_batches / max(steps_per_epoch, 1),
+                                batches_per_second,
+                                elapsed,
+                                eta,
+                            )
+                            last_progress_logged = now
+                            while next_progress_batch <= completed_batches:
+                                next_progress_batch += progress_interval
 
                 if cached_probe:
                     mean_loss = (running_loss / running_count.clamp(min=1)).item()
@@ -1442,9 +1507,19 @@ class TuneStep:
                     if not cached_probe:
                         should_prune = broadcast(should_prune, from_process=0)
                     if bool(should_prune.item()):
-                        logger.info(
-                            "Trial pruned at epoch %d/%d", epoch + 1, max_epochs
-                        )
+                        if hpo_trial is not None and accelerator.is_main_process:
+                            logger.info(
+                                "HPO trial %d/%d pruned at epoch %d/%d | elapsed=%.1fs",
+                                hpo_trial[0],
+                                hpo_trial[1],
+                                epoch + 1,
+                                max_epochs,
+                                monotonic() - training_started,
+                            )
+                        else:
+                            logger.info(
+                                "Trial pruned at epoch %d/%d", epoch + 1, max_epochs
+                            )
                         import optuna
 
                         raise optuna.TrialPruned()
@@ -1509,9 +1584,7 @@ class TuneStep:
             )
         task = get_task(workspace.task_type, workspace.num_labels)
         if cached_val is None:
-            cached_val = self._cached_embedding_split(
-                prepared.val_dataloader, accelerator.device
-            )
+            cached_val = self._cached_embedding_split(prepared.val_dataloader)
         if cached_val is not None:
             predictions_tensors: list[torch.Tensor] = []
             probabilities_tensors: list[torch.Tensor] = []
@@ -1520,7 +1593,10 @@ class TuneStep:
                     prepared.val_dataloader
                 )
                 for batch in self._cached_batches(
-                    cached_val, batch_size, shuffle=False
+                    cached_val,
+                    batch_size,
+                    shuffle=False,
+                    device=accelerator.device,
                 ):
                     outputs = prepared.model(inputs_embeds=batch["inputs_embeds"])
                     predictions_tensors.append(
@@ -1675,6 +1751,15 @@ class TuneStep:
         space = search_config.search_space
         metric_name = self._resolve_metric_name(workspace)
         direction = self._resolve_direction(metric_name)
+        if accelerator.is_main_process:
+            logger.info(
+                "Starting hyperparameter tuning | pattern=%s | trial budget=%d | "
+                "metric=%s (%s)",
+                search_config.search_pattern,
+                search_config.n_trials,
+                metric_name,
+                direction,
+            )
 
         model = accelerator.unwrap_model(prepared.model)
         initial_state = checkpoint_state(model)
@@ -1700,9 +1785,22 @@ class TuneStep:
             return is_better
 
         def run_trial(
-            hparams: dict[str, Any], trial: Any = None, prune_enabled: bool = False
+            hparams: dict[str, Any],
+            *,
+            trial_number: int,
+            trial_total: int,
+            trial: Any = None,
+            prune_enabled: bool = False,
         ) -> float:
             nonlocal model
+            trial_started = monotonic()
+            if accelerator.is_main_process:
+                logger.info(
+                    "HPO trial %d/%d started | params=%s",
+                    trial_number,
+                    trial_total,
+                    hparams,
+                )
             if architecture_search:
                 assert isinstance(initial_model, EmbeddingProbeHead)
                 # Match initialization for the same architecture, then reset
@@ -1744,16 +1842,18 @@ class TuneStep:
                     hparams,
                     trial=trial,
                     prune_enabled=prune_enabled,
+                    hpo_trial=(trial_number, trial_total),
                 )
                 if training_score is not None:
-                    return training_score
-                return self._evaluate_validation(
-                    workspace,
-                    prepared,
-                    accelerator,
-                    metric_name,
-                    batch_size=hparams.get("batch_size"),
-                )
+                    score = training_score
+                else:
+                    score = self._evaluate_validation(
+                        workspace,
+                        prepared,
+                        accelerator,
+                        metric_name,
+                        batch_size=hparams.get("batch_size"),
+                    )
             finally:
                 # Runs on every trial outcome, including a pruned trial
                 # (optuna.TrialPruned propagates through this finally block),
@@ -1761,18 +1861,32 @@ class TuneStep:
                 # trial's optimizer/scheduler/gradient CUDA allocations
                 # before the caching allocator would otherwise reclaim them.
                 cleanup_between_trials()
+            is_best = consider(hparams, score)
+            if accelerator.is_main_process:
+                logger.info(
+                    "HPO trial %d/%d complete | val_%s=%.4f | "
+                    "best_%s=%.4f | new_best=%s | elapsed=%.1fs",
+                    trial_number,
+                    trial_total,
+                    metric_name,
+                    score,
+                    metric_name,
+                    best_score,
+                    is_best,
+                    monotonic() - trial_started,
+                )
+            return score
 
         if search_config.search_pattern in ("random", "grid"):
             candidates = self._generate_candidates(
                 search_config.search_pattern, search_config.n_trials, seed
             )
             for i, hparams in enumerate(candidates, start=1):
-                logger.info("Trial %d/%d | %s", i, len(candidates), hparams)
-                score = run_trial(hparams)
-                logger.info(
-                    "Trial %d/%d | %s=%.4f", i, len(candidates), metric_name, score
+                run_trial(
+                    hparams,
+                    trial_number=i,
+                    trial_total=len(candidates),
                 )
-                consider(hparams, score)
         else:  # "bohb"
 
             def objective(trial: "optuna.Trial") -> float:
@@ -1808,10 +1922,7 @@ class TuneStep:
                         "seed": seed,
                     }
                 elif (
-                    self._cached_embedding_split(
-                        prepared.train_dataloader, accelerator.device
-                    )
-                    is not None
+                    self._cached_embedding_split(prepared.train_dataloader) is not None
                 ):
                     hparams = {
                         "learning_rate": trial.suggest_float(
@@ -1841,21 +1952,16 @@ class TuneStep:
                         hparams["batch_size"] = trial.suggest_categorical(
                             "batch_size", space.batch_size
                         )
-                if (
-                    self._cached_embedding_split(
-                        prepared.train_dataloader, accelerator.device
-                    )
-                    is None
-                ):
+                if self._cached_embedding_split(prepared.train_dataloader) is None:
                     [hparams] = broadcast_object_list([hparams], from_process=0)
                 assert hparams is not None  # set by rank 0 above
-                score = run_trial(
+                return run_trial(
                     hparams,
                     trial=trial if accelerator.is_main_process else None,
                     prune_enabled=True,
+                    trial_number=trial.number + 1,
+                    trial_total=search_config.n_trials,
                 )
-                consider(hparams, score)
-                return score
 
             study = create_optuna_study(direction, seed, search_config.n_trials)
             # Initial trials cover each width, batch and depth within n_trials.

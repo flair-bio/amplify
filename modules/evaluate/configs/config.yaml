@@ -44,10 +44,10 @@ steps:
   prepare:
     dataloader_pin_memory: true
     dataloader_persistent_workers: true
-    batch_size: 16
+    batch_size: 1026
     packed: false # requires CUDA and an AMPLIFY checkpoint with packed forward args
     max_tokens_per_batch: null # optional; requires packed=true and one process
-    embedding_batch_size: 128
+    embedding_batch_size: 1026
     dataloader_num_workers: 8 # workers per rank and per loader; 0 loads batches in the main process
     max_length: 512
     pad_to_multiple_of: 8
@@ -66,12 +66,12 @@ steps:
       test: false
     length_grouped_sampling: true # batch similarly-tokenized-length examples together to reduce per-batch padding
     embedding_cache:
-      enabled: false # only valid in tune_probe mode; token tasks keep one embedding per valid token in memory
+      enabled: true # default frozen-trunk probe; token tasks keep one embedding per valid token in memory
       pooling: mean # residue-only mean, or cls for the first token
       # Layerwise mode overrides layers, pooling, autocast_dtype, and normalization
       # with steps.layerwise settings so cached and live probes use the same features.
       # Otherwise omitted means the final layer.
-      layers: null # hidden-state indices to probe; e.g. [-1, -2] pools and concatenates the final two layers
+      layers: [-1] # hidden-state indices to probe; e.g. [-1, -2] pools and concatenates the final two layers
       dtype: float32
       autocast_dtype: float32 # precision used during trunk forward; float32 disables autocast
       normalize_before_pooling: true # L2-normalize token representations before pooling
@@ -80,18 +80,19 @@ steps:
   tune:
     head:
       head_type: mlp # one of mlp, torch_linear, sklearn_linear, knn, random_forest, xgboost; classical probes require embedding_cache.enabled=true; torch_linear can use a compatible native nn.Linear head without the cache
+      hidden_size: 256 # fixed width when HPO is disabled
       hidden_depth: 1 # cached MLP hidden Linear-GELU layers; ignored for native/other heads
       hyperparameters: {} # constructor kwargs for the chosen estimator; ignored for mlp
       search_space: {} # classical-estimator dimensions selected on validation
-    learning_rate: 1e-4
-    weight_decay: 1e-4
-    max_epochs: 20
+    learning_rate: 1e-4 # used when HPO is disabled
+    weight_decay: 1e-4 # used when HPO is disabled
+    max_epochs: 20 # ignored when HPO is enabled
     warmup_ratio: 0.06
     max_grad_norm: 1.0
     accumulation_steps: 1 # effective batches accumulated per optimizer step
-    batch_size: null # cached-embedding probe batch size; null keeps the prepared loader size
+    batch_size: 1026 # cached-embedding probe batch size; null keeps the prepared loader size
     standardize_features: true # train statistics for selection; refit recomputes on train+validation
-    refit_on_train_validation: false # cached tuning overlays enable fresh development-set refit after selection
+    refit_on_train_validation: true # fresh cached probe on train+validation after selection
     early_stopping_patience: null # disable early stopping; TPE trials can still be pruned
     optimizer: adamw # one of adamw, adam, sgd, rmsprop, adagrad, adafactor
     optimizer_kwargs: {} # extra optimizer constructor kwargs, e.g. {momentum: 0.9} for sgd
@@ -99,21 +100,21 @@ steps:
     scheduler_kwargs: {} # extra scheduler-specific kwargs, e.g. {num_cycles: 3}
     save_best_model: true # persist the best model + tokenizer to workspace.model_path after tuning, for later reuse
     hyperparameter_search:
-      enabled: false # use tuning/mlp.yaml to enable the planned cached-MLP search
+      enabled: true # default cached-MLP protocol; alternatives override incompatible dimensions
       n_trials: 100
       metric: null # task overlays set the selection metric explicitly
       direction: null # task overlays set the optimization direction explicitly
       search_pattern: bohb # one of bohb (Optuna TPE + median pruning), random, grid
       search_space:
-        hidden_size: null # optional cached-MLP widths; null keeps head.hidden_size
-        hidden_depth: null # optional cached-MLP depths; null keeps head.hidden_depth
-        batch_size: null # optional cached-MLP training batches; null keeps tune.batch_size
+        hidden_size: [128, 256, 512]
+        hidden_depth: [1, 2]
+        batch_size: [8, 16, 32, 64, 128, 256] # proteins for sequence tasks, valid residues for token tasks
         learning_rate: [1e-5, 1e-3] # TPE samples continuously on a log scale between these bounds
         max_epochs: [1, 2, 5, 10, 20, 40, 100]
         weight_decay: [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1] # TPE uses min/max bounds; random/grid use listed candidates
         weight_decay_sampling: log # continuous log-scale TPE sampling; categorical also supports zero decay
   predict:
-    embedding_batch_size: null # cached rows per batch (residues for token tasks); null inherits prepare.batch_size
+    embedding_batch_size: 16384 # cached rows per batch (residues for token tasks); null inherits prepare.batch_size
     collect_probabilities: false # auto-enabled when effective metrics need probabilities, e.g. roc_auc or multilabel average_precision
     predictions_filename: predictions.parquet
     store_sequences: false # include decoded input sequences in main predictions parquet (larger output)

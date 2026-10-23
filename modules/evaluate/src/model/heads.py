@@ -43,6 +43,9 @@ from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from torch import nn
+from tqdm import tqdm
+
+_FEATURE_STANDARDIZATION_CHUNK_SIZE = 65_536
 
 if TYPE_CHECKING:
     import optuna
@@ -222,7 +225,12 @@ class EmbeddingProbeHead(nn.Module):
 
     @torch.no_grad()
     def fit_standardization(
-        self, embeddings: torch.Tensor, *, enabled: bool = True
+        self,
+        embeddings: torch.Tensor,
+        *,
+        enabled: bool = True,
+        row_mask: torch.Tensor | None = None,
+        show_progress: bool = False,
     ) -> None:
         """Fit feature statistics on training rows; disabled heads keep raw inputs."""
         self.standardize_features = enabled
@@ -238,7 +246,62 @@ class EmbeddingProbeHead(nn.Module):
                 "Feature standardization requires nonempty training embeddings "
                 f"with shape (examples, {self.embedding_size})."
             )
-        std, mean = torch.std_mean(embeddings.float(), dim=0, correction=0)
+        if row_mask is not None:
+            if row_mask.ndim != 1 or row_mask.shape[0] != embeddings.shape[0]:
+                raise ValueError(
+                    "Feature standardization row mask must have one value per "
+                    "training embedding."
+                )
+            row_mask = row_mask.to(device=embeddings.device, dtype=torch.bool)
+
+        count = 0
+        mean: torch.Tensor | None = None
+        sum_squared_deviations: torch.Tensor | None = None
+        show_progress = (
+            show_progress and embeddings.shape[0] > _FEATURE_STANDARDIZATION_CHUNK_SIZE
+        )
+        with tqdm(
+            total=embeddings.shape[0],
+            desc="Standardizing cached probe features",
+            unit="rows",
+            disable=not show_progress,
+        ) as progress:
+            for start in range(
+                0, embeddings.shape[0], _FEATURE_STANDARDIZATION_CHUNK_SIZE
+            ):
+                end = min(
+                    start + _FEATURE_STANDARDIZATION_CHUNK_SIZE, embeddings.shape[0]
+                )
+                chunk = embeddings[start:end]
+                if row_mask is not None:
+                    chunk = chunk[row_mask[start:end]]
+                if chunk.shape[0]:
+                    chunk_std, chunk_mean = torch.std_mean(
+                        chunk.float(), dim=0, correction=0
+                    )
+                    chunk_count = chunk.shape[0]
+                    chunk_mean = chunk_mean.to(torch.float64)
+                    chunk_m2 = chunk_std.to(torch.float64).square() * chunk_count
+                    if mean is None or sum_squared_deviations is None:
+                        mean = chunk_mean
+                        sum_squared_deviations = chunk_m2
+                        count = chunk_count
+                    else:
+                        combined_count = count + chunk_count
+                        delta = chunk_mean - mean
+                        sum_squared_deviations += chunk_m2 + delta.square() * (
+                            count * chunk_count / combined_count
+                        )
+                        mean += delta * (chunk_count / combined_count)
+                        count = combined_count
+                progress.update(end - start)
+
+        if mean is None or sum_squared_deviations is None:
+            raise ValueError(
+                "Feature standardization requires nonempty training embeddings "
+                f"with shape (examples, {self.embedding_size})."
+            )
+        std = (sum_squared_deviations / count).sqrt().to(torch.float32)
         self.feature_mean = mean.to(self.classifier.weight)
         self.feature_std = std.clamp_min(1e-6).to(self.classifier.weight)
 
@@ -386,6 +449,7 @@ def sweep_classical_head(
     seed: int = 710019,
     average: str = "weighted",
     num_labels: int | None = None,
+    is_main_process: bool = True,
 ) -> tuple[BaseEstimator, dict[str, Any], float]:
     """Fit and validate classical probe candidates, returning the best one.
 
@@ -417,6 +481,24 @@ def sweep_classical_head(
     if search_pattern == "random" and len(candidates) > 1:
         candidates = sample_candidates(candidates, n_trials or len(candidates), seed)
 
+    total_trials = (
+        n_trials or len(candidates)
+        if search_pattern == "bohb" and effective_search_space
+        else len(candidates)
+    )
+    if is_main_process:
+        logger.info(
+            "Starting classical probe search | head_type=%s | pattern=%s | "
+            "trials=%d | metric=%s (%s) | train_rows=%d | validation_rows=%d",
+            head_type,
+            search_pattern,
+            total_trials,
+            metric_name,
+            direction,
+            len(train_y),
+            len(val_y),
+        )
+
     best_estimator: BaseEstimator | None = None
     best_hparams: dict[str, Any] | None = None
     best_score = float("-inf") if direction == "maximize" else float("inf")
@@ -426,8 +508,17 @@ def sweep_classical_head(
         else (lambda s: s < best_score)
     )
 
-    def evaluate(hparams: dict[str, Any]) -> float:
+    def evaluate(hparams: dict[str, Any], trial_number: int) -> float:
         nonlocal best_estimator, best_hparams, best_score
+        trial_started = monotonic()
+        if is_main_process:
+            logger.info(
+                "Classical candidate %d/%d started | head_type=%s | params=%s",
+                trial_number,
+                total_trials,
+                head_type,
+                hparams,
+            )
         estimator = build_estimator(head_type, task_type, hparams, seed=seed)
         estimator.fit(train_X, train_y)
         predictions = estimator.predict(val_X)
@@ -444,15 +535,22 @@ def sweep_classical_head(
             average=average,
             probabilities=probabilities.tolist() if probabilities is not None else None,
         )[metric_name]
-        logger.info(
-            "head_type=%s hparams=%s val_%s=%.4f",
-            head_type,
-            hparams,
-            metric_name,
-            score,
-        )
-        if is_better(score):
+        new_best = is_better(score)
+        if new_best:
             best_estimator, best_hparams, best_score = estimator, hparams, score
+        if is_main_process:
+            logger.info(
+                "Classical candidate %d/%d complete | val_%s=%.4f | "
+                "best_%s=%.4f | new_best=%s | elapsed=%.1fs",
+                trial_number,
+                total_trials,
+                metric_name,
+                score,
+                metric_name,
+                best_score,
+                new_best,
+                monotonic() - trial_started,
+            )
         return score
 
     if search_pattern == "bohb" and effective_search_space:
@@ -465,14 +563,14 @@ def sweep_classical_head(
                     for name, values in effective_search_space.items()
                 },
             }
-            return evaluate(hparams)
+            return evaluate(hparams, trial.number + 1)
 
         trials = n_trials or len(candidates)
         study = create_optuna_study(direction, seed, trials)
         study.optimize(objective, n_trials=trials)
     else:
-        for hparams in candidates:
-            evaluate(hparams)
+        for trial_number, hparams in enumerate(candidates, start=1):
+            evaluate(hparams, trial_number)
 
     assert best_hparams is not None and best_estimator is not None
     return best_estimator, best_hparams, best_score

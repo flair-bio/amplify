@@ -7,11 +7,16 @@ steps:
     embedding_cache:
       enabled: false
   tune:
+    refit_on_train_validation: false # live contact head; cached-probe refit does not apply
     head:
       head_type: mlp
     hyperparameter_search:
       metric: contact_auc_long
       direction: maximize
+      search_space:
+        hidden_size: null
+        hidden_depth: null
+        batch_size: null
   score:
     metrics: [contact_auc_long] # existing precision-decile summary; CASP protocol integration is pending
   predict:

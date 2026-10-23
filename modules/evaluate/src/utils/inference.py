@@ -60,6 +60,9 @@ def run_inference(
     batch_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     tokenizer: Any | None = None,
     progress_label: str | None = None,
+    progress_total_batches: int | None = None,
+    progress_total_rows: int | None = None,
+    progress_unit: str = "examples",
 ) -> tuple[list[Any], list[Any], list[Any], list[Any] | None, list[str] | None]:
     """Run the model over the test set, returning per-example ids/predictions/labels.
 
@@ -114,6 +117,7 @@ def run_inference(
     input_ids_batches: list[torch.Tensor] | None = [] if tokenizer is not None else None
     residue_length_batches: list[torch.Tensor] | None = None
     id_batches: list[Any] = []
+    processed_rows = 0
 
     started = last_log = monotonic()
     with torch.inference_mode():
@@ -170,6 +174,7 @@ def run_inference(
             # set exactly once, regardless of world size.
             gathered = accelerator.gather_for_metrics(gather_targets)
             preds, labels, *rest = gathered
+            processed_rows += preds.shape[0]
             rest_index = 0
             pred_batches.append(preds.cpu())
             label_batches.append(labels.cpu())
@@ -195,12 +200,33 @@ def run_inference(
             if progress_label and accelerator.is_main_process:
                 now = monotonic()
                 if now - last_log >= 10:
-                    logger.info(
-                        "%s: %d batches completed (%.1fs elapsed)",
-                        progress_label,
-                        batch_idx + 1,
-                        now - started,
-                    )
+                    elapsed = now - started
+                    if progress_total_batches is None or progress_total_rows is None:
+                        logger.info(
+                            "%s: %d batches completed (%.1fs elapsed)",
+                            progress_label,
+                            batch_idx + 1,
+                            elapsed,
+                        )
+                    else:
+                        rows_per_second = processed_rows / max(elapsed, 1e-9)
+                        remaining_rows = max(0, progress_total_rows - processed_rows)
+                        eta = remaining_rows / max(rows_per_second, 1e-9)
+                        logger.info(
+                            "%s: batch %d/%d | %d/%d %s (%.1f%%) | "
+                            "%.1f %s/s | elapsed=%.1fs | ETA=%.1fs",
+                            progress_label,
+                            batch_idx + 1,
+                            progress_total_batches,
+                            processed_rows,
+                            progress_total_rows,
+                            progress_unit,
+                            100 * processed_rows / max(progress_total_rows, 1),
+                            rows_per_second,
+                            progress_unit,
+                            elapsed,
+                            eta,
+                        )
                     last_log = now
 
     # Single host-sync pass over the whole split: every `.cpu()`/`.tolist()`

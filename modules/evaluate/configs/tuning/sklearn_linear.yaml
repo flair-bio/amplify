@@ -20,3 +20,7 @@ steps:
     hyperparameter_search:
       enabled: true
       n_trials: 4
+      search_space:
+        hidden_size: null
+        hidden_depth: null
+        batch_size: null

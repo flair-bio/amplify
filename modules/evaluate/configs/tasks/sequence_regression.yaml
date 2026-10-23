@@ -8,9 +8,5 @@ steps:
       direction: maximize
   score:
     metrics: [r2] # property-level ProtParams default; stability overrides this
-  prepare:
-    embedding_cache:
-      enabled: true
   predict:
-    embedding_batch_size: 1024
     controls: [random_trunk, train_mean]

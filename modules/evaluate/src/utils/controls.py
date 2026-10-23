@@ -354,6 +354,11 @@ class ControlBuilder:
             model = self._build_control_model(
                 control, workspace, prepared, accelerator, seed
             )
+            test_dataloader = prepared.test_dataloader
+            test_dataset = getattr(test_dataloader, "dataset", None)
+            progress_total_batches = (
+                len(test_dataloader) if test_dataloader is not None else None
+            )
             batch_transform = (
                 self.make_sequence_scrambler(prepared.tokenizer, seed)
                 if is_scrambled_sequences
@@ -361,13 +366,18 @@ class ControlBuilder:
             )
             ids, predictions, _, probabilities, sequences = run_inference(
                 model,
-                prepared.test_dataloader,
+                test_dataloader,
                 workspace.task_type,
                 accelerator,
                 collect_probabilities=self.collect_probabilities,
                 batch_transform=batch_transform,
                 tokenizer=prepared.tokenizer if is_scrambled_sequences else None,
                 progress_label=f"Control '{control}' prediction",
+                progress_total_batches=progress_total_batches,
+                progress_total_rows=(
+                    len(test_dataset) if test_dataset is not None else None
+                ),
+                progress_unit=get_task(workspace.task_type).prediction_progress_unit,
             )
         control_data: dict[str, list[Any]] = {"id": ids, "prediction": predictions}
         if probabilities is not None:

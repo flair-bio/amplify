@@ -9,9 +9,5 @@ steps:
   score:
     metrics: [f1]
     metric_aggregation: macro # equal weight per evaluated class; fixed vocabulary inclusion is pending
-  prepare:
-    embedding_cache:
-      enabled: true
   predict:
-    embedding_batch_size: 1024
     controls: [random_trunk, majority_class]

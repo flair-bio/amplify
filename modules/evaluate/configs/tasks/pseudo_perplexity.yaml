@@ -5,8 +5,8 @@ steps:
   mode: evaluate_as_is
   tune:
     hyperparameter_search:
-      metric: pseudo_perplexity
-      direction: minimize
+      enabled: false
+    refit_on_train_validation: false
   score:
     metrics: [pseudo_perplexity]
   prepare:
@@ -20,4 +20,4 @@ steps:
     embedding_cache:
       enabled: false
   predict:
-    controls: ["random_trunk"]
+    controls: [random_trunk]

@@ -5,8 +5,8 @@ steps:
   mode: evaluate_as_is
   tune:
     hyperparameter_search:
-      metric: calibration
-      direction: maximize
+      enabled: false
+    refit_on_train_validation: false
   score:
     metrics: [calibration] # 100 x mean per-position exp(-KL)
   prepare:
@@ -16,4 +16,4 @@ steps:
     embedding_cache:
       enabled: false
   predict:
-    controls: ["random_trunk"]
+    controls: [random_trunk]

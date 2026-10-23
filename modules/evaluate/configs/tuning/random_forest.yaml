@@ -14,3 +14,8 @@ steps:
       search_space:
         n_estimators: [100, 300, 500]
         max_depth: [null, 10, 20]
+    hyperparameter_search:
+      search_space:
+        hidden_size: null
+        hidden_depth: null
+        batch_size: null

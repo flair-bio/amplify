@@ -640,6 +640,7 @@ class ScoreStep:
                 "config": result.config,
                 "metadata": metadata_dict,
                 "confidence_intervals": confidence_intervals,
+                "control_comparisons": control_comparisons,
             },
         )
 
