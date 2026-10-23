@@ -632,8 +632,8 @@ consensus at conserved positions, or the human residue it saw in training?
   model's softmax over the 20 amino acids is compared to the homolog
   frequencies. About 6.9k proteins and 1.85M positions, test split only.
 - **Metrics:** `kl` (mean KL divergence from homolog to model distribution,
-  also as `kl_t`/`kl_nt`), `calibration` (mean of
-  per-position `exp(-KL)`, 1 is perfect agreement, also as
+  also as `kl_t`/`kl_nt`), `calibration` (`100 × mean(exp(-KL))` over
+  positions, 100 is perfect agreement, also as
   `calibration_t`/`calibration_nt`), `accuracy_t`/`accuracy_nt` (predicts the
   consensus), and `memorization_nt` (predicts the human residue where it
   differs from the consensus).

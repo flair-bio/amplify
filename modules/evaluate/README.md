@@ -180,7 +180,9 @@ contact AUC for contacts, calibration agreement, and pseudo-perplexity.
 Only the selected metric is reported by default; override `steps.score.metrics`
 to request diagnostic metrics. Stability's intended grouped Macro-Spearman
 still requires verified parent-design metadata and scorer support. Calibration
-currently reports `mean(exp(-KL))` on a 0–1 scale, not the planned 0–100 scale.
+agreement reports `100 × mean(exp(-KL))` over per-position KL values; it does
+not exponentiate the mean KL. The target/non-target breakdowns use the same
+scale and aggregation.
 Classification F1 includes every class configured by `workspace.num_labels`,
 even when absent from a split or resample (zero F1 for an absent class).
 This includes background class 0, both binary classes, all three Q3 states,

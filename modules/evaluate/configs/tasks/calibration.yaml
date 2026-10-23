@@ -8,7 +8,7 @@ steps:
       metric: calibration
       direction: maximize
   score:
-    metrics: [calibration] # currently mean(exp(-KL)) on 0-1; planned x100 scaling is pending
+    metrics: [calibration] # 100 x mean per-position exp(-KL)
   prepare:
     # The handler cuts its own 512-residue window centred on each scored
     # position, so the dataloader must keep full sequences (longest ~7k).
