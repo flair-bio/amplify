@@ -108,7 +108,7 @@ be selected.
 | UniProt GO | `GO_mf`, `GO_bp`, `GO_cc` | `sequence_multilabel_classification` | `f1`, `multilabel_mcc`, `average_precision` |
 | InterPro | 7 `interpro_*` entry types | `sequence_multilabel_classification` | `f1`, `multilabel_mcc`, `average_precision` |
 | UniProt features | 12 `uniprot_*` residue overlays | `token_classification` | `f1`, `accuracy`, `precision`, `recall`, `mcc` |
-| UniProt ProtParam | `uniprot_protparams` (one property per run) | `sequence_regression` | `mse`, `mae`, `r2`, `pearsonr`, `spearmanr` |
+| UniProt ProtParam | `uniprot_protparams` (one property per run) | `sequence_regression` | R² |
 | Any sequence dataset | MLM models with a mask token | `pseudo_perplexity` | `pseudo_perplexity` |
 | HHblits/BFD homolog profiles | `human_calibration` (test split only) | `calibration` | `kl`, `kl_t`, `kl_nt`, `calibration`, `calibration_t`, `calibration_nt`, `accuracy_t`, `accuracy_nt`, `memorization_nt` |
 | ProteinGym | 4 assay tracks | Separate runners | Spearman (DMS), AUC (clinical), per assay |
@@ -595,7 +595,8 @@ hydrophobicity, be read back from the embedding?
 - **Readout:** one number per protein: one of 31 properties, such as
   amino-acid composition, molecular mass, isoelectric point, or GRAVY
   (average hydrophobicity). Pick it with `steps.prepare.label_column`; the
-  overlay defaults to `gravy`. The full list is in the
+  overlay defaults to `gravy`. Each property is a separate regression run,
+  selected and reported with R². The full list is in the
   [sourcing guide](dataset-sourcing.md#uniprot-protparam).
 - **Used for:** these properties guide purification and formulation (for
   example, the isoelectric point sets the pH at which a protein is least
@@ -608,6 +609,11 @@ hydrophobicity, be read back from the embedding?
 - **Run:** [`uniprot_protparams.yaml`](../configs/datasets/uniprot_protparams.yaml)
   with `sequence_regression` ·
   [Hub](https://huggingface.co/datasets/flair-bio/uniprot_protparams)
+
+Run each property separately, changing `steps.prepare.label_column` and using
+a distinct output directory for each property. Report the per-property R²
+values; if a single summary is needed, use their unweighted arithmetic mean,
+not one R² pooled across differently scaled targets.
 
 ### Calibration
 

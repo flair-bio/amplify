@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-from omegaconf import OmegaConf
 import pytest
+from omegaconf import OmegaConf
 
 from modules.core.utils.config_loader import load_and_parse
 from modules.evaluate.src.config import EvaluationConfig
@@ -78,6 +78,22 @@ def test_task_control_defaults(task, dataset, controls):
         ]
     )
     assert config.steps.predict.controls == controls
+
+
+def test_protparams_uses_sequence_regression_r2_defaults():
+    config = load_evaluation_config(
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "models/amplify_120m.yaml",
+            CONFIGS / "tasks/sequence_regression.yaml",
+            CONFIGS / "datasets/uniprot_protparams.yaml",
+            CONFIGS / "tuning/torch_linear.yaml",
+        ]
+    )
+    assert config.steps.prepare.label_column == "gravy"
+    assert config.steps.tune.hyperparameter_search.metric == "r2"
+    assert config.steps.tune.hyperparameter_search.direction == "maximize"
+    assert config.steps.score.metrics == ["r2"]
 
 
 @pytest.mark.parametrize("task_first", [True, False])
