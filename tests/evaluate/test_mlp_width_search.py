@@ -49,13 +49,14 @@ def _prepared():
     )
 
 
-def _search(pattern, *, widths=None, n_trials=24):
+def _search(pattern, *, widths=None, depths=None, n_trials=24):
     return HyperparameterSearchConfig(
         enabled=True,
         search_pattern=pattern,
         n_trials=n_trials,
         search_space=HyperparameterSearchSpaceConfig(
             hidden_size=widths,
+            hidden_depth=depths,
             learning_rate=[1e-3, 1e-2],
             weight_decay=[0.0],
             max_epochs=[1],
@@ -67,6 +68,12 @@ def _search(pattern, *, widths=None, n_trials=24):
 def test_width_search_rejects_empty_or_nonpositive_widths(widths):
     with pytest.raises(ValidationError, match="hidden_size"):
         HyperparameterSearchSpaceConfig(hidden_size=widths)
+
+
+@pytest.mark.parametrize("depths", [[], [0], [-1], [1, 0]])
+def test_depth_search_rejects_empty_or_nonpositive_depths(depths):
+    with pytest.raises(ValidationError, match="hidden_depth"):
+        HyperparameterSearchSpaceConfig(hidden_depth=depths)
 
 
 def test_grid_width_candidates_cover_the_full_product():
@@ -92,6 +99,24 @@ def test_random_width_candidates_cover_each_width_with_a_limited_budget():
     assert candidates == step._generate_candidates("random", n_trials=4, seed=42)
 
 
+def test_grid_combines_width_depth_and_batch_dimensions():
+    search = _search("grid", widths=[3, 5], depths=[1, 2])
+    search.search_space.learning_rate = [1e-3]
+    search.search_space.batch_size = [2, 4]
+    step = TuneStep(TuneConfig(hyperparameter_search=search))
+    candidates = step._generate_candidates("grid", n_trials=1, seed=42)
+    assert {
+        (item["hidden_size"], item["hidden_depth"], item["batch_size"])
+        for item in candidates
+    } == {
+        (width, depth, batch)
+        for width in [3, 5]
+        for depth in [1, 2]
+        for batch in [2, 4]
+    }
+    assert len(candidates) == 8
+
+
 @pytest.mark.parametrize("pattern", ["grid", "random"])
 def test_fixed_width_candidates_keep_existing_hyperparameters(pattern):
     step = TuneStep(TuneConfig(hyperparameter_search=_search(pattern)))
@@ -107,8 +132,9 @@ def test_fixed_width_candidates_keep_existing_hyperparameters(pattern):
 
 @pytest.mark.parametrize("pattern", ["grid", "random", "bohb"])
 @pytest.mark.parametrize("standardize", [False, True])
+@pytest.mark.parametrize("depths", [None, [1, 2]])
 def test_width_search_saves_winning_architecture_weights_and_training_statistics(
-    monkeypatch, tmp_path, pattern, standardize
+    monkeypatch, tmp_path, pattern, standardize, depths
 ):
     if pattern == "bohb":
         pytest.importorskip("optuna")
@@ -118,7 +144,7 @@ def test_width_search_saves_winning_architecture_weights_and_training_statistics
         TuneConfig(
             head=HeadConfig(head_type="mlp", hidden_size=7),
             standardize_features=standardize,
-            hyperparameter_search=_search(pattern, widths=_WIDTHS),
+            hyperparameter_search=_search(pattern, widths=_WIDTHS, depths=depths),
         )
     )
     trials = []
@@ -126,7 +152,13 @@ def test_width_search_saves_winning_architecture_weights_and_training_statistics
     def train(workspace, artifacts, accelerator, hparams, **kwargs):
         model = artifacts.model
         width = hparams["hidden_size"]
+        depth = hparams.get("hidden_depth", 1)
         assert model.probe_hidden_size == width
+        assert model.probe_hidden_depth == depth
+        assert (
+            sum(isinstance(layer, torch.nn.Linear) for layer in model.projection)
+            == depth
+        )
         initial = {name: value.clone() for name, value in model.state_dict().items()}
         if standardize:
             torch.testing.assert_close(model.feature_mean, _FEATURES.mean(dim=0))
@@ -143,6 +175,7 @@ def test_width_search_saves_winning_architecture_weights_and_training_statistics
         trials.append(
             {
                 "width": width,
+                "depth": depth,
                 "initial": initial,
                 "global_order": torch.randperm(6),
                 "loader_order": torch.randperm(
@@ -161,30 +194,39 @@ def test_width_search_saves_winning_architecture_weights_and_training_statistics
     result = step.run(workspace, prepared, seed=42, accelerator=Accelerator(cpu=True))
 
     assert {trial["width"] for trial in trials} == set(_WIDTHS)
-    assert len(trials) == (24 if pattern == "bohb" else 8)
+    assert len(trials) == (24 if pattern == "bohb" else 8 * len(depths or [1]))
+    assert {trial["depth"] for trial in trials} == set(depths or [1])
     if pattern in {"random", "bohb"}:
         assert {trial["width"] for trial in trials[:4]} == set(_WIDTHS)
     for trial in trials[1:]:
         torch.testing.assert_close(trial["global_order"], trials[0]["global_order"])
         torch.testing.assert_close(trial["loader_order"], trials[0]["loader_order"])
     for width in _WIDTHS:
-        starts = [trial["initial"] for trial in trials if trial["width"] == width]
-        for state in starts[1:]:
-            for name, value in starts[0].items():
-                torch.testing.assert_close(state[name], value, rtol=0, atol=0)
+        for depth in depths or [1]:
+            starts = [
+                trial["initial"]
+                for trial in trials
+                if (trial["width"], trial["depth"]) == (width, depth)
+            ]
+            for state in starts[1:]:
+                for name, value in starts[0].items():
+                    torch.testing.assert_close(state[name], value, rtol=0, atol=0)
     best = max(trials, key=lambda trial: trial["score"])
     assert result.model.probe_hidden_size == best["width"]
+    assert result.model.probe_hidden_depth == best["depth"]
     for name, value in best["trained"].items():
         torch.testing.assert_close(result.model.state_dict()[name], value)
 
     metadata = json.loads((workspace.model_path / "probe_head_config.json").read_text())
     assert metadata["probe_hidden_size"] == best["width"]
+    assert metadata["probe_hidden_depth"] == best["depth"]
     assert metadata["best_hyperparameters"]["hidden_size"] == best["width"]
     restored = EmbeddingProbeHead(
         metadata["embedding_size"],
         metadata["num_labels"],
         metadata["task_type"],
         probe_hidden_size=metadata["probe_hidden_size"],
+        probe_hidden_depth=metadata["probe_hidden_depth"],
         standardize_features=metadata["standardize_features"],
     )
     restored.load_state_dict(
@@ -201,7 +243,8 @@ def test_width_search_saves_winning_architecture_weights_and_training_statistics
 @pytest.mark.parametrize(
     "unsupported", ["torch_linear", "uncached", "finetune", "layerwise"]
 )
-def test_width_search_rejects_unsupported_probe_paths(tmp_path, unsupported):
+@pytest.mark.parametrize("dimension", ["hidden_size", "hidden_depth"])
+def test_width_search_rejects_unsupported_probe_paths(tmp_path, unsupported, dimension):
     prepared = _prepared()
     if unsupported == "uncached":
         prepared.train_dataloader = DataLoader([{"labels": 0}], batch_size=1)
@@ -210,14 +253,18 @@ def test_width_search_rejects_unsupported_probe_paths(tmp_path, unsupported):
 
     with pytest.raises(
         ValueError,
-        match="hidden_size search requires a cached MLP probe in tune_probe mode",
+        match=f"{dimension} search requires a cached MLP probe in tune_probe mode",
     ):
         step = TuneStep(
             TuneConfig(
                 head=HeadConfig(
                     head_type="torch_linear" if unsupported == "torch_linear" else "mlp"
                 ),
-                hyperparameter_search=_search("grid", widths=[3, 5]),
+                hyperparameter_search=_search(
+                    "grid",
+                    widths=[3, 5] if dimension == "hidden_size" else None,
+                    depths=[1, 2] if dimension == "hidden_depth" else None,
+                ),
             ),
             mode="finetune" if unsupported == "finetune" else "tune_probe",
         )
@@ -233,7 +280,7 @@ def test_disabled_width_search_keeps_the_configured_fixed_width(monkeypatch, tmp
     search.enabled = False
     step = TuneStep(
         TuneConfig(
-            head=HeadConfig(head_type="mlp", hidden_size=7),
+            head=HeadConfig(head_type="mlp", hidden_size=7, hidden_depth=2),
             hyperparameter_search=search,
             save_best_model=False,
         )
@@ -241,6 +288,7 @@ def test_disabled_width_search_keeps_the_configured_fixed_width(monkeypatch, tmp
 
     def train(workspace, artifacts, accelerator, hparams):
         assert artifacts.model.probe_hidden_size == 7
+        assert artifacts.model.probe_hidden_depth == 2
         assert "hidden_size" not in hparams
 
     monkeypatch.setattr(step, "_train", train)
@@ -252,6 +300,62 @@ def test_disabled_width_search_keeps_the_configured_fixed_width(monkeypatch, tmp
     )
 
     assert trained.model.probe_hidden_size == 7
+    assert trained.model.probe_hidden_depth == 2
+
+
+def test_different_depths_do_not_share_control_cache_identity():
+    shallow = EmbeddingProbeHead(
+        3, 2, "sequence_classification", 7, probe_hidden_depth=1
+    )
+    deep = EmbeddingProbeHead(3, 2, "sequence_classification", 7, probe_hidden_depth=2)
+    assert shallow.cache_identity() != deep.cache_identity()
+
+
+@pytest.mark.parametrize("pattern", ["grid", "random", "bohb"])
+def test_depth_only_search_trains_every_depth_and_keeps_fixed_width(
+    monkeypatch, tmp_path, pattern
+):
+    search = _search(pattern, depths=[1, 2], n_trials=4)
+    search.search_space.learning_rate = [1e-3]
+    step = TuneStep(
+        TuneConfig(
+            head=HeadConfig(hidden_size=7),
+            hyperparameter_search=search,
+            early_stopping_patience=None,
+            save_best_model=False,
+        )
+    )
+    trained_depths = []
+    train = step._train
+
+    def record_training(workspace, artifacts, accelerator, hparams, **kwargs):
+        model = artifacts.model
+        assert model.probe_hidden_size == 7
+        before = [
+            layer.weight.detach().clone()
+            for layer in model.projection
+            if isinstance(layer, torch.nn.Linear)
+        ]
+        score = train(workspace, artifacts, accelerator, hparams, **kwargs)
+        after = [
+            layer.weight
+            for layer in model.projection
+            if isinstance(layer, torch.nn.Linear)
+        ]
+        assert all(not torch.equal(old, new) for old, new in zip(before, after))
+        trained_depths.append(model.probe_hidden_depth)
+        return score
+
+    monkeypatch.setattr(step, "_train", record_training)
+    result = step.run(
+        _make_workspace(tmp_path, "sequence_classification"),
+        _prepared(),
+        accelerator=Accelerator(cpu=True),
+        seed=42,
+    )
+    assert set(trained_depths) == {1, 2}
+    assert result.model.probe_hidden_depth in trained_depths
+    assert result.model.probe_hidden_size == 7
 
 
 def test_width_search_trains_cached_heads_end_to_end(monkeypatch, tmp_path):
@@ -300,13 +404,12 @@ def test_width_search_trains_cached_heads_end_to_end(monkeypatch, tmp_path):
         "steps.mode=finetune",
     ],
 )
-def test_mlp_width_overlay_validates_supported_configuration(override):
+def test_default_mlp_width_search_validates_supported_configuration(override):
     root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
     paths = [
         root / "config.yaml",
         root / "tasks/sequence_classification.yaml",
         root / "datasets/localization_prediction.yaml",
-        root / "tuning/mlp.yaml",
     ]
     if override is not None:
         overrides = [override]
@@ -322,5 +425,34 @@ def test_mlp_width_overlay_validates_supported_configuration(override):
 
     search = config.steps.tune.hyperparameter_search
     assert search.enabled
-    assert search.n_trials == 50
-    assert search.search_space.hidden_size == _WIDTHS
+    assert search.n_trials == 100
+    assert search.search_space.hidden_size == [128, 256, 512]
+    assert search.search_space.hidden_depth == [1, 2]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        ["steps.tune.head.head_type=torch_linear"],
+        ["steps.prepare.embedding_cache.enabled=false"],
+        ["steps.mode=finetune", "steps.prepare.embedding_cache.enabled=false"],
+    ],
+)
+def test_depth_only_search_config_rejects_unsupported_paths(overrides):
+    root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
+    with pytest.raises(
+        ValueError, match="hidden_depth search requires a cached MLP probe"
+    ):
+        load_and_parse(
+            path=[
+                root / "config.yaml",
+                root / "tasks/sequence_classification.yaml",
+                root / "datasets/localization_prediction.yaml",
+            ],
+            model_cls=EvaluationConfig,
+            overrides=[
+                "steps.tune.hyperparameter_search.search_space.hidden_size=null",
+                "steps.tune.hyperparameter_search.search_space.batch_size=null",
+                *overrides,
+            ],
+        )

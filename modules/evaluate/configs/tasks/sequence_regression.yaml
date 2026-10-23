@@ -2,10 +2,11 @@ workspace:
   task_type: sequence_regression
 
 steps:
-  prepare:
-    embedding_cache:
-      enabled: true
+  tune:
+    hyperparameter_search:
+      metric: r2
+      direction: maximize
+  score:
+    metrics: [r2] # property-level ProtParams default; stability overrides this
   predict:
-    embedding_batch_size: 1024
-    controls:
-      [untrained, random_trunk, random_head, random_both, scrambled_labels, scrambled_sequences, train_mean]
+    controls: [random_trunk, train_mean]

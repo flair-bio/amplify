@@ -15,6 +15,68 @@ import torch
 from modules.evaluate.src.tasks import TaskHandler, available_tasks, get_task
 
 
+@pytest.mark.parametrize(
+    "task_type,num_labels",
+    [
+        ("sequence_classification", 2),
+        ("sequence_classification", 4),
+        ("token_classification", 3),
+        ("token_classification", 8),
+    ],
+)
+def test_macro_f1_includes_every_configured_class(task_type, num_labels):
+    task = get_task(task_type, num_labels)
+    scores = task.compute_metrics([0, 0], [0, 0], ["f1"], average="macro")
+    assert scores["f1"] == pytest.approx(1 / num_labels)
+    assert task.compute_metrics([0, 0], [0, 0], ["f1"], average="micro")["f1"] == 1
+    # A different run's class policy never changes an unconfigured handler.
+    assert get_task(task_type).class_labels is None
+
+
+def test_multilabel_macro_f1_retains_zero_only_columns():
+    task = get_task("sequence_multilabel_classification", 3)
+    assert task.compute_metrics(
+        [[1, 0, 0], [1, 0, 0]],
+        [[1, 0, 0], [1, 0, 0]],
+        ["f1"],
+        average="macro",
+    )["f1"] == pytest.approx(1 / 3)
+
+
+@pytest.mark.parametrize("num_labels", [3, 8])
+def test_fixed_class_token_f1_ignores_masked_positions_but_includes_background(
+    num_labels,
+):
+    task = get_task("token_classification", num_labels)
+    rows = task.split_batch_rows(
+        torch.tensor([[1, 0, 1, 0], [1, 1, 1, 1]]),
+        torch.tensor([[-100, 0, -100, 0], [-100, -100, -100, -100]]),
+    )
+    predictions, labels = zip(*rows)
+    assert labels == ([0, 0], [])
+    score = task.compute_metrics(
+        task.flatten_for_metrics(predictions),
+        task.flatten_for_metrics(labels),
+        ["f1"],
+        average="macro",
+    )["f1"]
+    assert score == pytest.approx(1 / num_labels)
+
+
+@pytest.mark.parametrize("predictions,labels", [([3], [0]), ([0], [-100])])
+def test_fixed_class_metrics_reject_out_of_vocabulary_inputs(predictions, labels):
+    task = get_task("token_classification", 3)
+    with pytest.raises(ValueError, match="outside the configured"):
+        task.compute_metrics(predictions, labels, ["f1"], average="macro")
+
+
+def test_fixed_multilabel_metrics_reject_missing_columns():
+    with pytest.raises(ValueError, match="one column per configured label"):
+        get_task("sequence_multilabel_classification", 3).compute_metrics(
+            [[1, 0]], [[1, 0]], ["f1"], average="macro"
+        )
+
+
 @pytest.mark.parametrize("labels", [[-100, 0, 1, 2], [-100, -100]])
 def test_token_label_validation_excludes_ignore_index(labels):
     get_task("token_classification").validate_num_labels(
@@ -27,7 +89,9 @@ def test_token_label_validation_rejects_other_out_of_range_values(invalid_label)
     with pytest.raises(ValueError, match="outside the valid range"):
         get_task("token_classification").validate_num_labels(
             {"train": {"targets": [[-100, invalid_label]]}},
-            "targets", 3, "toy",
+            "targets",
+            3,
+            "toy",
         )
 
 
@@ -41,9 +105,7 @@ def test_sequence_label_validation_does_not_allow_token_ignore_index():
 def _calibration_label_rows(batch_size: int, seq_len: int) -> list[list[float]]:
     """[mask idx, wt idx, 20 AA token ids, 20 homolog freqs] per row."""
     freqs = [0.05] * 20
-    return [
-        [i % seq_len, i % 20, *range(20), *freqs] for i in range(batch_size)
-    ]
+    return [[i % seq_len, i % 20, *range(20), *freqs] for i in range(batch_size)]
 
 
 @pytest.fixture(params=available_tasks())
@@ -129,7 +191,9 @@ def test_extract_predictions_reduces_class_dimension(task: TaskHandler):
     # every other task type emits per-class logits.
     num_classes = 1 if task.name == "sequence_regression" else 3
     logits = (
-        torch.randn(2, 4, num_classes) if task.is_ragged else torch.randn(2, num_classes)
+        torch.randn(2, 4, num_classes)
+        if task.is_ragged
+        else torch.randn(2, num_classes)
     )
     preds = task.extract_predictions(logits)
     if task.name == "sequence_multilabel_classification":
@@ -199,7 +263,9 @@ def test_default_metrics_are_computable(task: TaskHandler):
         predictions = rng.normal(size=n).tolist()
         labels = rng.normal(size=n).tolist()
     elif task.name == "calibration":
-        predictions = [[float(kl), int(p)] for kl, p in zip(rng.random(n), rng.integers(0, 20, n))]
+        predictions = [
+            [float(kl), int(p)] for kl, p in zip(rng.random(n), rng.integers(0, 20, n))
+        ]
         labels = [[0, 0], [1, 1], [2, 5], [3, 3], [4, 9], [5, 5]]  # T and NT rows
     elif task.name == "sequence_multilabel_classification":
         num_labels = 3
@@ -214,7 +280,10 @@ def test_default_metrics_are_computable(task: TaskHandler):
         labels[0], labels[1] = 0, 1  # ensure both classes are present for roc_auc
 
     probabilities = None
-    if task.metrics_requiring_probabilities and task.name == "sequence_multilabel_classification":
+    if (
+        task.metrics_requiring_probabilities
+        and task.name == "sequence_multilabel_classification"
+    ):
         probabilities = rng.random((n, 3)).tolist()
     elif task.metrics_requiring_probabilities:
         probs = rng.random((n, 2))
@@ -264,9 +333,7 @@ def test_multilabel_validation_checks_vector_width_and_binary_values():
     task.validate_num_labels(valid_dataset, "targets", 3, "toy")
 
     with pytest.raises(ValueError, match="vector of length 3"):
-        task.validate_num_labels(
-            {"train": {"targets": [[1, 0]]}}, "targets", 3, "toy"
-        )
+        task.validate_num_labels({"train": {"targets": [[1, 0]]}}, "targets", 3, "toy")
 
     with pytest.raises(ValueError, match="only binary values"):
         task.validate_num_labels(
@@ -302,12 +369,8 @@ def test_multilabel_mcc_respects_aggregation(average, expected):
     assert "multilabel_mcc" in task.default_metrics()
 
     scores = task.compute_metrics(
-        predictions=[
-            [1, 1], [1, 0], [0, 0], [0, 0], [0, 0], [0, 0], [1, 0], [1, 0]
-        ],
-        labels=[
-            [1, 1], [1, 0], [1, 0], [1, 0], [0, 0], [0, 0], [0, 0], [0, 0]
-        ],
+        predictions=[[1, 1], [1, 0], [0, 0], [0, 0], [0, 0], [0, 0], [1, 0], [1, 0]],
+        labels=[[1, 1], [1, 0], [1, 0], [1, 0], [0, 0], [0, 0], [0, 0], [0, 0]],
         metric_names=["multilabel_mcc"],
         average=average,
     )

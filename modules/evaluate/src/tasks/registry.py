@@ -23,12 +23,20 @@ def available_tasks() -> list[str]:
     return sorted(_TASK_REGISTRY)
 
 
-def get_task(task_type: str) -> TaskHandler:
-    """Instantiate the handler registered for ``task_type``."""
+def get_task(task_type: str, num_labels: int | None = None) -> TaskHandler:
+    """Instantiate a handler, optionally fixing its classification vocabulary."""
     try:
         handler_cls = _TASK_REGISTRY[task_type]
     except KeyError:
         raise KeyError(
             f"Unknown task_type '{task_type}'. Available: {available_tasks()}."
         ) from None
-    return handler_cls()
+    task = handler_cls()
+    if num_labels is not None and task_type in {
+        "sequence_classification",
+        "sequence_multilabel_classification",
+        "token_classification",
+    }:
+        count = task.resolve_num_labels(num_labels, dataset_name="")
+        task.class_labels = tuple(range(count))
+    return task

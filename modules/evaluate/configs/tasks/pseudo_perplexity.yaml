@@ -3,6 +3,12 @@ workspace:
 
 steps:
   mode: evaluate_as_is
+  tune:
+    hyperparameter_search:
+      enabled: false
+    refit_on_train_validation: false
+  score:
+    metrics: [pseudo_perplexity]
   prepare:
     # Prepare still requires three roles; only the test loader is scored.
     split:
@@ -14,4 +20,4 @@ steps:
     embedding_cache:
       enabled: false
   predict:
-    controls: ["random_both"]
+    controls: [random_trunk]

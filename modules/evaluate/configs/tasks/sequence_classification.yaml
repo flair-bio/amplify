@@ -2,10 +2,12 @@ workspace:
   task_type: sequence_classification
 
 steps:
-  prepare:
-    embedding_cache:
-      enabled: true
+  tune:
+    hyperparameter_search:
+      metric: f1
+      direction: maximize
+  score:
+    metrics: [f1]
+    metric_aggregation: macro # equal weight per evaluated class; fixed vocabulary inclusion is pending
   predict:
-    embedding_batch_size: 1024
-    controls:
-      [untrained, random_trunk, random_head, random_both, scrambled_labels, scrambled_sequences, majority_class]
+    controls: [random_trunk, majority_class]

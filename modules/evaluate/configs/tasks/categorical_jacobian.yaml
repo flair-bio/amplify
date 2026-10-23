@@ -1,13 +1,20 @@
 workspace:
   task_type: categorical_jacobian
   model_kwargs:
-    mutant_batch_size: 256
+    mutant_batch_size: 1024
     max_jacobian_bytes: 536870912
 
 steps:
   mode: evaluate_as_is
+  tune:
+    hyperparameter_search:
+      enabled: false
+    refit_on_train_validation: false
   prepare:
+    batch_size: 1
     embedding_cache:
       enabled: false
+  score:
+    metrics: [contact_auc_long]
   predict:
-    controls: [scrambled_labels, separation_prior]
+    controls: [random_trunk, separation_prior]

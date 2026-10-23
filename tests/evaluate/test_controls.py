@@ -1,17 +1,34 @@
-"""Control heads retain fitted preprocessing while randomizing learned weights."""
+"""Control probes use the correct features, training protocol, and preprocessing."""
 
+import json
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from accelerate import Accelerator
 from torch import nn
 from torch.utils.data import DataLoader
 
-from modules.evaluate.src.model.heads import EmbeddingProbeHead
+from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
+from modules.evaluate.src.model.heads import EmbeddingProbeHead, HeadConfig
 from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
-from modules.evaluate.src.utils.controls import ControlBuilder
-from modules.evaluate.src.utils.embed import EmbeddingDataset
+from modules.evaluate.src.steps.predict import PredictConfig, PredictStep
+from modules.evaluate.src.steps.tune import (
+    HyperparameterSearchConfig,
+    HyperparameterSearchSpaceConfig,
+    TuneConfig,
+    TuneStep,
+)
+from modules.evaluate.src.utils.controls import ControlBuilder, build_random_trunk
+from modules.evaluate.src.utils.embed import (
+    EmbeddingCacheConfig,
+    EmbeddingDataset,
+    find_embedding_dataset,
+    weights_fingerprint,
+)
+
+from .test_prepare import _make_workspace, _run_prepare
 
 
 class _ControlTrunk(nn.Module):
@@ -24,8 +41,9 @@ class _ControlTrunk(nn.Module):
 @pytest.mark.parametrize("control", ["untrained", "random_head", "random_both"])
 @pytest.mark.parametrize("probe_hidden_size", [None, 3])
 @pytest.mark.parametrize("standardize_features", [False, True])
+@pytest.mark.parametrize("probe_hidden_depth", [1, 2])
 def test_randomized_heads_preserve_training_feature_statistics(
-    monkeypatch, control, probe_hidden_size, standardize_features
+    monkeypatch, control, probe_hidden_size, standardize_features, probe_hidden_depth
 ):
     trained_head = EmbeddingProbeHead(
         4,
@@ -33,6 +51,7 @@ def test_randomized_heads_preserve_training_feature_statistics(
         "sequence_classification",
         probe_hidden_size=probe_hidden_size,
         standardize_features=standardize_features,
+        probe_hidden_depth=probe_hidden_depth,
     )
     if standardize_features:
         trained_head.fit_standardization(
@@ -80,6 +99,9 @@ def test_randomized_heads_preserve_training_feature_statistics(
     assert actual_ids == ids
     (control_head,) = control_heads
     assert control_head is not trained_head
+    assert control_head.probe_hidden_depth == trained_head.probe_hidden_depth
+    assert control_head.probe_hidden_size == trained_head.probe_hidden_size
+    assert set(control_head.state_dict()) == set(trained_head.state_dict())
     assert control_head.standardize_features is standardize_features
     if standardize_features:
         torch.testing.assert_close(control_head.feature_mean, trained_head.feature_mean)
@@ -103,3 +125,163 @@ def test_randomized_heads_preserve_training_feature_statistics(
     with torch.inference_mode():
         expected = control_head(inputs_embeds=features).logits.softmax(dim=-1)
     torch.testing.assert_close(torch.tensor(probabilities), expected)
+
+
+@pytest.mark.parametrize("refit", [False, True])
+@pytest.mark.parametrize(
+    "head_type,task_type",
+    [
+        ("mlp", "sequence_classification"),
+        ("torch_linear", "token_classification"),
+        ("torch_linear", "sequence_multilabel_classification"),
+        ("torch_linear", "sequence_regression"),
+        ("sklearn_linear", "sequence_classification"),
+    ],
+)
+def test_cached_random_trunk_selects_and_refits_its_own_probe(
+    monkeypatch, tmp_path, model_family, refit, head_type, task_type
+):
+    from modules.evaluate.src.steps import tune as tune_module
+
+    torch.manual_seed(1234)
+    prepared = _run_prepare(
+        monkeypatch,
+        tmp_path,
+        task_type,
+        model_family,
+        embedding_cache=EmbeddingCacheConfig(enabled=True),
+    )
+    workspace = _make_workspace(tmp_path, task_type)
+    accelerator = Accelerator(cpu=True)
+    original_loaders = (
+        prepared.train_dataloader,
+        prepared.val_dataloader,
+        prepared.test_dataloader,
+    )
+    extracted = []
+    original_build = tune_module.build_embedding_dataloaders
+
+    def capture_features(**kwargs):
+        assert set(kwargs["splits"]) == {"train", "validation"}
+        loaders = original_build(**kwargs)
+        extracted.append((kwargs["model"], loaders))
+        return loaders
+
+    monkeypatch.setattr(tune_module, "build_embedding_dataloaders", capture_features)
+    searches = []
+    original_search = TuneStep._search_hyperparameters
+
+    def capture_search(self, ws, *args, **kwargs):
+        searches.append((ws.variant, self.config.hyperparameter_search.model_dump()))
+        return original_search(self, ws, *args, **kwargs)
+
+    monkeypatch.setattr(TuneStep, "_search_hyperparameters", capture_search)
+    config = TuneConfig(
+        head=HeadConfig(
+            head_type=head_type,
+            hidden_size=3,
+            search_space={"C": [0.1, 1.0]} if head_type == "sklearn_linear" else {},
+        ),
+        batch_size=2,
+        max_epochs=1,
+        refit_on_train_validation=refit,
+        standardize_features=True,
+        hyperparameter_search=HyperparameterSearchConfig(
+            enabled=True,
+            n_trials=2,
+            search_pattern="grid",
+            search_space=HyperparameterSearchSpaceConfig(
+                learning_rate=[0.001, 0.01],
+                weight_decay=[0.0],
+                max_epochs=[1],
+                hidden_size=[3, 5] if head_type == "mlp" else None,
+                hidden_depth=[1, 2] if head_type == "mlp" else None,
+            ),
+        ),
+    )
+    TuneStep(config).run(
+        workspace, prepared, seed=42, controls=["random_trunk"], accelerator=accelerator
+    )
+    assert prepared.random_trunk_model is not prepared.model
+    assert original_loaders == (
+        prepared.train_dataloader,
+        prepared.val_dataloader,
+        prepared.test_dataloader,
+    )
+    ((trunk, loaders),) = extracted
+    backend = prepared.embedding_backend
+    assert weights_fingerprint(trunk) == weights_fingerprint(
+        build_random_trunk(backend.trunk, 42)
+    )
+    train = find_embedding_dataset(loaders["train"])
+    validation = find_embedding_dataset(loaders["validation"])
+    fitted_features = (
+        torch.cat([train.embeddings, validation.embeddings])
+        if refit
+        else train.embeddings
+    )
+    assert not torch.equal(
+        train.embeddings,
+        find_embedding_dataset(prepared.train_dataloader).embeddings,
+    )
+    if head_type == "sklearn_linear":
+        np.testing.assert_allclose(
+            prepared.random_trunk_model.named_steps["scaler"].mean_,
+            fitted_features.double().mean(0).numpy(),
+            atol=1e-6,
+        )
+        filename = "tune_config.json"
+    else:
+        assert len(searches) == 2
+        assert searches[0][1] == searches[1][1]
+        assert searches[1][0].endswith("-random_trunk")
+        torch.testing.assert_close(
+            prepared.random_trunk_model.feature_mean.cpu(),
+            fitted_features.float().mean(0),
+        )
+        filename = "probe_head_config.json"
+    baseline_path = get_evaluation_workspace(
+        workspace.config, variant=f"{workspace.variant or 'probe'}-random_trunk"
+    ).model_path
+    settings = json.loads((baseline_path / filename).read_text())
+    assert settings["final_fit_split"] == ("train+validation" if refit else "train")
+    if head_type != "sklearn_linear":
+        infer = ControlBuilder._run_local_head_inference
+
+        def check_head(head, *args, **kwargs):
+            assert head is prepared.random_trunk_model
+            return infer(head, *args, **kwargs)
+
+        monkeypatch.setattr(
+            ControlBuilder, "_run_local_head_inference", staticmethod(check_head)
+        )
+    result = PredictStep(
+        PredictConfig(controls=["random_trunk"], persist_to_disk=False)
+    ).run(workspace, prepared, seed=42, accelerator=accelerator)
+    assert (
+        result.controls["random_trunk"]["id"].to_list()
+        == result.predictions["id"].to_list()
+    )
+    with pytest.raises(ValueError, match="seed must match its tuning seed"):
+        ControlBuilder(False)._run_embedding_control_inference(
+            "random_trunk", workspace, prepared, accelerator, seed=43
+        )
+
+
+def test_cached_random_trunk_requires_tuning():
+    prepared = PreparedArtifacts(
+        model=EmbeddingProbeHead(4, 2, "sequence_classification"),
+        tokenizer=None,
+        train_dataloader=None,
+        val_dataloader=None,
+        test_dataloader=None,
+        embedding_backend=SimpleNamespace(trunk=_ControlTrunk(4)),
+    )
+    with pytest.raises(ValueError, match="pass the predict controls to TuneStep"):
+        ControlBuilder(False)._run_embedding_control_inference(
+            "random_trunk",
+            SimpleNamespace(task_type="sequence_classification"),
+            prepared,
+            Accelerator(cpu=True),
+            seed=42,
+        )

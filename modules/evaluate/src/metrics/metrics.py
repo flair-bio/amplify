@@ -37,16 +37,46 @@ def accuracy(predictions: Any, labels: Any, average: str) -> float:
     return float(accuracy_score(labels, predictions))
 
 
-def f1(predictions: Any, labels: Any, average: str) -> float:
-    return float(f1_score(labels, predictions, average=average, zero_division=0))
+def f1(
+    predictions: Any,
+    labels: Any,
+    average: str,
+    *,
+    class_labels: Sequence[int] | None = None,
+) -> float:
+    return float(
+        f1_score(
+            labels, predictions, labels=class_labels, average=average, zero_division=0
+        )
+    )
 
 
-def precision(predictions: Any, labels: Any, average: str) -> float:
-    return float(precision_score(labels, predictions, average=average, zero_division=0))
+def precision(
+    predictions: Any,
+    labels: Any,
+    average: str,
+    *,
+    class_labels: Sequence[int] | None = None,
+) -> float:
+    return float(
+        precision_score(
+            labels, predictions, labels=class_labels, average=average, zero_division=0
+        )
+    )
 
 
-def recall(predictions: Any, labels: Any, average: str) -> float:
-    return float(recall_score(labels, predictions, average=average, zero_division=0))
+def recall(
+    predictions: Any,
+    labels: Any,
+    average: str,
+    *,
+    class_labels: Sequence[int] | None = None,
+) -> float:
+    return float(
+        recall_score(
+            labels, predictions, labels=class_labels, average=average, zero_division=0
+        )
+    )
 
 
 def _mcc_score(labels: Any, predictions: Any) -> float:
@@ -187,20 +217,20 @@ def calibration_kl_nt(predictions: Any, labels: Any, average: str) -> float:
     return _mean_or_nan(kl[~is_t])
 
 
-# Calibration score: mean of per-position exp(-KL), in (0, 1].
+# Calibration agreement: 100 times the mean of per-position exp(-KL).
 def calibration_score(predictions: Any, labels: Any, average: str) -> float:
     kl, *_ = _calibration_arrays(predictions, labels)
-    return _mean_or_nan(np.exp(-kl))
+    return 100.0 * _mean_or_nan(np.exp(-kl))
 
 
 def calibration_score_t(predictions: Any, labels: Any, average: str) -> float:
     kl, _, _, _, is_t = _calibration_arrays(predictions, labels)
-    return _mean_or_nan(np.exp(-kl[is_t]))
+    return 100.0 * _mean_or_nan(np.exp(-kl[is_t]))
 
 
 def calibration_score_nt(predictions: Any, labels: Any, average: str) -> float:
     kl, _, _, _, is_t = _calibration_arrays(predictions, labels)
-    return _mean_or_nan(np.exp(-kl[~is_t]))
+    return 100.0 * _mean_or_nan(np.exp(-kl[~is_t]))
 
 
 def calibration_accuracy_t(predictions: Any, labels: Any, average: str) -> float:

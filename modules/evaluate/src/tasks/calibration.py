@@ -30,6 +30,7 @@ class CalibrationTask(TaskHandler):
     label_dtype = torch.float
     aligns_labels = True
     tokenization_batch_size = 1
+    prediction_progress_unit = "masked positions"
     accepted_target_types = frozenset({"categorical"})
     accepted_label_formats = frozenset({"consensus_profile"})
 

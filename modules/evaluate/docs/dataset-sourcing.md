@@ -779,8 +779,7 @@ similar composition and random splits would be easier.
 uv run --with biopython modules/evaluate/scripts/dataset_sourcing/source_uniprot_protparams.py \
     modules/evaluate/configs/dataset_sourcing/source_uniprot_protparams.yaml
 
-# Frozen-trunk regression on gravy. For another property, set
-# steps.prepare.label_column=<property> and a distinct workspace.base_path.
+# Frozen-trunk regression on gravy (the default property).
 uv run accelerate launch modules/evaluate/src/run_evaluate.py \
     modules/evaluate/configs/config.yaml \
     modules/evaluate/configs/models/amplify_120m.yaml \
@@ -788,7 +787,22 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
     modules/evaluate/configs/datasets/uniprot_protparams.yaml \
     modules/evaluate/configs/tuning/torch_linear.yaml \
     workspace.base_path=./eval/protparams/gravy
+
+# Run another of the 31 numeric properties independently. Use a separate
+# workspace path for every property so each run's scores/checkpoint is retained.
+uv run accelerate launch modules/evaluate/src/run_evaluate.py \
+    modules/evaluate/configs/config.yaml \
+    modules/evaluate/configs/models/amplify_120m.yaml \
+    modules/evaluate/configs/tasks/sequence_regression.yaml \
+    modules/evaluate/configs/datasets/uniprot_protparams.yaml \
+    modules/evaluate/configs/tuning/torch_linear.yaml \
+    steps.prepare.label_column=isoelectric_point \
+    workspace.base_path=./eval/protparams/isoelectric_point
 ```
+
+Repeat for every column listed above. The task overlay supplies R² selection
+and reporting defaults. Keep the property-level scores separate; if you
+report one summary across properties, average those R² values equally.
 
 The dataset overlay points to the local artifact. Override
 `workspace.dataset_repo_id` if you uploaded it.

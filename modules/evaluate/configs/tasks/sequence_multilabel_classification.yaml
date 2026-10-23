@@ -2,10 +2,12 @@ workspace:
   task_type: sequence_multilabel_classification
 
 steps:
-  prepare:
-    embedding_cache:
-      enabled: true
+  tune:
+    hyperparameter_search:
+      metric: f1
+      direction: maximize
+  score:
+    metrics: [f1]
+    metric_aggregation: macro # equal weight per label column
   predict:
-    embedding_batch_size: 1024
-    controls:
-      [untrained, random_trunk, random_head, random_both, scrambled_labels, scrambled_sequences]
+    controls: [random_trunk] # majority_class does not support multilabel targets

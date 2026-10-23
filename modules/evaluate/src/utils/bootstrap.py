@@ -103,6 +103,7 @@ def token_confusion_matrices(
             raise ValueError("Token prediction and label lengths must match per row.")
         flat_preds = np.asarray(task.flatten_for_metrics(predictions.tolist()))
         flat_labels = np.asarray(task.flatten_for_metrics(labels.tolist()))
+        task.validate_metric_inputs(flat_preds, flat_labels)
         if (
             not len(flat_preds)
             or flat_preds.dtype.kind not in "iu"
@@ -111,13 +112,17 @@ def token_confusion_matrices(
             return None
         flattened[name] = (flat_preds, flat_labels, pred_lengths)
 
-    classes = np.unique(
-        np.concatenate(
-            [
-                array
-                for preds, labels, _ in flattened.values()
-                for array in (preds, labels)
-            ]
+    classes = (
+        np.asarray(task.class_labels)
+        if task.class_labels is not None
+        else np.unique(
+            np.concatenate(
+                [
+                    array
+                    for preds, labels, _ in flattened.values()
+                    for array in (preds, labels)
+                ]
+            )
         )
     )
     n_classes = len(classes)
@@ -141,15 +146,23 @@ def token_confusion_matrices(
 
 
 def confusion_scores(
-    matrix: np.ndarray, metric_names: list[str], average: str
+    matrix: np.ndarray,
+    metric_names: list[str],
+    average: str,
+    *,
+    include_absent: bool = False,
 ) -> dict[str, float]:
-    """Pooled classification metrics, with sklearn's observed-class/zero rules."""
+    """Pooled metrics, retaining absent configured classes when requested."""
     actual = matrix.sum(axis=1, dtype=float)
     predicted = matrix.sum(axis=0, dtype=float)
     total = actual.sum()
     if total == 0:
         return dict.fromkeys(metric_names, float("nan"))
-    present = (actual + predicted) != 0
+    present = (
+        np.ones(len(actual), dtype=bool)
+        if include_absent
+        else (actual + predicted) != 0
+    )
     actual, predicted = actual[present], predicted[present]
     true_positive = np.diag(matrix)[present].astype(float)
     correct = true_positive.sum()
@@ -192,13 +205,18 @@ def bootstrap_confusion_scores(
     metric_names: list[str],
     average: str,
     rng: np.random.Generator,
+    *,
+    include_absent: bool = False,
 ) -> dict[str, dict[str, float]]:
     """Draw the same protein multiplicities as bootstrap_indices, without rows."""
     n_groups = len(next(iter(matrices.values())))
     counts = np.bincount(rng.integers(0, n_groups, size=n_groups), minlength=n_groups)
     return {
         condition: confusion_scores(
-            np.einsum("g,gij->ij", counts, values), metric_names, average
+            np.einsum("g,gij->ij", counts, values),
+            metric_names,
+            average,
+            include_absent=include_absent,
         )
         for condition, values in matrices.items()
     }
@@ -249,6 +267,7 @@ def full_scores(
         flat_predictions = np.asarray(flat_predictions)
         flat_labels = np.asarray(flat_labels)
     task.validate_metric_names(metric_names)
+    task.validate_metric_inputs(flat_predictions, flat_labels)
 
     scores: dict[str, float] = {}
     for name in metric_names:
@@ -325,7 +344,12 @@ def permutation_p_values(
         raise ValueError("Both conditions must supply confusion matrices.")
 
     observed_control = (
-        confusion_scores(control_confusions.sum(axis=0), metric_names, average)
+        confusion_scores(
+            control_confusions.sum(axis=0),
+            metric_names,
+            average,
+            include_absent=task.class_labels is not None,
+        )
         if control_confusions is not None
         else full_scores(
             task,
@@ -358,6 +382,7 @@ def permutation_p_values(
                 ),
                 metric_names,
                 average,
+                include_absent=task.class_labels is not None,
             )
             perm_control = confusion_scores(
                 np.where(swap_matrices, trained_confusions, control_confusions).sum(
@@ -365,6 +390,7 @@ def permutation_p_values(
                 ),
                 metric_names,
                 average,
+                include_absent=task.class_labels is not None,
             )
         elif (
             trained_per_example_scores is not None
@@ -561,7 +587,12 @@ def summarize_controls(
     # Independent of `control`, so compute once rather than once per
     # control inside permutation_p_values.
     observed_trained = (
-        confusion_scores(trained_confusions.sum(axis=0), metric_names, average)
+        confusion_scores(
+            trained_confusions.sum(axis=0),
+            metric_names,
+            average,
+            include_absent=task.class_labels is not None,
+        )
         if trained_confusions is not None
         else full_scores(
             task,

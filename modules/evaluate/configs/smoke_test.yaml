@@ -39,12 +39,18 @@ steps:
       enabled: false
       layers: null
   tune:
+    refit_on_train_validation: false
+    head:
+      head_type: mlp # native head for evaluate_as_is, even after an alternative probe overlay
     max_epochs: 1
     hyperparameter_search:
       enabled: false
       n_trials: 2
       search_pattern: bohb
       search_space:
+        hidden_size: null
+        hidden_depth: null
+        batch_size: null
         learning_rate: [1e-4, 5e-5]
         max_epochs: [1]
         weight_decay: [1e-4]

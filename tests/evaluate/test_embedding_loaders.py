@@ -16,7 +16,9 @@ from modules.evaluate.src.dataset.collator import (
     EvaluationCollatorConfig,
 )
 from modules.evaluate.src.dataset.dataloader import DataLoaderConfig, build_dataloaders
+from modules.evaluate.src.model.heads import HeadConfig
 from modules.evaluate.src.steps.predict import PredictConfig, PredictStep
+from modules.evaluate.src.steps.tune import TuneConfig, TuneStep
 from modules.evaluate.src.utils.embed import (
     EmbeddingCache,
     EmbeddingCacheConfig,
@@ -324,6 +326,13 @@ def test_prepare_and_prediction_controls_use_matching_order(
     controls = ["random_trunk", "random_both"]
     if task_type == "sequence_classification":
         controls.append("scrambled_sequences")
+    TuneStep(
+        TuneConfig(
+            head=HeadConfig(head_type="torch_linear"),
+            max_epochs=1,
+            save_best_model=False,
+        )
+    ).run(_make_workspace(tmp_path, task_type), artifacts, controls=controls)
     output = PredictStep(PredictConfig(controls=controls)).run(
         _make_workspace(tmp_path, task_type),
         artifacts,

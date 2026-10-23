@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -32,6 +33,93 @@ from modules.evaluate.src.utils.hpo import (
 from modules.evaluate.src.utils.embed import EmbeddingDataset
 
 from .test_prepare import _make_workspace, _run_prepare
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize(
+    "task_type,num_labels",
+    [
+        ("sequence_classification", 2),
+        ("token_classification", 3),
+        ("token_classification", 8),
+        ("sequence_multilabel_classification", 3),
+    ],
+)
+def test_validation_f1_keeps_configured_classes_and_token_masks(
+    monkeypatch, tmp_path, cached, task_type, num_labels
+):
+    labels = torch.zeros(3, dtype=torch.long)
+    if task_type == "token_classification":
+        labels[1] = -100
+    elif task_type == "sequence_multilabel_classification":
+        labels = torch.tensor([[1, 0, 0]] * 3)
+    model = EmbeddingProbeHead(4, num_labels, task_type)
+    with torch.no_grad():
+        model.classifier.weight.zero_()
+        model.classifier.bias.fill_(-5)
+        model.classifier.bias[0] = 5
+    loader = DataLoader(
+        EmbeddingDataset(torch.ones(3, 4), list(range(3)), labels)
+        if cached
+        else [{"input_ids": torch.tensor([0]), "labels": 0}],
+        batch_size=2,
+    )
+    prepared = PreparedArtifacts(
+        model=model,
+        tokenizer=None,
+        train_dataloader=None,
+        val_dataloader=loader,
+        test_dataloader=None,
+    )
+    live_labels = (
+        [[0, 0], []] if task_type == "token_classification" else labels.tolist()
+    )
+    monkeypatch.setattr(
+        "modules.evaluate.src.steps.tune.run_inference",
+        lambda *args, **kwargs: ([], live_labels, live_labels, None, None),
+    )
+    step = TuneStep(TuneConfig(metric_aggregation="macro"))
+    score = step._evaluate_validation(
+        _make_workspace(tmp_path, task_type, num_labels=num_labels),
+        prepared,
+        Accelerator(cpu=True),
+        "f1",
+    )
+    assert score == pytest.approx(1 / num_labels)
+
+
+def test_classical_selection_uses_fixed_class_macro_f1(monkeypatch):
+    from modules.evaluate.src.model.heads import sweep_classical_head
+
+    candidates = {
+        "observed_winner": np.zeros(8, dtype=int),
+        "fixed_winner": np.array([0, 2, 2, 2, 1, 2, 2, 2]),
+    }
+
+    def build(head_type, task_type, hparams, **kwargs):
+        return SimpleNamespace(
+            fit=lambda *args: None,
+            predict=lambda *args: candidates[hparams["candidate"]],
+        )
+
+    monkeypatch.setattr("modules.evaluate.src.model.heads.build_estimator", build)
+    _, best, score = sweep_classical_head(
+        "knn",
+        "sequence_classification",
+        np.ones((8, 2)),
+        np.array([0] * 4 + [1] * 4),
+        np.ones((8, 2)),
+        np.array([0] * 4 + [1] * 4),
+        {"candidate": list(candidates)},
+        {},
+        "f1",
+        "maximize",
+        search_pattern="grid",
+        average="macro",
+        num_labels=3,
+    )
+    assert best["candidate"] == "fixed_winner"
+    assert score == pytest.approx(0.8 / 3)
 
 
 def test_online_layerwise_tuning_saves_independent_heads(
@@ -188,6 +276,99 @@ def test_random_candidates_are_unique_and_bounded_by_grid() -> None:
     assert len({tuple(candidate.items()) for candidate in candidates}) == 4
 
 
+@pytest.mark.parametrize(
+    "bounds", [[], [0.0, 0.1], [-1e-6, 0.1], [float("nan")], [float("inf")]]
+)
+def test_log_weight_decay_rejects_invalid_bounds(bounds):
+    with pytest.raises(ValueError, match="finite, positive bounds"):
+        HyperparameterSearchSpaceConfig(
+            weight_decay=bounds, weight_decay_sampling="log"
+        )
+
+
+@pytest.mark.parametrize("cached", [True, False])
+def test_tpe_samples_weight_decay_continuously_and_reproducibly(
+    monkeypatch, tmp_path, cached
+):
+    pytest.importorskip("optuna")
+    accelerator = Accelerator(cpu=True)
+    workspace = _make_workspace(tmp_path, "sequence_classification")
+    loader = DataLoader(
+        EmbeddingDataset(torch.ones(4, 3), list(range(4)), torch.tensor([0, 1, 0, 1]))
+        if cached
+        else [{"labels": 0}],
+        batch_size=2,
+    )
+    step = TuneStep(
+        TuneConfig(
+            hyperparameter_search=HyperparameterSearchConfig(
+                enabled=True,
+                n_trials=4,
+                search_space=HyperparameterSearchSpaceConfig(
+                    learning_rate=[1e-4],
+                    weight_decay=[1e-6, 1e-1],
+                    weight_decay_sampling="log",
+                    max_epochs=[1],
+                ),
+            ),
+        )
+    )
+    samples = []
+
+    def train(workspace, artifacts, accelerator, hparams, **kwargs):
+        distribution = kwargs["trial"].distributions["weight_decay"]
+        assert distribution.log
+        assert distribution.low == 1e-6
+        assert distribution.high == 1e-1
+        samples.append(hparams["weight_decay"])
+        return hparams["weight_decay"]
+
+    monkeypatch.setattr(step, "_train", train)
+    for _ in range(2):
+        prepared = PreparedArtifacts(
+            model=EmbeddingProbeHead(3, 2, "sequence_classification"),
+            tokenizer=MagicMock(),
+            train_dataloader=loader,
+            val_dataloader=loader,
+            test_dataloader=None,
+        )
+        best = step._search_hyperparameters(workspace, prepared, accelerator, seed=42)
+        assert best["weight_decay"] == max(samples[-4:])
+
+    assert samples[:4] == samples[4:]
+    assert all(1e-6 < value < 1e-1 for value in samples)
+    assert len(set(samples[:4])) > 1
+
+
+def test_categorical_weight_decay_preserves_zero_and_grid_candidates():
+    trial = MagicMock()
+    trial.suggest_categorical.return_value = 0.0
+    step = TuneStep(
+        TuneConfig(
+            hyperparameter_search=HyperparameterSearchConfig(
+                search_space=HyperparameterSearchSpaceConfig(
+                    learning_rate=[1e-4],
+                    weight_decay=[0.0, 1e-3],
+                    max_epochs=[1],
+                )
+            )
+        )
+    )
+    assert step._suggest_weight_decay(trial) == 0.0
+    trial.suggest_categorical.assert_called_once_with("weight_decay", [0.0, 1e-3])
+    trial.suggest_float.assert_not_called()
+    for pattern in ("random", "grid"):
+        candidates = step._generate_candidates(pattern, n_trials=10, seed=42)
+        assert {candidate["weight_decay"] for candidate in candidates} == {0.0, 1e-3}
+
+    space = step.config.hyperparameter_search.search_space
+    space.weight_decay = [1e-6, 1e-1]
+    space.weight_decay_sampling = "log"
+    for pattern in ("random", "grid"):
+        candidates = step._generate_candidates(pattern, n_trials=10, seed=42)
+        assert {candidate["weight_decay"] for candidate in candidates} == {1e-6, 1e-1}
+
+
 def test_removed_tuning_aliases_are_rejected() -> None:
     with pytest.raises(Exception, match="num_epochs"):
         TuneConfig(num_epochs=1)
@@ -341,7 +522,9 @@ class TestVarianceSeeds:
             embedding_cache=EmbeddingCacheConfig(enabled=True),
         )
         workspace = MagicMock(
-            task_type="sequence_classification", model_path=tmp_path / "model"
+            task_type="sequence_classification",
+            model_path=tmp_path / "model",
+            num_labels=2,
         )
         step = TuneStep(
             TuneConfig(
@@ -381,7 +564,9 @@ class TestVarianceSeeds:
             embedding_cache=EmbeddingCacheConfig(enabled=True),
         )
         workspace = MagicMock(
-            task_type="sequence_classification", model_path=tmp_path / "model"
+            task_type="sequence_classification",
+            model_path=tmp_path / "model",
+            num_labels=2,
         )
         step = TuneStep(
             TuneConfig(
@@ -417,7 +602,9 @@ class TestBohbAcrossTaskTypesAndSettings:
             model_family,
             embedding_cache=EmbeddingCacheConfig(enabled=embedding_cache_enabled),
         )
-        workspace = MagicMock(task_type=task_type, model_path=tmp_path / "model")
+        workspace = MagicMock(
+            task_type=task_type, model_path=tmp_path / "model", num_labels=2
+        )
         step = TuneStep(
             TuneConfig(
                 head=HeadConfig(head_type=head_type),
@@ -464,7 +651,9 @@ class TestBohbAcrossClassicalHeadTypes:
             model_family,
             embedding_cache=EmbeddingCacheConfig(enabled=True),
         )
-        workspace = MagicMock(task_type=task_type, model_path=tmp_path / "model")
+        workspace = MagicMock(
+            task_type=task_type, model_path=tmp_path / "model", num_labels=2
+        )
         step = TuneStep(
             TuneConfig(
                 head=HeadConfig(
@@ -577,7 +766,7 @@ def test_cached_training_features_are_transferred_only_when_training(
     result = step.run(workspace, prepared, accelerator=accelerator)
 
     assert result is prepared
-    prepare_split.assert_called_once_with(prepared.train_dataloader, accelerator.device)
+    prepare_split.assert_called_once_with(prepared.train_dataloader)
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
@@ -628,7 +817,7 @@ def test_cached_probe_batch_size_honors_loader_and_override(
     )
     monkeypatch.setattr("modules.evaluate.src.steps.tune.build_scheduler", scheduler)
     monkeypatch.setattr(model, "forward", forward)
-    workspace = MagicMock(task_type="sequence_classification")
+    workspace = MagicMock(task_type="sequence_classification", num_labels=2)
     hparams = {"learning_rate": 1e-3, "weight_decay": 0.0, "max_epochs": 2}
 
     step._train(workspace, prepared, accelerator, hparams)
@@ -684,9 +873,7 @@ def test_cached_mlp_checkpoint_reloads_trained_head(
     reloaded.load_state_dict(state, strict=True)
     for name, tensor in trained.model.state_dict().items():
         torch.testing.assert_close(state[name], tensor)
-    features, _ = step._cached_embedding_split(
-        prepared.val_dataloader, torch.device("cpu")
-    )
+    features, _ = step._cached_embedding_split(prepared.val_dataloader)
     with torch.inference_mode():
         torch.testing.assert_close(
             reloaded(inputs_embeds=features).logits,

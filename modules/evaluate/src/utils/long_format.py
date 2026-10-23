@@ -37,8 +37,8 @@ def build_long_df(
     (e.g. one per model) can be concatenated with ``pl.concat`` and plotted
     directly (e.g. a bar chart of ``value`` faceted by ``metric`` and
     grouped/colored by ``model_name``), without parsing the run manifest's
-    "score"/"bootstrap" sections separately (control comparisons are only
-    ever available via ``long_df``/``scores_long.parquet``, in tidy form).
+    "score"/"bootstrap" sections separately. Control comparisons are also
+    recorded under the manifest's ``bootstrap.control_comparisons``.
 
     Rows with ``control`` set to ``None`` are the trained model's own
     point-estimate metrics (``value``, plus ``ci_mean``/``ci_lower``/

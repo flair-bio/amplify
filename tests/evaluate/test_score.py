@@ -70,6 +70,7 @@ from .conftest import ModelFamily, build_raw_dataset_dict, build_tiny_model
 
 
 @pytest.mark.parametrize("average", ["micro", "macro", "weighted"])
+@pytest.mark.parametrize("num_labels", [None, 8])
 @pytest.mark.parametrize(
     "predictions,labels",
     [
@@ -79,8 +80,10 @@ from .conftest import ModelFamily, build_raw_dataset_dict, build_tiny_model
         ([[], [4]], [[], [4]]),
     ],
 )
-def test_token_confusion_scores_match_residue_metrics(average, predictions, labels):
-    task = get_task("token_classification")
+def test_token_confusion_scores_match_residue_metrics(
+    average, predictions, labels, num_labels
+):
+    task = get_task("token_classification", num_labels)
     names = task.default_metrics()
     arrays = (
         as_indexable_array(predictions, True),
@@ -92,7 +95,12 @@ def test_token_confusion_scores_match_residue_metrics(average, predictions, labe
     rng = np.random.default_rng(71)
     for _ in range(12):
         idx = bootstrap_indices(len(labels), None, rng)
-        actual = confusion_scores(matrices["trained"][idx].sum(axis=0), names, average)
+        actual = confusion_scores(
+            matrices["trained"][idx].sum(axis=0),
+            names,
+            average,
+            include_absent=task.class_labels is not None,
+        )
         expected = full_scores(
             task, arrays[0][idx], arrays[1][idx], None, names, average
         )
@@ -103,6 +111,51 @@ def test_token_confusion_scores_match_residue_metrics(average, predictions, labe
             atol=1e-14,
             equal_nan=True,
         )
+
+
+@pytest.mark.parametrize("num_labels", [2, 3, 8])
+def test_score_and_bootstrap_keep_classes_missing_from_test_split(tmp_path, num_labels):
+    task_type = "sequence_classification" if num_labels == 2 else "token_classification"
+    values = [0, 0] if num_labels == 2 else [[0, 0], [0]]
+    workspace = get_evaluation_workspace(
+        EvaluationWorkspaceConfig(
+            model_name="toy-model",
+            dataset_name="toy",
+            task_type=task_type,
+            target_type="categorical",
+            label_format="scalar" if num_labels == 2 else "per_token",
+            num_labels=num_labels,
+            base_path=str(tmp_path),
+        )
+    )
+    workspace.setup_directories()
+    output = PredictOutput(
+        metadata=EvaluationMetadata(
+            model_name="toy-model",
+            dataset_name="toy",
+            task_type=task_type,
+        ),
+        predictions=pl.DataFrame(
+            {"id": ["a", "b"], "prediction": values, "label": values}
+        ),
+        controls={"untrained": pl.DataFrame({"id": ["a", "b"], "prediction": values})},
+        requested_controls=["untrained"],
+    )
+    result = ScoreStep(
+        ScoreConfig(
+            metrics=["f1"],
+            metric_aggregation="macro",
+            bootstrap_enabled=True,
+            n_samples=8,
+            n_permutations=8,
+        )
+    ).run(workspace, predict_result=output)
+    assert result.scores["f1"] == pytest.approx(1 / num_labels)
+    assert result.resamples["f1"].to_list() == pytest.approx([1 / num_labels] * 8)
+    comparison = result.control_comparisons["untrained"]["f1"]
+    assert comparison["control_mean"] == pytest.approx(1 / num_labels)
+    assert comparison["diff_mean"] == 0
+    assert comparison["p_value"] == 1
 
 
 @pytest.mark.parametrize("average", ["micro", "macro", "weighted"])
@@ -976,7 +1029,13 @@ class TestScoreStepBootstrap:
         assert 0.0 <= comparison["p_value"] <= 1.0
         assert 0.0 <= comparison["p_value_adjusted"] <= 1.0
 
-        # Control comparisons are only persisted in tidy form, via long_df.
+        manifest = json.loads(workspace.run_manifest_path.read_text())
+        assert manifest["bootstrap"]["confidence_intervals"] == result.confidence_intervals
+        assert manifest["bootstrap"]["control_comparisons"] == result.control_comparisons
+        assert "predict" in manifest
+        assert "score" in manifest
+
+        # The same comparisons remain available in tidy form.
         assert result.long_path is not None
         on_disk = pl.read_parquet(result.long_path)
         assert control in on_disk["control"].to_list()
@@ -1051,6 +1110,8 @@ class TestScoreStepBootstrap:
 
         assert result.control_comparisons is None
         assert set(result.confidence_intervals) == {"accuracy"}
+        manifest = json.loads(workspace.run_manifest_path.read_text())
+        assert manifest["bootstrap"]["control_comparisons"] == {}
 
 
 # ---------------------------------------------------------------------------

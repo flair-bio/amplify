@@ -84,6 +84,14 @@ RANDOMIZED_HEAD_CONTROLS = frozenset(
 NO_INFERENCE_CONTROLS = frozenset({SCRAMBLED_LABELS_CONTROL})
 
 
+def build_random_trunk(trunk: torch.nn.Module, seed: int) -> torch.nn.Module:
+    """Use identical random weights for development and test extraction."""
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(seed)
+        random_trunk = type(trunk)(copy.deepcopy(trunk.config))
+    return random_trunk.to(next(trunk.parameters()).device).eval()
+
+
 class ControlBuilder:
     """Builds predictions for every model-based/non-model-baseline control
     condition. Expensive trunk features are reused through the embedding cache;
@@ -346,6 +354,11 @@ class ControlBuilder:
             model = self._build_control_model(
                 control, workspace, prepared, accelerator, seed
             )
+            test_dataloader = prepared.test_dataloader
+            test_dataset = getattr(test_dataloader, "dataset", None)
+            progress_total_batches = (
+                len(test_dataloader) if test_dataloader is not None else None
+            )
             batch_transform = (
                 self.make_sequence_scrambler(prepared.tokenizer, seed)
                 if is_scrambled_sequences
@@ -353,13 +366,18 @@ class ControlBuilder:
             )
             ids, predictions, _, probabilities, sequences = run_inference(
                 model,
-                prepared.test_dataloader,
+                test_dataloader,
                 workspace.task_type,
                 accelerator,
                 collect_probabilities=self.collect_probabilities,
                 batch_transform=batch_transform,
                 tokenizer=prepared.tokenizer if is_scrambled_sequences else None,
                 progress_label=f"Control '{control}' prediction",
+                progress_total_batches=progress_total_batches,
+                progress_total_rows=(
+                    len(test_dataset) if test_dataset is not None else None
+                ),
+                progress_unit=get_task(workspace.task_type).prediction_progress_unit,
             )
         control_data: dict[str, list[Any]] = {"id": ids, "prediction": predictions}
         if probabilities is not None:
@@ -433,6 +451,17 @@ class ControlBuilder:
             if is_classical_head
             else accelerator.unwrap_model(prepared.model)
         )
+        if control == RANDOM_TRUNK_CONTROL:
+            if prepared.random_trunk_model is None:
+                raise ValueError(
+                    "Cached random_trunk requires a fitted probe; pass the predict "
+                    "controls to TuneStep before prediction."
+                )
+            if prepared.random_trunk_seed != seed:
+                raise ValueError(
+                    "Cached random_trunk prediction seed must match its tuning seed."
+                )
+            trained_head = prepared.random_trunk_model
         needs_fresh_head = control in RANDOMIZED_HEAD_CONTROLS
         if needs_fresh_head and not isinstance(trained_head, EmbeddingProbeHead):
             raise ValueError(
@@ -445,10 +474,7 @@ class ControlBuilder:
 
         if control in RANDOMIZED_TRUNK_CONTROLS:
             trained_trunk = accelerator.unwrap_model(backend.trunk)
-            trunk = type(trained_trunk)(copy.deepcopy(trained_trunk.config)).to(
-                next(trained_trunk.parameters()).device
-            )
-            trunk.eval()
+            trunk = build_random_trunk(trained_trunk, seed)
         else:
             # "untrained"/"random_head": trunk unchanged, only the head
             # differs. "scrambled_sequences": trunk unchanged, only the
@@ -477,6 +503,7 @@ class ControlBuilder:
                 trained_head.num_labels,
                 workspace.task_type,
                 probe_hidden_size=trained_head.probe_hidden_size,
+                probe_hidden_depth=trained_head.probe_hidden_depth,
                 standardize_features=trained_head.standardize_features,
             ).to(accelerator.device)
             if trained_head.standardize_features:

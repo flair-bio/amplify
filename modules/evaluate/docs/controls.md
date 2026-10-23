@@ -37,15 +37,14 @@ steps.predict.controls → Predict: build each control's predictions
 are not retrained land near chance; how much signal `scrambled_sequences`
 keeps depends on the task.*
 
-None of the model controls are retrained, except in layerwise mode
-(see the notes below the table). They take the trained model and replace one
-part of it.
+`random_trunk` trains a separate probe in cached and layerwise runs.
+Other model controls replace weights or inputs without retraining.
 
 | Control | What changes | Retrained? | Question it answers |
 |---|---|---|---|
 | `untrained` | Pretrained checkpoint with a freshly initialized head | No | Did tuning help at all? |
 | `random_head` | Trained trunk, re-initialized head | No | Does the tuned head carry the signal? |
-| `random_trunk` | Re-initialized trunk, trained head | No (yes in layerwise mode) | Does the head depend on the trunk's learned features? |
+| `random_trunk` | Re-initialized trunk with its own fitted probe | Yes for cached/layerwise probes; no for live/native runs | What does pretraining add beyond the architecture? |
 | `random_both` | Trunk and head both re-initialized | No | Fully random-weight baseline |
 | `scrambled_sequences` | Trained model, residues shuffled within each sequence | — | Does the model use residue order, or only composition and length? |
 | `scrambled_labels` | Trained predictions scored against permuted labels | — | Is performance above chance for this label distribution? |
@@ -58,11 +57,24 @@ Details that change the interpretation:
 - **`untrained` vs. `random_head`:** with a frozen trunk (`tune_probe`) both
   mean pretrained trunk + random head, so they are redundant. They differ only
   in `finetune`, where `random_head` keeps the fine-tuned trunk.
+- **`random_trunk` with ordinary cached probes:** Tune independently selects a
+  fresh MLP, linear probe, or classical estimator on random-trunk train features
+  and validation labels using the same search space and budget. When final
+  refitting is enabled, a fresh probe and preprocessing are fit on random-trunk
+  train+validation features. Test features never enter selection or fitting.
+  Predict regenerates the same seeded random trunk and uses that fitted probe,
+  not the pretrained-feature probe's weights or scaler. Pass the requested
+  controls to `TuneStep.run` before prediction; a missing fitted probe is an
+  error. Checkpoints/settings use a separate `<variant>-random_trunk` workspace.
+  This adds a second search/refit when HPO is enabled.
 - **`random_trunk` in layerwise mode:** probes are retrained on a random trunk
-  with the same procedure. This is the stronger baseline, separating what
-  pretraining adds from what the architecture provides. `random_both` then
-  applies untrained heads to that random trunk. See
+  with the same layerwise procedure (not the ordinary cached HPO/refit path).
+  `random_both` applies untrained heads to that random trunk. See
   [Layerwise linear probes](../README.md#layerwise-linear-probes).
+- **`random_trunk` in live/native runs:** retains the fitted head and replaces
+  only trunk weights at inference. This is a weight-replacement ablation, not
+  a separately trained architecture baseline. Live/native control retraining
+  and refitting remain deferred.
 - **`scrambled_sequences`:** special tokens, padding, and each sequence's first
   residue stay in place, so length and composition are preserved.
 - **`scrambled_labels` permutes at the task's natural unit:**
@@ -83,14 +95,21 @@ Each task config ships a preset; override it with `steps.predict.controls`
 
 | Task type | Controls in the shipped task config |
 |---|---|
-| `sequence_classification` | `untrained`, `random_trunk`, `random_head`, `random_both`, `scrambled_labels`, `scrambled_sequences`, `majority_class` |
-| `sequence_multilabel_classification` | `untrained`, `random_trunk`, `random_head`, `random_both`, `scrambled_labels`, `scrambled_sequences` |
-| `sequence_regression` | `untrained`, `random_trunk`, `random_head`, `random_both`, `scrambled_labels`, `scrambled_sequences`, `train_mean` |
-| `token_classification` | `untrained`, `random_trunk`, `random_head`, `random_both`, `scrambled_labels` |
-| `contact_prediction` | `untrained`, `scrambled_labels`, `separation_prior` |
-| `categorical_jacobian` | `scrambled_labels`, `separation_prior` |
-| `pseudo_perplexity` | `random_both` |
-| `calibration` | `random_both` |
+| `sequence_classification` | `random_trunk`, `majority_class` |
+| `sequence_multilabel_classification` | `random_trunk` |
+| `sequence_regression` | `random_trunk`, `train_mean` |
+| `token_classification` | `random_trunk`, `majority_class` |
+| `contact_prediction` | `random_trunk`, `separation_prior` |
+| `categorical_jacobian` | `random_trunk`, `separation_prior` |
+| `pseudo_perplexity` | `random_trunk` |
+| `calibration` | `random_trunk` |
+
+`random_trunk` is the per-model default. Other controls remain available by
+explicit override. Model-independent baselines conceptually run once per
+dataset/split/protocol; shared execution across models is not implemented yet,
+so these presets still compute them per run. Composition, MMseqs k-NN,
+multilabel priors, and amino-acid-frequency baselines are not configured
+because they are not implemented.
 
 Config validation ([`utils/config_validation.py`](../src/utils/config_validation.py))
 rejects these combinations before any work starts:
@@ -111,8 +130,8 @@ Each control answers a different question, so read them together:
 |---|---|---|
 | `scrambled_labels`, `majority_class`, `train_mean`, `separation_prior` | Predictions beat the label or separation prior | The model has learned nothing usable for this task |
 | `scrambled_sequences` | The model uses residue order | The task may be solvable from composition and length alone |
-| `random_trunk` (layerwise) | Pretrained features beat a random trunk's features under the same probe | The architecture alone, not pretraining, explains the score |
-| `untrained`, `random_head`, `random_trunk` (standard), `random_both` | The trained weights are what produce the score | Something is wrong with tuning or loading; check the run |
+| `random_trunk` (cached/layerwise) | Pretrained features beat a separately fitted random-feature probe | The comparison does not establish a benefit from pretraining |
+| `untrained`, `random_head`, `random_trunk` (live/native), `random_both` | The trained weights are what produce the score | Something is wrong with tuning or loading; check the run |
 
 The last row is mainly a sanity check: a head never trained on random features,
 or a random head, usually lands near chance, so beating these is expected.

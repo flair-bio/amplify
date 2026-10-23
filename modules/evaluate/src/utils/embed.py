@@ -684,14 +684,15 @@ def extract_embeddings(
 
 @dataclass(frozen=True)
 class EmbeddingBackend:
-    """Everything needed to re-embed the test split under a perturbed trunk
-    or scrambled input, for the handful of control conditions
+    """Everything needed to re-embed development/test data under a perturbed
+    trunk or scrambled input, for the handful of control conditions
     (:mod:`~modules.evaluate.src.utils.controls`) that a pooled-embedding-only
     ``test_dataloader`` can no longer support once
     ``steps.prepare.embedding_cache.enabled=True`` swaps it in.
 
     This is the single place ``PreparedArtifacts`` exposes embedding-cache
-    internals: ``TuneStep``/``ScoreStep`` never touch it, and ``PredictStep``
+    internals: ``TuneStep`` uses the retained development loaders to train
+    random-trunk probes, and ``PredictStep``
     only touches it to decide whether sequences need decoding separately
     (``token_test_dataloader``) -- every other embedding-cache-specific
     detail (trunk, pooling, layers, dtype, hidden size) stays behind this one
@@ -708,13 +709,18 @@ class EmbeddingBackend:
     normalize_before_pooling: bool = False
     test_cache_key: str | None = None
     cache: EmbeddingCache | None = None
-    cache_policy: str = "reuse"
+    cache_policy: Literal["reuse", "refresh", "off"] = "reuse"
     model_id: str | None = None
     dataset_id: str | None = None
     max_length: int | None = None
     test_random_truncate: bool = False
     test_dataset_fingerprint: str | None = None
     length_grouped_sampling: bool = False
+    token_train_dataloader: DataLoader | None = None
+    token_val_dataloader: DataLoader | None = None
+    train_random_truncate: bool = True
+    validation_random_truncate: bool = False
+    extraction_batch_size: int | None = None
 
     def test_embedding_key(
         self,
@@ -758,7 +764,7 @@ class EmbeddingDataset(Dataset):
     """Wraps a cached ``(N, H)`` embedding tensor + aligned ids/labels."""
 
     def __init__(
-        self, embeddings: torch.Tensor, ids: list[Any], labels: list[Any]
+        self, embeddings: torch.Tensor, ids: list[Any], labels: list[Any] | torch.Tensor
     ) -> None:
         assert len(embeddings) == len(ids) == len(labels)
         self.embeddings = embeddings

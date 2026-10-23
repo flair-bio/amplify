@@ -75,13 +75,13 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
         config.workspace.num_labels,
         config.workspace.dataset_name,
     )
-    if task.name in {"pseudo_perplexity", "calibration"}:
-        if steps.mode != "evaluate_as_is":
-            raise ValueError(
-                f"task_type='{task.name}' requires steps.mode='evaluate_as_is'."
-            )
-        if "controls" not in steps.predict.model_fields_set:
-            steps.predict.controls = []
+    if (
+        task.name in {"pseudo_perplexity", "calibration"}
+        and steps.mode != "evaluate_as_is"
+    ):
+        raise ValueError(
+            f"task_type='{task.name}' requires steps.mode='evaluate_as_is'."
+        )
     if config.workspace.task_type == "categorical_jacobian" and steps.mode != (
         "evaluate_as_is"
     ):
@@ -152,6 +152,7 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
         search_config.enabled
         and (
             search_config.search_space.hidden_size is not None
+            or search_config.search_space.hidden_depth is not None
             or search_config.search_space.batch_size is not None
         )
         and (
@@ -164,10 +165,23 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
         dimension = (
             "hidden_size"
             if search_config.search_space.hidden_size is not None
-            else "batch_size"
+            else (
+                "hidden_depth"
+                if search_config.search_space.hidden_depth is not None
+                else "batch_size"
+            )
         )
         raise ValueError(
             f"{dimension} search requires a cached MLP probe in tune_probe mode."
+        )
+    if steps.tune.refit_on_train_validation and (
+        steps.mode != "tune_probe"
+        or not steps.prepare.embedding_cache.enabled
+        or steps.layerwise.enabled
+    ):
+        raise ValueError(
+            "refit_on_train_validation requires an ordinary cached probe "
+            "in tune_probe mode; live/native and layerwise refit are not supported."
         )
     if search_config.enabled and search_config.direction == "maximize":
         # An explicit 'maximize' for a lower-is-better metric would select the

@@ -8,6 +8,7 @@ import torch
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
+from modules.evaluate.src.model import heads
 from modules.evaluate.src.model.heads import EmbeddingProbeHead, HeadConfig
 from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
 from modules.evaluate.src.steps.tune import (
@@ -28,6 +29,29 @@ _FEATURES = torch.tensor(
 def _loader(features, labels):
     return DataLoader(
         EmbeddingDataset(features, list(range(len(features))), labels), batch_size=2
+    )
+
+
+def test_cached_probe_batches_transfer_only_each_requested_batch():
+    features = torch.arange(20, dtype=torch.float32).reshape(5, 4)
+    labels = torch.arange(5)
+    loader = _loader(features, labels)
+    step = TuneStep(TuneConfig())
+
+    split = step._cached_embedding_split(loader)
+
+    assert split is not None
+    assert split[0].data_ptr() == features.data_ptr()
+    batches = list(
+        step._cached_batches(
+            split, batch_size=2, shuffle=False, device=torch.device("cpu")
+        )
+    )
+    torch.testing.assert_close(
+        torch.cat([batch["inputs_embeds"] for batch in batches]), features
+    )
+    torch.testing.assert_close(
+        torch.cat([batch["labels"] for batch in batches]), labels
     )
 
 
@@ -162,7 +186,8 @@ def test_tuning_standardizes_training_features_and_persists_policy(
         )
 
 
-def test_token_standardization_ignores_unlabeled_positions(tmp_path):
+def test_token_standardization_ignores_unlabeled_positions(tmp_path, monkeypatch):
+    monkeypatch.setattr(heads, "_FEATURE_STANDARDIZATION_CHUNK_SIZE", 2)
     features = torch.cat([torch.full((1, 3), 1e9), _FEATURES])
     labels = torch.tensor([-100, 0, 1, 0, 1])
     prepared = PreparedArtifacts(

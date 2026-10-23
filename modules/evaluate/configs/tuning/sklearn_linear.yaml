@@ -9,6 +9,7 @@ steps:
       pooling: mean
       layers: [-1]
   tune:
+    refit_on_train_validation: true
     head:
       head_type: sklearn_linear
       hyperparameters:
@@ -19,3 +20,7 @@ steps:
     hyperparameter_search:
       enabled: true
       n_trials: 4
+      search_space:
+        hidden_size: null
+        hidden_depth: null
+        batch_size: null

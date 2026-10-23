@@ -3,6 +3,12 @@ workspace:
 
 steps:
   mode: evaluate_as_is
+  tune:
+    hyperparameter_search:
+      enabled: false
+    refit_on_train_validation: false
+  score:
+    metrics: [calibration] # 100 x mean per-position exp(-KL)
   prepare:
     # The handler cuts its own 512-residue window centred on each scored
     # position, so the dataloader must keep full sequences (longest ~7k).
@@ -10,4 +16,4 @@ steps:
     embedding_cache:
       enabled: false
   predict:
-    controls: ["random_both"]
+    controls: [random_trunk]

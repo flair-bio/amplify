@@ -488,6 +488,17 @@ class PrepareStep:
             "embedding_backend": EmbeddingBackend(
                 trunk=model,
                 token_test_dataloader=token_test_dataloader,
+                token_train_dataloader=train_dataloader,
+                token_val_dataloader=val_dataloader,
+                train_random_truncate=self.config.random_truncate_by_split.get(
+                    "train", True
+                ),
+                validation_random_truncate=self.config.random_truncate_by_split.get(
+                    "validation", False
+                ),
+                extraction_batch_size=None
+                if self.config.packed
+                else self.config.embedding_batch_size,
                 pooling=cache_config.pooling,
                 layers=layers,
                 dtype=cache_config.dtype,
