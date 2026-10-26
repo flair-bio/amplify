@@ -683,19 +683,30 @@ class TestExtractEmbeddings:
         "label,main",
         [(None, True), ("Control extraction", True), ("Control extraction", False)],
     )
-    def test_extraction_progress_is_scoped_and_throttled(
-        self, monkeypatch, caplog, label, main
+    def test_extraction_progress_bar_is_scoped_to_main_process(
+        self, monkeypatch, label, main
     ):
         from modules.evaluate.src.utils import embed
 
-        now = [0.0]
-        monkeypatch.setattr(embed, "monotonic", lambda: now[0])
+        progress_options = []
+
+        def track_progress(iterable, **kwargs):
+            progress_options.append(kwargs)
+
+            class Progress:
+                def __iter__(self):
+                    return iter(iterable)
+
+                def set_postfix(self, **kwargs):
+                    pass
+
+            return Progress()
 
         class Trunk(nn.Module):
             def forward(self, input_ids, **kwargs):
-                now[0] += 4.0
                 return SimpleNamespace(last_hidden_state=input_ids.unsqueeze(-1).float())
 
+        monkeypatch.setattr(embed, "tqdm", track_progress)
         accelerator = SimpleNamespace(
             device=torch.device("cpu"), num_processes=1, is_main_process=main,
         )
@@ -708,20 +719,25 @@ class TestExtractEmbeddings:
             }
             for i in range(5)
         ]
-        with caplog.at_level("INFO"):
-            embeddings, ids, labels, _ = extract_embeddings(
-                Trunk(), iter(batches), accelerator, "mean", "float32",
-                progress_label=label,
-            )
+        embeddings, ids, labels, _ = extract_embeddings(
+            Trunk(), batches, accelerator, "mean", "float32",
+            progress_label=label,
+        )
         assert ids == list(range(5))
         assert labels.tolist() == [0] * 5
         torch.testing.assert_close(embeddings, torch.full((5, 1), 3.5))
         if label and main:
-            assert caplog.messages == [
-                "Control extraction: 3 batches completed (3 rows, 12.0s elapsed)"
+            assert progress_options == [
+                {
+                    "desc": label,
+                    "total": 5,
+                    "unit": "batch",
+                    "mininterval": 1.0,
+                    "dynamic_ncols": True,
+                }
             ]
         else:
-            assert not caplog.records
+            assert not progress_options
 
     def test_packed_sequence_pooling_and_token_selection(self):
         class Trunk(nn.Module):

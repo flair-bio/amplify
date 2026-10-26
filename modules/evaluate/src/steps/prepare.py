@@ -136,7 +136,7 @@ class PrepareConfig(BaseModel):
         default_factory=DatasetSplitConfig,
         description=(
             "Named dataset split method and source split names to map onto "
-            "the pipeline's train/validation/test roles."
+            "the pipeline's train/validation/test roles and final-refit-only data."
         ),
     )
     length_grouped_sampling: bool = Field(
@@ -240,19 +240,38 @@ class PrepareStep:
         # Build the appropriate collator and dataloaders for the task type
         logger.info("Building collator and dataloaders...")
         collator = self._build_collator(tokenizer, workspace.task_type)
+        dataloader_config = DataLoaderConfig(
+            batch_size=self.config.batch_size,
+            max_tokens_per_batch=self.config.max_tokens_per_batch,
+            num_workers=self.config.dataloader_num_workers,
+            pin_memory=self.config.dataloader_pin_memory,
+            persistent_workers=self.config.dataloader_persistent_workers,
+            seed=seed,
+            length_grouped_sampling=self.config.length_grouped_sampling,
+        )
         train_dataloader, val_dataloader, test_dataloader = build_dataloaders(
             dataset=dataset,
             collator=collator,
-            config=DataLoaderConfig(
-                batch_size=self.config.batch_size,
-                max_tokens_per_batch=self.config.max_tokens_per_batch,
-                num_workers=self.config.dataloader_num_workers,
-                pin_memory=self.config.dataloader_pin_memory,
-                persistent_workers=self.config.dataloader_persistent_workers,
-                seed=seed,
-                length_grouped_sampling=self.config.length_grouped_sampling,
-            ),
-        )  # We end up with a dataloader of [tokenized_sequence]-[label] for each split
+            config=dataloader_config,
+        )
+        refit_token_dataloaders = {}
+        for split in self.config.split.refit_additional_splits:
+            if split not in dataset:
+                raise ValueError(
+                    f"Configured final-refit source split '{split}' was not loaded. "
+                    f"Available splits: {sorted(dataset.keys())}."
+                )
+            split_dataset = DatasetDict({"train": dataset[split]})
+            refit_loader, _, _ = build_dataloaders(
+                dataset=split_dataset,
+                collator=collator,
+                config=dataloader_config,
+            )
+            if refit_loader is None:
+                raise ValueError(
+                    f"Configured final-refit source split '{split}' is empty."
+                )
+            refit_token_dataloaders[split] = accelerator.prepare(refit_loader)
 
         logger.info(
             "Loading model '%s' for task '%s'...", model_id, workspace.task_type
@@ -334,6 +353,7 @@ class PrepareStep:
                 train_dataloader,
                 val_dataloader,
                 test_dataloader,
+                refit_token_dataloaders,
                 raw_test_dataloader,
                 accelerator,
                 seed,
@@ -368,6 +388,11 @@ class PrepareStep:
             val_dataloader=val_dataloader,
             test_dataloader=test_dataloader,
             layerwise_token_dataloaders=token_dataloaders,
+            refit_token_dataloaders=refit_token_dataloaders,
+            refit_random_truncate_by_split={
+                split: self.config.random_truncate_by_split.get(split, False)
+                for split in refit_token_dataloaders
+            },
             split=self.config.split.name,
             cross_validation=cross_validation,
             **embedding_extras,
@@ -574,6 +599,7 @@ class PrepareStep:
         train_dataloader: Any,
         val_dataloader: Any,
         test_dataloader: Any,
+        refit_token_dataloaders: dict[str, Any],
         raw_test_dataloader: Any,
         accelerator: Accelerator,
         seed: int,
@@ -633,6 +659,13 @@ class PrepareStep:
                     test_dataloader,
                     self.config.random_truncate_by_split.get("test", False),
                 ),
+                **{
+                    split: (
+                        dataloader,
+                        self.config.random_truncate_by_split.get(split, False),
+                    )
+                    for split, dataloader in refit_token_dataloaders.items()
+                },
             },
             accelerator=accelerator,
             cache=cache,
@@ -656,6 +689,14 @@ class PrepareStep:
             embedding_size, num_labels, workspace.task_type
         )
         probe_model = probe_model.to(accelerator.device)
+        refit_embedding_dataloaders = {}
+        for split in refit_token_dataloaders:
+            dataloader = embedding_dataloaders[split]
+            if dataloader is None:
+                raise ValueError(
+                    f"Could not build embeddings for final-refit split '{split}'."
+                )
+            refit_embedding_dataloaders[split] = dataloader
         embedding_extras = {
             "embedding_backend": EmbeddingBackend(
                 trunk=model,
@@ -688,7 +729,8 @@ class PrepareStep:
                 test_dataset_fingerprint=getattr(
                     token_test_dataloader.dataset, "_fingerprint", None
                 ),
-            )
+            ),
+            "refit_dataloaders": refit_embedding_dataloaders,
         }
         return (
             probe_model,

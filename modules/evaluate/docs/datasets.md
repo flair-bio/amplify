@@ -103,6 +103,7 @@ be selected.
 |---|---|---|---|
 | Biomap-research | `fold_prediction`, `localization_prediction` | `sequence_classification` | `f1`, `accuracy`, `mcc`, `roc_auc` |
 | UESolDS | `solubility_prediction` | `sequence_classification` | Macro-F1 |
+| HMD-ARG | `antibiotic_resistance` | `sequence_classification` | Macro-F1 over 14 drug classes |
 | FLIP / Meltome Atlas | `meltome_mixed`, `meltome_human` | `sequence_regression` | `spearmanr` |
 | Biomap-research | `stability_prediction` | `sequence_regression` | `mse`, `mae`, `r2`, `pearsonr`, `spearmanr` |
 | Reprocessed BioMap SSP | `ssp_q3`, `ssp_q8` | `token_classification` | Macro-F1 |
@@ -132,7 +133,7 @@ dataset is then described the same way:
 - **Run:** the overlay YAML, the task YAML to pair it with, and the
   published `flair-bio/` Hub artifact.
 
-**Target sizes** match the published artifacts as checked on 2026-10-08.
+**Target sizes** reflect the published artifacts when each entry was added.
 Multi-label widths come from `label_vocabulary.json`; scalar and per-residue
 class counts are taken across the canonical train, validation, and test
 splits. Recheck them when hosted artifacts change.
@@ -207,6 +208,30 @@ clump into insoluble aggregates?
 - **Run:** [`solubility_prediction.yaml`](../configs/datasets/solubility_prediction.yaml)
   with `sequence_classification` ·
   [Hub](https://huggingface.co/datasets/flair-bio/solubility_uesolds_original)
+
+##### `antibiotic_resistance`
+
+**Question:** which antibiotic drug class is associated with this protein?
+
+- **Readout:** one of 14 mutually exclusive drug classes from HMD-ARG. This
+  artifact is single-label classification, not resistant-versus-susceptible
+  detection or multilabel prediction; `multidrug` is one class.
+- **Provenance:** standardized from ProtAlign-ARG GraphPart partitions and the
+  ARGs repository, as documented in the dataset card. The card pins the
+  upstream revisions.
+- **Splits:** 12,844 train, 984 validation, and 2,603 test proteins.
+  `tuning_excluded` contains 490 additional proteins and is used only in the
+  final refit, after hyperparameter selection on train and validation.
+- **Metric:** Macro-F1 over the fixed 14-class vocabulary. Validation has no
+  sulfonamide examples; absent classes contribute zero F1.
+- **Limitation:** class balance is highly skewed; test contains only two
+  rifampin and three bacitracin proteins.
+- **Labels:** aminoglycoside, bacitracin, beta-lactam, chloramphenicol,
+  fosfomycin, glycopeptide, macrolide-lincosamide-streptogramin, multidrug,
+  polymyxin, quinolone, rifampin, sulfonamide, tetracycline, and trimethoprim.
+- **Run:** [`antibiotic_resistance.yaml`](../configs/datasets/antibiotic_resistance.yaml)
+  with `sequence_classification` ·
+  [Hub](https://huggingface.co/datasets/flair-bio/amr_hmd_arg)
 
 #### Per protein: one number
 

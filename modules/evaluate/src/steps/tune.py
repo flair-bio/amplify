@@ -228,9 +228,10 @@ class TuneConfig(BaseModel):
         False,
         description=(
             "After validation selection, initialize a fresh cached probe and fit "
-            "on train+validation for the selected full epoch budget, without "
-            "early stopping. Requires nonempty train/validation embedding "
-            "datasets; live/native and layerwise probes are not yet supported."
+            "on train+validation plus any configured final-refit-only splits "
+            "for the selected full epoch budget, without early stopping. "
+            "Requires nonempty train/validation embedding datasets; live/native "
+            "and layerwise probes are not yet supported."
         ),
     )
 
@@ -333,6 +334,21 @@ class TuneStep:
                     raise ValueError(
                         "refit_on_train_validation requires nonempty train and "
                         f"validation embedding datasets; missing or empty {name} split."
+                    )
+            missing_refit_splits = set(prepared.refit_token_dataloaders) - set(
+                prepared.refit_dataloaders
+            )
+            if missing_refit_splits:
+                raise ValueError(
+                    "Final-refit splits were not cached as embeddings: "
+                    f"{sorted(missing_refit_splits)}."
+                )
+            for name, loader in prepared.refit_dataloaders.items():
+                dataset = find_embedding_dataset(loader)
+                if dataset is None or not len(dataset):
+                    raise ValueError(
+                        "refit_on_train_validation requires nonempty final-refit "
+                        f"embedding datasets; missing or empty {name} split."
                     )
         if isinstance(prepared.model, LayerwiseProbeModel):
             return self._run_layerwise(workspace, prepared, accelerator, seed, controls)
@@ -466,18 +482,26 @@ class TuneStep:
         logger.info(
             "Selecting a separate random-trunk probe with the configured tuning protocol."
         )
+        random_trunk_splits = {
+            "train": (
+                backend.token_train_dataloader,
+                backend.train_random_truncate,
+            ),
+            "validation": (
+                backend.token_val_dataloader,
+                backend.validation_random_truncate,
+            ),
+            **{
+                name: (
+                    loader,
+                    prepared.refit_random_truncate_by_split.get(name, False),
+                )
+                for name, loader in prepared.refit_token_dataloaders.items()
+            },
+        }
         loaders = build_embedding_dataloaders(
             model=trunk,
-            splits={
-                "train": (
-                    backend.token_train_dataloader,
-                    backend.train_random_truncate,
-                ),
-                "validation": (
-                    backend.token_val_dataloader,
-                    backend.validation_random_truncate,
-                ),
-            },
+            splits=random_trunk_splits,
             accelerator=accelerator,
             cache=backend.cache,
             cache_config=EmbeddingCacheConfig(
@@ -501,6 +525,15 @@ class TuneStep:
             length_grouped_sampling=backend.length_grouped_sampling,
         )
         torch.manual_seed(seed)
+        random_refit_dataloaders = {}
+        for name in prepared.refit_token_dataloaders:
+            loader = loaders[name]
+            if loader is None:
+                raise ValueError(
+                    f"Could not build random-trunk embeddings for final-refit split "
+                    f"'{name}'."
+                )
+            random_refit_dataloaders[name] = loader
         baseline = replace(
             prepared,
             model=EmbeddingProbeHead(
@@ -513,6 +546,7 @@ class TuneStep:
             train_dataloader=loaders["train"],
             val_dataloader=loaders["validation"],
             test_dataloader=None,
+            refit_dataloaders=random_refit_dataloaders,
             embedding_backend=None,
             random_trunk_model=None,
             random_trunk_seed=None,
@@ -541,12 +575,18 @@ class TuneStep:
         selected = accelerator.unwrap_model(prepared.model)
         assert train is not None and validation is not None
         assert isinstance(selected, EmbeddingProbeHead)
+        development_splits = [train, validation]
+        for name, loader in prepared.refit_dataloaders.items():
+            extra = find_embedding_dataset(loader)
+            if extra is None:
+                raise ValueError(
+                    f"Final-refit split '{name}' has no cached embeddings."
+                )
+            development_splits.append(extra)
         development = EmbeddingDataset(
-            torch.cat([train.embeddings, validation.embeddings]),
-            list(train.ids) + list(validation.ids),
-            torch.cat(
-                [torch.as_tensor(train.labels), torch.as_tensor(validation.labels)]
-            ),
+            torch.cat([split.embeddings for split in development_splits]),
+            [identifier for split in development_splits for identifier in split.ids],
+            torch.cat([torch.as_tensor(split.labels) for split in development_splits]),
         )
         torch.manual_seed(seed)
         fresh = EmbeddingProbeHead(
@@ -583,8 +623,9 @@ class TuneStep:
             test_dataloader=None,
         )
         logger.info(
-            "Refitting fresh cached probe on %d train+validation rows for %d epochs.",
+            "Refitting fresh cached probe on %d rows from %s for %d epochs.",
             len(development),
+            self._final_fit_split(prepared),
             hparams["max_epochs"],
         )
         trainer = TuneStep(
@@ -1115,16 +1156,23 @@ class TuneStep:
 
         if self.config.refit_on_train_validation:
             assert val_X is not None and val_y is not None
+            final_features = [train_X, val_X]
+            final_labels = [train_y, val_y]
+            for loader in prepared.refit_dataloaders.values():
+                extra_X, extra_y = self._gather_embeddings(loader, accelerator)
+                final_features.append(extra_X)
+                final_labels.append(extra_y)
             best_estimator = build_estimator(
                 head_config.head_type, workspace.task_type, best_hparams, seed=seed
             )
             best_estimator.fit(
-                np.concatenate([train_X, val_X]), np.concatenate([train_y, val_y])
+                np.concatenate(final_features), np.concatenate(final_labels)
             )
             logger.info(
-                "Refitted fresh %s estimator on %d train+validation rows.",
+                "Refitted fresh %s estimator on %d rows from %s.",
                 head_config.head_type,
-                len(train_y) + len(val_y),
+                sum(len(labels) for labels in final_labels),
+                self._final_fit_split(prepared),
             )
         prepared.model = best_estimator
 
@@ -1137,6 +1185,7 @@ class TuneStep:
                 workspace.model_path / "tune_config.json",
                 seed,
                 best_hparams,
+                final_fit_split=self._final_fit_split(prepared),
             )
             logger.info(
                 "Saved best %s head to %s", head_config.head_type, workspace.model_path
@@ -1198,6 +1247,7 @@ class TuneStep:
                     workspace.model_path / "probe_head_config.json",
                     seed,
                     best_hparams,
+                    final_fit_split=self._final_fit_split(prepared),
                     embedding_size=unwrapped_model.embedding_size,
                     probe_hidden_size=unwrapped_model.probe_hidden_size,
                     probe_hidden_depth=unwrapped_model.probe_hidden_depth,
@@ -1225,6 +1275,7 @@ class TuneStep:
                 workspace.model_path / "tune_config.json",
                 seed,
                 best_hparams,
+                final_fit_split=self._final_fit_split(prepared),
             )
             logger.info("Saved best model and tokenizer to %s", workspace.model_path)
         accelerator.wait_for_everyone()
@@ -1234,6 +1285,8 @@ class TuneStep:
         path: Path,
         seed: int,
         best_hyperparameters: dict[str, Any],
+        *,
+        final_fit_split: str,
         **extra: Any,
     ) -> None:
         write_settings_json(
@@ -1241,11 +1294,14 @@ class TuneStep:
             seed,
             self.config.model_dump(mode="json"),
             best_hyperparameters=best_hyperparameters,
-            final_fit_split="train+validation"
-            if self.config.refit_on_train_validation
-            else "train",
+            final_fit_split=final_fit_split,
             **extra,
         )
+
+    def _final_fit_split(self, prepared: PreparedArtifacts) -> str:
+        if not self.config.refit_on_train_validation:
+            return "train"
+        return "+".join(["train", "validation", *prepared.refit_dataloaders.keys()])
 
     def _resolve_metric_name(self, workspace: EvaluationWorkspace) -> str:
         return (

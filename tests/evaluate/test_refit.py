@@ -209,6 +209,70 @@ def test_classical_refit_rebuilds_estimator_and_scaler_on_development_data(
     assert result.model[-1].C == metadata["best_hyperparameters"]["C"]
 
 
+def test_final_refit_includes_additional_split_after_hyperparameter_selection(
+    monkeypatch, tmp_path
+):
+    prepared = prepared_splits()
+    excluded = DataLoader(
+        EmbeddingDataset(
+            torch.tensor([[20.0, 22.0]]),
+            ["tuning-excluded"],
+            [1],
+        ),
+        batch_size=2,
+    )
+    prepared.refit_dataloaders = {"tuning_excluded": excluded}
+    prepared.refit_token_dataloaders = {"tuning_excluded": excluded}
+    original_train = TuneStep._train
+    selection_sizes = []
+    refit_ids = []
+
+    def record_train(self, workspace, artifacts, accelerator, hparams, **kwargs):
+        train = artifacts.train_dataloader.dataset
+        if artifacts.val_dataloader is not None:
+            selection_sizes.append(len(train))
+            assert "tuning-excluded" not in train.ids
+            return 0.5
+        refit_ids.extend(train.ids)
+        return original_train(self, workspace, artifacts, accelerator, hparams, **kwargs)
+
+    monkeypatch.setattr(TuneStep, "_train", record_train)
+    config = TuneConfig(
+        head=HeadConfig(head_type="mlp", hidden_size=3),
+        refit_on_train_validation=True,
+        max_epochs=1,
+        batch_size=2,
+        save_best_model=False,
+        hyperparameter_search=HyperparameterSearchConfig(
+            enabled=True,
+            search_pattern="grid",
+            search_space=HyperparameterSearchSpaceConfig(
+                learning_rate=[1e-3],
+                weight_decay=[0.0],
+                max_epochs=[1],
+            ),
+        ),
+    )
+
+    TuneStep(config).run(
+        _make_workspace(tmp_path, "sequence_classification"),
+        prepared,
+        seed=42,
+        accelerator=Accelerator(cpu=True),
+        controls=[],
+    )
+
+    assert selection_sizes == [len(TRAIN)]
+    assert refit_ids == [
+        "train-0",
+        "train-1",
+        "train-2",
+        "val-0",
+        "val-1",
+        "tuning-excluded",
+    ]
+
+
 @pytest.mark.parametrize(
     "task_type",
     [

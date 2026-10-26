@@ -36,6 +36,9 @@ class PreparedArtifacts:
     train_dataloader: DataLoader | None
     val_dataloader: DataLoader | None
     test_dataloader: DataLoader | None
+    refit_dataloaders: dict[str, DataLoader] = field(default_factory=dict)
+    refit_token_dataloaders: dict[str, DataLoader] = field(default_factory=dict)
+    refit_random_truncate_by_split: dict[str, bool] = field(default_factory=dict)
 
     # Populated only when steps.prepare.embedding_cache.enabled=True, since
     # ``test_dataloader`` then yields pooled ``inputs_embeds`` batches instead

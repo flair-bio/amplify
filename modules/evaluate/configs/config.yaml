@@ -59,6 +59,7 @@ steps:
       name: default # any other name loads train_<name>/validation_<name>/test_<name>, e.g. random, stratified, cluster
       # Set train/validation/test explicitly only for splits that don't follow that convention;
       # validation: null holds out validation_fraction of train instead.
+      refit_additional_splits: [] # excluded from selection; appended only to the final train+validation refit
     validation_fraction: 0.1 # share of train held out as validation when the validation split is null or missing from the dataset
     random_truncate_by_split: # random crop training sequences; keep evaluation deterministic
       train: true
