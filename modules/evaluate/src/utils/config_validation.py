@@ -183,6 +183,14 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
             "refit_on_train_validation requires an ordinary cached probe "
             "in tune_probe mode; live/native and layerwise refit are not supported."
         )
+    if (
+        steps.prepare.split.refit_additional_splits
+        and not steps.tune.refit_on_train_validation
+    ):
+        raise ValueError(
+            "steps.prepare.split.refit_additional_splits requires "
+            "steps.tune.refit_on_train_validation=true."
+        )
     if search_config.enabled and search_config.direction == "maximize":
         # An explicit 'maximize' for a lower-is-better metric would select the
         # WORST trial as "best" with no useful result.

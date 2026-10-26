@@ -12,7 +12,10 @@ from pydantic import (
     model_validator,
 )
 
-from modules.evaluate.src.dataset.dataloader import DEFAULT_SPLIT_NAME
+from modules.evaluate.src.dataset.dataloader import (
+    DEFAULT_SPLIT_NAME,
+    ExternalTestSetConfig,
+)
 from modules.evaluate.src.dataset.folds import CrossValidationConfig
 from modules.evaluate.src.dataset.workspace import EvaluationWorkspaceConfig
 from modules.evaluate.src.steps.predict import PredictConfig
@@ -95,6 +98,15 @@ class EvaluationConfig(BaseModel):
         default_factory=CrossValidationConfig
     )
     steps: StepsConfig = Field(default_factory=StepsConfig)
+    # Test-only datasets scored with the model fitted on the workspace dataset.
+    external_test_sets: list[ExternalTestSetConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_external_test_sets(self) -> EvaluationConfig:
+        names = [external.name for external in self.external_test_sets]
+        if len(names) != len(set(names)):
+            raise ValueError("external_test_sets names must be unique.")
+        return self
 
     @property
     def variant(self) -> str:

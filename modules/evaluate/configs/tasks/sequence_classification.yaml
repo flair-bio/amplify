@@ -8,6 +8,6 @@ steps:
       direction: maximize
   score:
     metrics: [f1]
-    metric_aggregation: macro # equal weight per evaluated class; fixed vocabulary inclusion is pending
+    metric_aggregation: macro # equal weight across the configured class vocabulary, including absent classes
   predict:
     controls: [random_trunk, majority_class]

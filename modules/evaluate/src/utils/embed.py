@@ -31,7 +31,6 @@ import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from time import monotonic
 from typing import Any, Callable, Literal, Sequence
 
 import torch
@@ -41,6 +40,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 
 from modules.evaluate.src.dataset.collator import input_id_rows, unpack_packed
 from modules.evaluate.src.dataset.dataloader import LengthGroupedSampler, token_lengths
@@ -510,8 +510,24 @@ def extract_embeddings(
     embeddings: torch.Tensor | None = None
     embeddings_chunks: list[torch.Tensor] = []
     offset = 0
-    started = last_log = monotonic()
-    for batch_idx, batch in enumerate(dataloader, 1):
+    progress = None
+    if progress_label and accelerator.is_main_process:
+        try:
+            total_batches = len(dataloader)
+        except (AttributeError, TypeError, ValueError):
+            total_batches = None
+        progress = tqdm(
+            dataloader,
+            desc=progress_label,
+            total=total_batches,
+            unit="batch",
+            mininterval=1.0,
+            dynamic_ncols=True,
+        )
+        batches = progress
+    else:
+        batches = dataloader
+    for batch_idx, batch in enumerate(batches, 1):
         batch = dict(batch)
         ids = batch.pop("id", None)
         labels = batch.pop("labels")
@@ -655,17 +671,8 @@ def extract_embeddings(
                 all_ids.extend(ids[: pooled.shape[0]])
         if is_ragged:
             example_offset += valid.shape[0]
-        if progress_label and accelerator.is_main_process:
-            now = monotonic()
-            if now - last_log >= 10:
-                logger.info(
-                    "%s: %d batches completed (%d rows, %.1fs elapsed)",
-                    progress_label,
-                    batch_idx,
-                    len(all_labels),
-                    now - started,
-                )
-                last_log = now
+        if progress is not None:
+            progress.set_postfix(rows=len(all_labels), refresh=False)
 
     if embeddings is None:
         embeddings = (
@@ -955,6 +962,7 @@ def build_embedding_dataloaders(
                 is_ragged=is_ragged,
                 autocast_dtype=AUTOCAST_DTYPES[cache_config.autocast_dtype],
                 normalize_before_pooling=cache_config.normalize_before_pooling,
+                progress_label=f"Extracting '{split}' embeddings",
             )
             if cacheable and accelerator.is_main_process:
                 if cache.fits_budget(

@@ -22,6 +22,7 @@ configs live in [`configs/dataset_sourcing/`](../configs/dataset_sourcing/).
 | What do trunk, head, variant, and control mean? | [Glossary](../README.md#glossary) |
 | Which datasets can I use with a given task? | [Datasets by task](datasets.md#datasets-by-task) |
 | Which config overlays do I combine, and how do I run many models? | [Config files](../README.md#config-files), [Running many combinations](../README.md#running-many-combinations) |
+| How do I score a fitted model on another test set? | [External test sets](../README.md#external-test-sets) |
 | Where are my results, and how do I compare models? | [Output disk layout](../README.md#output-disk-layout), [Reading results](../README.md#reading-results) |
 | Did the model learn anything beyond a baseline? | [Interpreting controls](controls.md#interpreting-results) |
 | Which layer carries the signal? | [Layerwise linear probes](../README.md#layerwise-linear-probes) |

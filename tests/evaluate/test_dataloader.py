@@ -129,6 +129,23 @@ class TestSelectDatasetSplits:
         assert result["validation"] is raw["validation_low_mutation"]
         assert result["test"] is raw["test_high_mutation"]
 
+    def test_preserves_only_configured_final_refit_splits(self):
+        raw = build_raw_dataset_dict("sequence_classification")
+        raw["tuning_excluded"] = raw["train"].select([0])
+
+        result = select_dataset_splits(
+            raw,
+            DatasetSplitConfig(refit_additional_splits=["tuning_excluded"]),
+        )
+
+        assert set(result) == {
+            "train",
+            "validation",
+            "test",
+            "tuning_excluded",
+        }
+        assert result["tuning_excluded"] is raw["tuning_excluded"]
+
     def test_rejects_missing_configured_source_split(self):
         raw = build_raw_dataset_dict("sequence_classification")
         with pytest.raises(ValueError, match="test_at_30_identity"):
@@ -141,6 +158,10 @@ class TestSelectDatasetSplits:
                     test="test_at_30_identity",
                 ),
             )
+
+    def test_rejects_final_refit_split_that_repeats_a_role(self):
+        with pytest.raises(ValueError, match="must not repeat"):
+            DatasetSplitConfig(refit_additional_splits=["test"])
 
     @pytest.mark.parametrize("method", ["random", "stratified", "cluster"])
     def test_derives_suffixed_split_names_from_split_name(self, method):

@@ -42,6 +42,24 @@ _DEFAULT_VALIDATION_FRACTION = 0.1
 DEFAULT_SPLIT_NAME = "default"
 
 
+class ExternalTestSetConfig(BaseModel):
+    """A test-only dataset scored with the model fitted on the main dataset.
+
+    It is never used for training, tuning, or model selection. Its labels must
+    follow the main dataset's label contract (column names and class indices).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        ...,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+        description="Filesystem-safe label used for this test set's outputs.",
+    )
+    dataset_repo_id: str = Field(..., min_length=1)
+    split: str = Field("test", min_length=1)
+
+
 class DatasetSplitConfig(BaseModel):
     """Map dataset-specific split names onto evaluation pipeline roles.
 
@@ -60,15 +78,36 @@ class DatasetSplitConfig(BaseModel):
     train: str = "train"
     validation: str | None = "validation"
     test: str = "test"
+    refit_additional_splits: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Source splits excluded from selection and appended only to the "
+            "final train+validation refit."
+        ),
+    )
 
     @model_validator(mode="after")
     def _derive_split_names(self) -> DatasetSplitConfig:
         """Suffix each role not set explicitly with a non-default split name."""
-        if self.name == DEFAULT_SPLIT_NAME:
-            return self
-        for role in ("train", "validation", "test"):
-            if role not in self.model_fields_set:
-                setattr(self, role, f"{role}_{self.name}")
+        if self.name != DEFAULT_SPLIT_NAME:
+            for role in ("train", "validation", "test"):
+                if role not in self.model_fields_set:
+                    setattr(self, role, f"{role}_{self.name}")
+        if any(not split.strip() for split in self.refit_additional_splits):
+            raise ValueError("refit_additional_splits cannot contain empty names.")
+        if len(self.refit_additional_splits) != len(set(self.refit_additional_splits)):
+            raise ValueError("refit_additional_splits must contain unique split names.")
+        role_sources = {
+            source
+            for source in (self.train, self.validation, self.test)
+            if source is not None
+        }
+        overlap = role_sources.intersection(self.refit_additional_splits)
+        if overlap:
+            raise ValueError(
+                "refit_additional_splits must not repeat train, validation, or "
+                f"test source splits: {sorted(overlap)}."
+            )
         return self
 
 
@@ -289,7 +328,7 @@ def ensure_validation_split(
 def select_dataset_splits(
     dataset: DatasetDict, config: DatasetSplitConfig
 ) -> DatasetDict:
-    """Select source splits and expose them as train/validation/test."""
+    """Select pipeline roles and explicitly requested final-refit-only splits."""
     selected = DatasetDict()
     for role, source in (
         ("train", config.train),
@@ -309,6 +348,13 @@ def select_dataset_splits(
             f"Configured {role} source split '{source}' was not found. "
             f"Available splits: {sorted(dataset.keys())}."
         )
+    for source in config.refit_additional_splits:
+        if source not in dataset:
+            raise ValueError(
+                "Configured final-refit source split "
+                f"'{source}' was not found. Available splits: {sorted(dataset.keys())}."
+            )
+        selected[source] = dataset[source]
     return selected
 
 
@@ -329,7 +375,7 @@ def load_evaluation_dataset(
     validation_fraction: float = _DEFAULT_VALIDATION_FRACTION,
     split: DatasetSplitConfig | None = None,
 ) -> DatasetDict:
-    """Load the full train/validation/test splits from the Hugging Face Hub.
+    """Load the configured evaluation and final-refit splits from the Hub.
 
     If the loaded dataset has no ``validation`` split, one is synthesized
     from ``train`` (see :func:`ensure_validation_split`).

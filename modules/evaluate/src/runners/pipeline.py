@@ -17,6 +17,7 @@ from modules.evaluate.src.dataset.workspace import (
 from modules.evaluate.src.schemas.artifacts import (
     CrossValidationIdentity,
     PredictOutput,
+    PreparedArtifacts,
     ScoreOutput,
 )
 from modules.evaluate.src.steps.predict import PredictStep
@@ -34,6 +35,8 @@ class PipelineResult:
 
     predictions: dict[int | None, PredictOutput]
     scores: dict[int | None, ScoreOutput] = field(default_factory=dict)
+    # Results of the same fitted model on each configured external test set.
+    external: dict[str, PipelineResult] = field(default_factory=dict)
 
 
 def run_pipeline(
@@ -78,6 +81,54 @@ def run_pipeline(
         # needs accelerator.prepare() before Predict/Score can use it.
         prepared_artifacts.model = accelerator.prepare(prepared_artifacts.model)
 
+    result = _predict_and_score(
+        config, workspace, prepared_artifacts, accelerator, tuned=tuned
+    )
+
+    if config.external_test_sets and not tuned:
+        logger.warning(
+            "Skipping external_test_sets: steps.mode=evaluate_as_is has no "
+            "fitted probe to transfer."
+        )
+    elif config.external_test_sets:
+        prepare_step = PrepareStep(config.steps.prepare)
+        for external in config.external_test_sets:
+            logger.info("=== Starting external test set '%s' ===", external.name)
+            external_prepared = prepare_step.prepare_external_test(
+                workspace,
+                prepared_artifacts,
+                external,
+                accelerator=accelerator,
+                seed=config.seed,
+                layerwise_config=config.steps.layerwise,
+            )
+            external_workspace = get_evaluation_workspace(
+                workspace.config.model_copy(
+                    update={
+                        "dataset_name": external.name,
+                        "dataset_repo_id": external.dataset_repo_id,
+                    }
+                ),
+                variant=workspace.variant,
+            )
+            external_workspace.setup_directories()
+            result.external[external.name] = _predict_and_score(
+                config, external_workspace, external_prepared, accelerator, tuned=tuned
+            )
+            logger.info("=== Completed external test set '%s' ===", external.name)
+    accelerator.wait_for_everyone()
+    return result
+
+
+def _predict_and_score(
+    config: EvaluationConfig,
+    workspace: EvaluationWorkspace,
+    prepared_artifacts: PreparedArtifacts,
+    accelerator: Any,
+    *,
+    tuned: bool,
+) -> PipelineResult:
+    """Predict then score on *prepared_artifacts*' test loader."""
     logger.info("=== Starting Predict Step ===")
     predict_step = PredictStep(config.steps.predict)
     layer_predictions: dict[int, PredictOutput] = {}
@@ -115,7 +166,7 @@ def run_pipeline(
                 workspace
                 if layer is None
                 else get_evaluation_workspace(
-                    config.workspace, variant=f"{workspace.variant}-layer_{layer}"
+                    workspace.config, variant=f"{workspace.variant}-layer_{layer}"
                 )
             )
             score = score_step.run(
@@ -137,5 +188,4 @@ def run_pipeline(
                     "Paired cross-layer comparison written to %s", comparison_path
                 )
         logger.info("=== Completed Score Step ===")
-    accelerator.wait_for_everyone()
     return result

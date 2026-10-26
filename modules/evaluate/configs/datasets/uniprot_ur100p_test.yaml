@@ -1,0 +1,15 @@
+workspace:
+  default_task_type: pseudo_perplexity
+  dataset_name: uniprot_ur100p_test
+  dataset_repo_id: flair-bio/uniprot_ur100p_test
+  # Pseudo-perplexity is label-free; continuous/scalar is a schema placeholder.
+  target_type: continuous
+  label_format: scalar
+  num_labels: null
+
+steps:
+  prepare:
+    # AMPLIFY supports a 2048-token context; override for shorter-context models.
+    max_length: 2048
+    # Each input row masks one residue, so avoid the large default token batch.
+    batch_size: 8

@@ -41,7 +41,7 @@ dataset's `targets`.
 
 | Task | Predicts | Example `targets` for one protein | Meaning |
 |---|---|---|---|
-| `sequence_classification` | One class per protein | `3` | Class index, e.g. "nucleus" in `localization_prediction` |
+| `sequence_classification` | One class per protein | `3` | Class index in the dataset's label vocabulary |
 | `sequence_regression` | One number per protein | `62.0` | e.g. optimal temperature in °C |
 | `sequence_multilabel_classification` | A set of labels per protein | `[0, 1, 1, 0, …]` | One bit per vocabulary entry (GO term, InterPro entry); several can be on |
 | `token_classification` | One class per residue | `[0, 0, 2, 2, 2, 1, -100, …]` | One class index per residue (same length as the sequence); `-100` is ignored |
@@ -101,14 +101,18 @@ be selected.
 
 | Source | Datasets | Task | Default metrics |
 |---|---|---|---|
-| Biomap-research | `fold_prediction`, `localization_prediction`, `solubility_prediction`, `temperature_stability` | `sequence_classification` | `f1`, `accuracy`, `mcc`, `roc_auc` |
+| Biomap-research | `fold_prediction`, `localization_prediction` | `sequence_classification` | `f1`, `accuracy`, `mcc`, `roc_auc` |
+| UESolDS | `solubility_prediction` | `sequence_classification` | Macro-F1 |
+| HMD-ARG | `antibiotic_resistance` | `sequence_classification` | Macro-F1 over 14 drug classes |
+| FLIP / Meltome Atlas | `meltome_mixed`, `meltome_human` | `sequence_regression` | `spearmanr` |
 | Biomap-research | `stability_prediction` | `sequence_regression` | `mse`, `mae`, `r2`, `pearsonr`, `spearmanr` |
-| Biomap-research | `ssp_q3`, `ssp_q8` | `token_classification` | `f1`, `accuracy`, `precision`, `recall`, `mcc` |
+| Reprocessed BioMap SSP | `ssp_q3`, `ssp_q8` | `token_classification` | Macro-F1 |
 | Biomap-research | `contact_prediction_binary` | `contact_prediction`, `categorical_jacobian` | Contact precision at top L, L/2, L/5 and contact AUC, per short / medium / long range |
 | UniProt GO | `GO_mf`, `GO_bp`, `GO_cc` | `sequence_multilabel_classification` | `f1`, `multilabel_mcc`, `average_precision` |
 | InterPro | 7 `interpro_*` entry types | `sequence_multilabel_classification` | `f1`, `multilabel_mcc`, `average_precision` |
 | UniProt features | 12 `uniprot_*` residue overlays | `token_classification` | `f1`, `accuracy`, `precision`, `recall`, `mcc` |
 | UniProt ProtParam | `uniprot_protparams` (one property per run) | `sequence_regression` | R² |
+| AMPLIFY / UR100P | `uniprot_ur100p_test` | `pseudo_perplexity` | `pseudo_perplexity` |
 | Any sequence dataset | MLM models with a mask token | `pseudo_perplexity` | `pseudo_perplexity` |
 | HHblits/BFD homolog profiles | `human_calibration` (test split only) | `calibration` | `kl`, `kl_t`, `kl_nt`, `calibration`, `calibration_t`, `calibration_nt`, `accuracy_t`, `accuracy_nt`, `memorization_nt` |
 | ProteinGym | 4 assay tracks | Separate runners | Spearman (DMS), AUC (clinical), per assay |
@@ -130,17 +134,16 @@ dataset is then described the same way:
 - **Run:** the overlay YAML, the task YAML to pair it with, and the
   published `flair-bio/` Hub artifact.
 
-**Target sizes** match the published artifacts as checked on 2026-10-08.
+**Target sizes** reflect the published artifacts when each entry was added.
 Multi-label widths come from `label_vocabulary.json`; scalar and per-residue
 class counts are taken across the canonical train, validation, and test
 splits. Recheck them when hosted artifacts change.
 
-### Biomap-Research
+### Protein-level benchmarks
 
-Eight retained benchmark datasets from the `biomap-research` Hugging Face
-organization, with their published splits
-([sourcing](dataset-sourcing.md#biomap-research)). Each entry names the
-original study, whose dataset card has the full label definitions.
+These classification and regression benchmarks use their published splits.
+Each entry identifies its source and links to the dataset card for full label
+definitions.
 
 #### Per protein: one class
 
@@ -183,42 +186,73 @@ original study, whose dataset card has the full label definitions.
 - **Run:** [`localization_prediction.yaml`](../configs/datasets/localization_prediction.yaml)
   with `sequence_classification` ·
   [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-localization_prediction)
+- **External test:** the overlay also configures setHARD
+  ([dataset card](https://huggingface.co/datasets/flair-bio/sethard)) as a
+  test-only set scored by the DeepLoc-fitted probe. Verify that its class-index
+  mapping matches BioMap's before interpreting the score: BioMap's card
+  documents integer labels but does not name the classes.
 
 ##### `solubility_prediction`
 
 **Question:** will this protein stay dissolved when produced in bacteria, or
 clump into insoluble aggregates?
 
-- **Readout:** soluble or insoluble (2 classes), from the DeepSol dataset of
-  proteins expressed in *E. coli*. Upstream removed training proteins with 30%
-  or more identity to any test protein.
+- **Readout:** soluble or insoluble protein expression, from UESolDS as
+  distributed with PLM_Sol V1.1. Targets use `0 = insoluble`, `1 = soluble`;
+  report Macro-F1 over both classes. The standardized splits contain 69,964
+  training, 3,995 validation, and 3,998 test proteins.
 - **Used for:** choosing which constructs to express before spending lab
   time, and screening designed proteins and biologics for manufacturability.
-- **Why it matters:** an insoluble protein is usually a failed experiment.
-  Solubility depends on surface charge, hydrophobic patches, and whether the
-  chain folds at all, so it tests global physicochemical knowledge.
+- **Why it matters:** soluble expression matters for producing proteins in
+  laboratory systems. The labels reflect experimental expression conditions,
+  not context-independent intrinsic solubility.
 - **Run:** [`solubility_prediction.yaml`](../configs/datasets/solubility_prediction.yaml)
   with `sequence_classification` ·
-  [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-solubility_prediction)
+  [Hub](https://huggingface.co/datasets/flair-bio/solubility_uesolds_original)
 
-##### `temperature_stability`
+##### `antibiotic_resistance`
 
-**Question:** does this protein stay folded at 65 °C?
+**Question:** which antibiotic drug class is associated with this protein?
 
-- **Readout:** stable or not (2 classes), adapted from TemStaPro. TemStaPro's
-  labels come from the growth temperature of the organism the protein comes
-  from, so they are a proxy for thermostability rather than a measured
-  melting point.
-- **Used for:** industrial enzymes (detergents, biofuel production, PCR
-  polymerases) must survive heat. Predicting thermostability from sequence
-  narrows the search before any protein is made.
-- **Why it matters:** heat-stable proteins differ in subtle, distributed ways
-  (more salt bridges, tighter packing, fewer heat-labile residues).
-- **Run:** [`temperature_stability.yaml`](../configs/datasets/temperature_stability.yaml)
+- **Readout:** one of 14 mutually exclusive drug classes from HMD-ARG. This
+  artifact is single-label classification, not resistant-versus-susceptible
+  detection or multilabel prediction; `multidrug` is one class.
+- **Provenance:** standardized from ProtAlign-ARG GraphPart partitions and the
+  ARGs repository, as documented in the dataset card. The card pins the
+  upstream revisions.
+- **Splits:** 12,844 train, 984 validation, and 2,603 test proteins.
+  `tuning_excluded` contains 490 additional proteins and is used only in the
+  final refit, after hyperparameter selection on train and validation.
+- **Metric:** Macro-F1 over the fixed 14-class vocabulary. Validation has no
+  sulfonamide examples; absent classes contribute zero F1.
+- **Limitation:** class balance is highly skewed; test contains only two
+  rifampin and three bacitracin proteins.
+- **Labels:** aminoglycoside, bacitracin, beta-lactam, chloramphenicol,
+  fosfomycin, glycopeptide, macrolide-lincosamide-streptogramin, multidrug,
+  polymyxin, quinolone, rifampin, sulfonamide, tetracycline, and trimethoprim.
+- **Run:** [`antibiotic_resistance.yaml`](../configs/datasets/antibiotic_resistance.yaml)
   with `sequence_classification` ·
-  [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-temperature_stability)
+  [Hub](https://huggingface.co/datasets/flair-bio/amr_hmd_arg)
 
 #### Per protein: one number
+
+##### `meltome_mixed` and `meltome_human`
+
+**Question:** how well does a protein tolerate heating in an experimental assay?
+
+- **Readout:** experimentally measured apparent melting temperature in °C,
+  evaluated as regression with Spearman's ρ. `meltome_mixed` covers mixed
+  species; `meltome_human` is restricted to human proteins.
+- **Used for:** ranking candidate proteins by measured thermostability,
+  including proteins considered for industrial use.
+- **Limitations:** apparent melting temperature depends on assay context and
+  is not a context-independent measure of intrinsic stability. Treat mixed
+  and human as separate benchmarks; do not combine their scores as if they
+  were independent.
+- **Run:** [`meltome_mixed.yaml`](../configs/datasets/meltome_mixed.yaml) or
+  [`meltome_human.yaml`](../configs/datasets/meltome_human.yaml) with
+  `sequence_regression` · [Mixed dataset](https://huggingface.co/datasets/flair-bio/meltome_mixed)
+  · [Human dataset](https://huggingface.co/datasets/flair-bio/meltome_human)
 
 ##### `stability_prediction`
 
@@ -244,8 +278,8 @@ by proteases?
 
 **Question:** is each residue in a helix, a strand, or a coil?
 
-- **Readout:** one of 3 classes per residue: H (helix), E (strand), C (coil),
-  computed with DSSP from solved structures (NetSurfP-2.0 data).
+- **Readout:** one of 3 classes per residue: `0=H` (helix), `1=E` (strand),
+  `2=C` (coil), consistently derived from the DSSP Q8 labels.
 - **Used for:** a first look at the structure of a protein with no solved
   structure; guiding domain boundaries and design.
 - **Why it matters:** the classic per-residue benchmark. Most protein
@@ -253,20 +287,29 @@ by proteases?
   per-residue embeddings.
 - **Run:** [`ssp_q3.yaml`](../configs/datasets/ssp_q3.yaml) with
   `token_classification` ·
-  [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-ssp_q3)
+  [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-ssp_q3_masked)
 
 ##### `ssp_q8`
 
 **Question:** the same as `ssp_q3`, with finer states.
 
-- **Readout:** one of 8 DSSP classes per residue: H (α-helix), G (3₁₀-helix),
-  I (π-helix), E (strand), B (β-bridge), T (turn), S (bend), C (coil).
+- **Readout:** one of 8 DSSP classes per residue: `0=G`, `1=H`, `2=I`,
+  `3=B`, `4=E`, `5=S`, `6=T`, `7=C`.
 - **Used for:** as `ssp_q3`.
 - **Why it matters:** harder than Q3. Some states (π-helix, β-bridge) are
   rare, so macro-averaged metrics expose whether the model handles them.
 - **Run:** [`ssp_q8.yaml`](../configs/datasets/ssp_q8.yaml) with
   `token_classification` ·
-  [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-ssp_q8)
+  [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-ssp_q8_masked)
+
+Both datasets contain 9,218 train, 1,627 validation, and 663 test
+observations. Targets use `-100` for residues outside the ordered-residue and
+source scoring-region masks; these positions are excluded from loss and
+Macro-F1. There are 2,187,951, 395,726, and 119,273 scored residues in the
+three splits, respectively. Repeated sequences remain separate observations
+because their scoring regions or labels can differ. The longest sequence is
+1,632 residues; the overlays allow up to 2,048 tokens, including special
+tokens, so the supplied residues are not cropped.
 
 ##### `contact_prediction_binary`
 
@@ -614,6 +657,24 @@ Run each property separately, changing `steps.prepare.label_column` and using
 a distinct output directory for each property. Report the per-property R²
 values; if a single summary is needed, use their unweighted arithmetic mean,
 not one R² pooled across differently scaled targets.
+
+### Pseudo-perplexity: UniProt UR100P test set
+
+#### `uniprot_ur100p_test`
+
+The 10,000-sequence UniProt test split from UR100P, used in the AMPLIFY
+paper. It is a test-only, label-free dataset for zero-shot pseudo-perplexity;
+the existing `uniprot_protparams` regression dataset remains separate.
+
+- **Readout:** pseudo-perplexity over masked residues.
+- **Sequences:** 10,000 records, with a maximum length of 15,997 residues.
+  The artifact preserves complete sequences and repeated records.
+- **Length policy:** the dataset overlay defaults to `max_length: 2048`,
+  matching AMPLIFY's configured context. The limit includes special tokens,
+  so longer sequences are cropped before scoring. Override it for models with
+  shorter context windows.
+- **Run:** [`uniprot_ur100p_test.yaml`](../configs/datasets/uniprot_ur100p_test.yaml)
+  · [Hub](https://huggingface.co/datasets/flair-bio/uniprot_ur100p_test)
 
 ### Calibration
 

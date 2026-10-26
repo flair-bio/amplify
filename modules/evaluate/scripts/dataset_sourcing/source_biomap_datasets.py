@@ -14,9 +14,7 @@ BIOMAP_DATASETS: list[str] = [
     "ssp_q8",
     "fold_prediction",
     "localization_prediction",
-    "temperature_stability",
     "stability_prediction",
-    "solubility_prediction",
     "contact_prediction_binary",
 ]
 
@@ -25,9 +23,7 @@ BIOMAP_CARD_DESCRIPTIONS = {
     "ssp_q8": "Eight-state secondary-structure prediction from protein sequence.",
     "fold_prediction": "Protein fold classification from sequence.",
     "localization_prediction": "Prediction of protein subcellular localization.",
-    "temperature_stability": "Prediction of protein stability across temperatures.",
     "stability_prediction": "Prediction of protein stability from sequence.",
-    "solubility_prediction": "Prediction of protein solubility from sequence.",
     "contact_prediction_binary": "Sparse residue-pair contacts for protein contact-map prediction.",
 }
 

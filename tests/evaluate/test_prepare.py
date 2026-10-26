@@ -18,9 +18,14 @@ from __future__ import annotations
 
 import pytest
 import torch
+from datasets import Dataset, DatasetDict
 from accelerate import Accelerator as HFAccelerator
 from accelerate.state import AcceleratorState
 
+from modules.evaluate.src.dataset.dataloader import (
+    DatasetSplitConfig,
+    ExternalTestSetConfig,
+)
 from modules.evaluate.src.dataset.workspace import (
     EvaluationWorkspaceConfig,
     get_evaluation_workspace,
@@ -28,6 +33,7 @@ from modules.evaluate.src.dataset.workspace import (
 from modules.evaluate.src.steps import prepare as prepare_module
 from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
 from modules.evaluate.src.steps.prepare import PrepareConfig, PrepareStep
+from modules.evaluate.src.utils.embed import find_embedding_dataset
 
 from .conftest import ModelFamily, build_raw_dataset_dict, build_tiny_model
 
@@ -35,8 +41,10 @@ from .conftest import ModelFamily, build_raw_dataset_dict, build_tiny_model
 def _make_workspace(tmp_path, task_type, num_labels=2):
     target_type = "continuous" if task_type == "sequence_regression" else "categorical"
     label_format = (
-        "per_token" if task_type == "token_classification"
-        else "multilabel" if task_type == "sequence_multilabel_classification"
+        "per_token"
+        if task_type == "token_classification"
+        else "multilabel"
+        if task_type == "sequence_multilabel_classification"
         else "scalar"
     )
     dataset_num_labels = None if task_type == "sequence_regression" else num_labels
@@ -61,6 +69,9 @@ def _run_prepare(
     model_family: ModelFamily,
     num_labels=2,
     layerwise_config=None,
+    external=None,
+    external_dataset=None,
+    dataset=None,
     **config_kwargs,
 ):
     AcceleratorState._reset_state(reset_partial_state=True)
@@ -111,7 +122,61 @@ def _run_prepare(
         **config_kwargs,
     )
     workspace = _make_workspace(tmp_path, task_type, num_labels=num_labels)
-    return PrepareStep(config).run(workspace, layerwise_config=layerwise_config)
+    step = PrepareStep(config)
+    prepared = step.run(
+        workspace, layerwise_config=layerwise_config, dataset=dataset
+    )
+    if external is None:
+        return prepared
+    if external_dataset is None:
+        external_dataset = DatasetDict(
+            {
+                "test": Dataset.from_dict(
+                    {"sequence": ["ACDEFG", "MKVLAAGHW"], "targets": [1, 0]}
+                )
+            }
+        )
+    monkeypatch.setattr(
+        prepare_module,
+        "load_raw_evaluation_dataset",
+        lambda repo_id: external_dataset,
+    )
+    return prepared, step.prepare_external_test(
+        workspace,
+        prepared,
+        external,
+        accelerator=HFAccelerator(cpu=True),
+        seed=0,
+        layerwise_config=layerwise_config,
+    )
+
+
+def test_prepare_caches_configured_final_refit_split_separately(
+    monkeypatch, tmp_path, model_family
+):
+    raw = build_raw_dataset_dict("sequence_classification")
+    raw["tuning_excluded"] = Dataset.from_dict(
+        {"sequence": ["ACDEFG"], "targets": [1], "id": ["refit-only"]}
+    )
+
+    prepared = _run_prepare(
+        monkeypatch,
+        tmp_path,
+        "sequence_classification",
+        model_family,
+        split=DatasetSplitConfig(refit_additional_splits=["tuning_excluded"]),
+        embedding_cache={"enabled": True, "cache_policy": "off"},
+        dataset=raw,
+    )
+
+    train = find_embedding_dataset(prepared.train_dataloader)
+    excluded = find_embedding_dataset(
+        prepared.refit_dataloaders["tuning_excluded"]
+    )
+    assert train is not None and excluded is not None
+    assert len(train) == len(raw["train"])
+    assert excluded.ids == ["refit-only"]
+    assert prepared.refit_token_dataloaders["tuning_excluded"] is not None
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +289,70 @@ class TestPrepareStepRun:
         )
         assert output.loss is not None
         assert output.logits.shape == (*batch["input_ids"].shape, 2)
+
+    def test_external_test_set_replaces_only_test_loader(
+        self, monkeypatch, tmp_path, model_family
+    ):
+        external = ExternalTestSetConfig(name="ext", dataset_repo_id="org/ext")
+        prepared, swapped = _run_prepare(
+            monkeypatch,
+            tmp_path,
+            "sequence_classification",
+            model_family,
+            external=external,
+        )
+        assert swapped.model is prepared.model
+        assert swapped.train_dataloader is prepared.train_dataloader
+        assert len(prepared.test_dataloader.dataset) == 4
+        assert len(swapped.test_dataloader.dataset) == 2
+        batch = next(iter(swapped.test_dataloader))
+        assert batch["labels"].tolist() == [1, 0]
+
+    def test_external_test_set_embeds_with_cached_trunk(
+        self, monkeypatch, tmp_path, model_family
+    ):
+        external = ExternalTestSetConfig(name="ext", dataset_repo_id="org/ext")
+        prepared, swapped = _run_prepare(
+            monkeypatch,
+            tmp_path,
+            "sequence_classification",
+            model_family,
+            external=external,
+            embedding_cache={"enabled": True, "cache_policy": "off"},
+        )
+        backend = swapped.embedding_backend
+        assert backend.trunk is prepared.embedding_backend.trunk
+        assert backend.dataset_id == "org/ext"
+        assert backend.test_cache_key != prepared.embedding_backend.test_cache_key
+        assert len(backend.token_test_dataloader.dataset) == 2
+        assert len(swapped.test_dataloader.dataset) == 2
+        assert len(prepared.test_dataloader.dataset) == 4
+
+    @pytest.mark.parametrize(
+        "external_dataset",
+        [
+            DatasetDict(
+                {"train": Dataset.from_dict({"sequence": ["ACDEFG"], "targets": [1]})}
+            ),
+            DatasetDict(
+                {"test": Dataset.from_dict({"sequence": ["ACDEFG"], "targets": [2]})}
+            ),
+        ],
+        ids=["missing-test-split", "out-of-range-label"],
+    )
+    def test_external_test_set_rejects_invalid_input(
+        self, monkeypatch, tmp_path, model_family, external_dataset
+    ):
+        external = ExternalTestSetConfig(name="ext", dataset_repo_id="org/ext")
+        with pytest.raises(ValueError):
+            _run_prepare(
+                monkeypatch,
+                tmp_path,
+                "sequence_classification",
+                model_family,
+                external=external,
+                external_dataset=external_dataset,
+            )
 
     def test_setup_directories_called(self, monkeypatch, tmp_path, model_family):
         _run_prepare(monkeypatch, tmp_path, "sequence_classification", model_family)
