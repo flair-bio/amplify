@@ -20,13 +20,49 @@ steps.predict.controls → Predict: build each control's predictions
                        → scores_long.parquet rows with control=<name>
 ```
 
-- Predict writes `control_<name>_predictions.parquet` next to
-  `predictions.parquet`. `scrambled_labels` needs no inference and has no file.
-- Control predictions are rebuilt on every run from the current head. Only
+- Predict writes model controls next to `predictions.parquet`.
+  `scrambled_labels` needs no inference and has no file.
+- Sequence `majority_class` and `train_mean` run separately with
+  `run_evaluate.py --baselines`. Score loads their shared artifacts; model
+  evaluations never generate them. Token majority and contact separation
+  priors still run inside Predict.
+- Model-control predictions are rebuilt from the current head; only
   frozen-trunk embeddings are reused through the embedding cache.
 - Comparisons only exist when `steps.score.bootstrap_enabled=true`. The
   base config enables it; the schema default is `false`. Without it,
   controls are predicted but never scored.
+
+### Shared sequence baselines
+
+Generate dataset-level artifacts once, without a model overlay or accelerator
+launch:
+
+```bash
+uv run python -m modules.evaluate.src.run_evaluate --baselines \
+  modules/evaluate/configs/config.yaml \
+  modules/evaluate/configs/datasets/solubility_prediction.yaml
+```
+
+Then run the normal model evaluation with the same dataset/split settings and
+`workspace.base_path`. Task presets select `baselines.names=[majority_class]`
+for sequence classification and `[train_mean]` for sequence regression.
+`baselines.names=[]` disables shared comparisons independently of model controls.
+The baseline route ignores model/tuning settings and uses train-only labels,
+never validation or final-refit-only data. External test predictions use the
+same source training prior.
+
+Artifacts live under `<base_path>/baselines/<name>/<fit-hash>/tests/<test-hash>/`.
+Identity includes actual sequence/ID/label content, source split mappings, and
+the task/class contract. Completed artifacts are reused; inconsistent or
+corrupt files fail explicitly. Scoring checks IDs, labels, and observation
+counts, retaining repeated observations. The run manifest records artifact
+references and baseline point scores even without bootstrap comparisons.
+Constant-prediction Spearman is NaN; undefined paired comparisons are omitted.
+
+Missing artifacts are an error with instructions to run `--baselines`, not an
+automatic baseline job. CV and shared token/contact baselines are not supported
+by this route yet; use `baselines.names=[]` for CV. Existing token/contact
+controls are unchanged. Composition and MMseqs remain unimplemented.
 
 ## Catalog
 
@@ -95,9 +131,9 @@ Each task config ships a preset; override it with `steps.predict.controls`
 
 | Task type | Controls in the shipped task config |
 |---|---|
-| `sequence_classification` | `random_trunk`, `majority_class` |
+| `sequence_classification` | `random_trunk`; shared `majority_class` |
 | `sequence_multilabel_classification` | `random_trunk` |
-| `sequence_regression` | `random_trunk`, `train_mean` |
+| `sequence_regression` | `random_trunk`; shared `train_mean` |
 | `token_classification` | `random_trunk`, `majority_class` |
 | `contact_prediction` | `random_trunk`, `separation_prior` |
 | `categorical_jacobian` | `random_trunk`, `separation_prior` |
@@ -105,9 +141,8 @@ Each task config ships a preset; override it with `steps.predict.controls`
 | `calibration` | `random_trunk` |
 
 `random_trunk` is the per-model default. Other controls remain available by
-explicit override. Model-independent baselines conceptually run once per
-dataset/split/protocol; shared execution across models is not implemented yet,
-so these presets still compute them per run. Composition, MMseqs k-NN,
+explicit override. Shared sequence baselines run once per dataset/split/protocol
+with `--baselines`; token/contact priors still compute per run. Composition, MMseqs k-NN,
 multilabel priors, and amino-acid-frequency baselines are not configured
 because they are not implemented.
 

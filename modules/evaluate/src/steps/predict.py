@@ -146,6 +146,7 @@ def persist_predictions(
             "config": config,
             "metadata": output.metadata.model_dump(mode="json"),
             "control_paths": {k: str(v) for k, v in output.control_paths.items()},
+            "baseline_context": output.baseline_context,
         },
     )
     logger.info(
@@ -280,6 +281,7 @@ class PredictStep:
                 controls=controls,
                 requested_controls=list(self.config.controls),
                 config=self.config.model_dump(mode="json"),
+                baseline_context=prepared.baseline_context,
             )
             if self.config.persist_to_disk and accelerator.is_main_process:
                 persist_predictions(layer_workspace, outputs[layer], seed)
@@ -466,6 +468,7 @@ class PredictStep:
             control_paths=control_paths,
             requested_controls=list(self.config.controls),
             config=self.config.model_dump(mode="json"),
+            baseline_context=prepared.baseline_context,
         )
         if self.config.persist_to_disk and accelerator.is_main_process:
             persist_predictions(workspace, output, seed)

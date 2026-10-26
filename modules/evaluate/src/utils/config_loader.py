@@ -3,7 +3,7 @@
 from collections.abc import Sequence
 from pathlib import Path
 
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 from modules.core.utils.config_loader import load_config, parse_config
 from modules.evaluate.src.config import EvaluationConfig
@@ -14,6 +14,13 @@ def load_evaluation_config(
     path: str | Path | Sequence[str | Path],
     overrides: Sequence[str] | None = None,
 ) -> EvaluationConfig:
+    return parse_config(compose_evaluation_config(path, overrides), EvaluationConfig)
+
+
+def compose_evaluation_config(
+    path: str | Path | Sequence[str | Path],
+    overrides: Sequence[str] | None = None,
+) -> DictConfig:
     """Load a selected task overlay when no explicit task YAML was supplied.
 
     Insert the task immediately before the dataset declaring the default, so
@@ -42,4 +49,4 @@ def load_evaluation_config(
                 insertion = index
         paths.insert(insertion, task_path)
         config = load_config(paths, overrides=overrides)
-    return parse_config(config, EvaluationConfig)
+    return config

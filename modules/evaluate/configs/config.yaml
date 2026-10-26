@@ -1,6 +1,9 @@
 seed: 710019
 tf32: true # allow TensorFloat-32 for CUDA FP32 operations; false restores full FP32
 
+baselines:
+  names: [] # sequence task presets request shared artifacts; generate with --baselines
+
 workspace:
   dataset_name: base_dataset
   dataset_repo_id: null
@@ -119,7 +122,7 @@ steps:
     collect_probabilities: false # auto-enabled when effective metrics need probabilities, e.g. roc_auc or multilabel average_precision
     predictions_filename: predictions.parquet
     store_sequences: false # include decoded input sequences in main predictions parquet (larger output)
-    controls: [random_trunk] # optional: untrained, random_head, random_both, scrambled_labels, scrambled_sequences, majority_class, train_mean, separation_prior
+    controls: [random_trunk] # model controls; token majority_class/contact separation_prior remain per-model
   score:
     metrics: null # task overlays declare reported metrics explicitly
     metric_aggregation: macro # one of micro, macro, weighted, samples

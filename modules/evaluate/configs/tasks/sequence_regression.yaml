@@ -1,6 +1,9 @@
 workspace:
   task_type: sequence_regression
 
+baselines:
+  names: [train_mean]
+
 steps:
   tune:
     hyperparameter_search:
@@ -9,4 +12,4 @@ steps:
   score:
     metrics: [r2] # property-level ProtParams default; stability overrides this
   predict:
-    controls: [random_trunk, train_mean]
+    controls: [random_trunk]

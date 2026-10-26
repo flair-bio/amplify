@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -27,6 +28,11 @@ from modules.evaluate.src.schemas.artifacts import (
     ScoreOutput,
 )
 from modules.evaluate.src.tasks import get_task
+from modules.evaluate.src.utils.baselines import (
+    align_baseline,
+    artifact_identity,
+    load_baseline_artifact,
+)
 from modules.evaluate.src.utils.bootstrap import (
     as_indexable_array,
     benjamini_hochberg,
@@ -148,6 +154,31 @@ class ScoreStep:
             )
 
         predictions_df = predict_result.predictions
+        baseline_references: dict[str, dict[str, Any]] = {}
+        if predict_result.baseline_context:
+            controls = dict(predict_result.controls)
+            requested_controls = list(predict_result.requested_controls)
+            for name in predict_result.baseline_context["names"]:
+                if name in controls:
+                    raise ValueError(f"Baseline '{name}' is also a model control.")
+                frame, path = load_baseline_artifact(
+                    predict_result.baseline_context, name
+                )
+                controls[name] = align_baseline(
+                    frame,
+                    predictions_df,
+                    regression=workspace.task_type == "sequence_regression",
+                )
+                requested_controls.append(name)
+                baseline_references[name] = {
+                    "path": str(path),
+                    "identity": artifact_identity(
+                        predict_result.baseline_context, name
+                    ),
+                }
+            predict_result = replace(
+                predict_result, controls=controls, requested_controls=requested_controls
+            )
         predictions_col = predictions_df["prediction"].to_list()
         labels_col = predictions_df["label"].to_list()
         probabilities_col = (
@@ -158,6 +189,19 @@ class ScoreStep:
 
         task = get_task(workspace.task_type, workspace.num_labels)
         metric_names = self.config.metrics or task.default_metrics()
+        for name, reference in baseline_references.items():
+            baseline = predict_result.controls[name]
+            reference["scores"] = full_scores(
+                task,
+                baseline["prediction"].to_list(),
+                labels_col,
+                baseline["probability"].to_list()
+                if "probability" in baseline.columns
+                else None,
+                metric_names,
+                self.config.metric_aggregation,
+            )
+            logger.info("Shared baseline '%s' scores: %s", name, reference["scores"])
         logger.info("Computing metrics: %s", metric_names)
         trained_per_example_scores = task.compute_per_example_metrics(
             predictions_col,
@@ -192,7 +236,12 @@ class ScoreStep:
         scores_path = update_run_manifest(
             workspace.run_manifest_path,
             "score",
-            {"metadata": metadata_dict, "config": config_dict, "scores": scores},
+            {
+                "metadata": metadata_dict,
+                "config": config_dict,
+                "scores": scores,
+                "baselines": baseline_references,
+            },
         )
 
         result = ScoreOutput(
@@ -422,6 +471,7 @@ class ScoreStep:
             control_paths=control_paths,
             requested_controls=list(config_dict.get("controls", [])),
             config=config_dict,
+            baseline_context=predict_section.get("baseline_context"),
         )
 
     # -- bootstrap resampling / control comparisons --------------------------

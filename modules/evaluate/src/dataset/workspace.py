@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from modules.evaluate.src.tasks import TaskType, available_tasks
 
 __all__ = [
+    "DatasetWorkspaceConfig",
     "EvaluationWorkspace",
     "EvaluationWorkspaceConfig",
     "TaskType",
@@ -17,18 +18,14 @@ __all__ = [
 ]
 
 
-class EvaluationWorkspaceConfig(BaseModel):
-    """Config for an EvaluationWorkspace, organizing files pertaining to a specific dataset and model."""
+class DatasetWorkspaceConfig(BaseModel):
+    """Dataset/task settings shared by model and baseline runs."""
 
     model_config = ConfigDict(extra="forbid")
 
     dataset_name: str  # dataset name that serves as a mnemonic for the dataset being evaluated, e.g. "stability_prediction"
     dataset_repo_id: str | None = (
         None  # path to HuggingFace dataset repo e.g. biomap-research/stability_prediction
-    )
-    model_name: str  # model name that serves as a mnemonic for the model being evaluated, e.g. "amplify-120m"
-    model_repo_id: str | None = (
-        None  # path to HuggingFace model repo e.g. flair-bio/amplify-120m
     )
     task_type: TaskType
     default_task_type: TaskType | None = None  # dataset default evaluation method
@@ -39,14 +36,7 @@ class EvaluationWorkspaceConfig(BaseModel):
     num_labels: int | None = (
         None  # number of classes for *_classification tasks; unused (forced to 1) for sequence_regression
     )
-    model_kwargs: dict[str, Any] = Field(
-        default_factory=dict
-    )  # extra task.build_model() kwargs, e.g. {"rank": 64} for contact_prediction
     base_path: str = "./eval"  # base path where the EvaluationWorkspace is stored
-    output_dir: Path | None = (
-        None  # explicit model-level output directory; dataset folders are added beneath it
-    )
-    tmp_path: str | None = None  # temporary path for intermediate files
 
     @field_validator("task_type")
     @classmethod
@@ -65,17 +55,28 @@ class EvaluationWorkspaceConfig(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _validate_target_metadata(self) -> "EvaluationWorkspaceConfig":
+    def _validate_target_metadata(self) -> DatasetWorkspaceConfig:
         if self.target_type == "continuous":
             if self.label_format != "scalar" or self.num_labels is not None:
                 raise ValueError(
                     "target_type='continuous' requires label_format='scalar' and "
                     "num_labels=null."
                 )
-        elif self.label_format in {"scalar", "per_token", "multilabel"}:
-            if self.num_labels is None or self.num_labels <= 1:
-                raise ValueError("Categorical targets require num_labels > 1.")
+        elif self.label_format in {"scalar", "per_token", "multilabel"} and (
+            self.num_labels is None or self.num_labels <= 1
+        ):
+            raise ValueError("Categorical targets require num_labels > 1.")
         return self
+
+
+class EvaluationWorkspaceConfig(DatasetWorkspaceConfig):
+    """Paths and model settings for one model/dataset evaluation."""
+
+    model_name: str
+    model_repo_id: str | None = None
+    model_kwargs: dict[str, Any] = Field(default_factory=dict)
+    output_dir: Path | None = None
+    tmp_path: str | None = None
 
 
 class EvaluationWorkspace:

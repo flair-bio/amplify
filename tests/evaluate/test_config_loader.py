@@ -120,10 +120,10 @@ def test_dataset_default_matches_explicit_task_config(dataset):
         (
             "sequence_classification",
             "fold_prediction",
-            ["random_trunk", "majority_class"],
+            ["random_trunk"],
         ),
         ("sequence_multilabel_classification", "GO_bp", ["random_trunk"]),
-        ("sequence_regression", "stability_prediction", ["random_trunk", "train_mean"]),
+        ("sequence_regression", "stability_prediction", ["random_trunk"]),
         ("token_classification", "ssp_q3", ["random_trunk", "majority_class"]),
         (
             "contact_prediction",
@@ -148,6 +148,11 @@ def test_task_control_defaults(task, dataset, controls):
         ]
     )
     assert config.steps.predict.controls == controls
+    expected_baselines = {
+        "sequence_classification": ["majority_class"],
+        "sequence_regression": ["train_mean"],
+    }.get(task, [])
+    assert config.baselines.names == expected_baselines
 
 
 def test_protparams_uses_sequence_regression_r2_defaults():
@@ -200,7 +205,7 @@ def test_later_overlays_and_cli_can_customize_implicit_task(tmp_path):
         "  num_labels: 2\n"
         "steps:\n"
         "  predict:\n"
-        "    controls: [majority_class]\n"
+        "    controls: [scrambled_labels]\n"
     )
     config = load_evaluation_config(
         [CONFIGS / "config.yaml", dataset, CONFIGS / "tuning/mlp_finetuning.yaml"],
@@ -212,7 +217,7 @@ def test_later_overlays_and_cli_can_customize_implicit_task(tmp_path):
     assert config.steps.tune.max_epochs == 3
     # The dataset itself also has higher priority than the implicit task.
     config = load_evaluation_config([CONFIGS / "config.yaml", dataset])
-    assert config.steps.predict.controls == ["majority_class"]
+    assert config.steps.predict.controls == ["scrambled_labels"]
 
 
 def test_cli_task_selection_loads_method_behavior():

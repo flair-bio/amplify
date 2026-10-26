@@ -26,6 +26,9 @@ workspace:
 wandb:
   enabled: false
 
+baselines:
+  names: [] # smoke tests exercise model controls without requiring a baseline job
+
 steps:
   mode: evaluate_as_is
   prepare:

@@ -31,7 +31,7 @@ def main() -> None:
 
     Usage::
 
-        uv run run_evaluate.py <config.yaml> [<override.yaml> ...] [key=value ...]
+        uv run run_evaluate.py [--baselines] <config.yaml> [<override.yaml> ...] [key=value ...]
 
     One or more YAML files may be supplied; later files override earlier ones
     for shared keys.  Any ``key=value`` arguments (containing ``=``) are
@@ -46,9 +46,11 @@ def main() -> None:
         uv run modules/evaluate/src/run_evaluate.py modules/evaluate/configs/config.yaml dataset.base_path=/data
     """
     args = sys.argv[1:]
+    baseline_only = "--baselines" in args
+    args = [argument for argument in args if argument != "--baselines"]
     if not args:
         print(
-            "Usage: run_evaluate <config.yaml> [<override.yaml> ...] [key=value ...]",
+            "Usage: run_evaluate [--baselines] <config.yaml> [<override.yaml> ...] [key=value ...]",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -60,6 +62,18 @@ def main() -> None:
     if not config_paths:
         print("Error: at least one YAML config file must be provided.", file=sys.stderr)
         sys.exit(1)
+
+    if baseline_only:
+        from modules.evaluate.src.runners.baselines import (
+            load_baseline_config,
+            run_baselines,
+        )
+
+        baseline_config = load_baseline_config(config_paths, overrides or None)
+        for test, artifacts in run_baselines(baseline_config).items():
+            for name, path in artifacts.items():
+                logger.info("Baseline %s / %s: %s", test, name, path)
+        return
 
     logger.info("=== Starting Evaluation Pipeline ===")
 

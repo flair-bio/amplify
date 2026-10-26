@@ -63,6 +63,7 @@ class PreparedArtifacts:
 
     # Set when this run is one cross-validation fold.
     cross_validation: CrossValidationIdentity | None = None
+    baseline_context: dict[str, Any] | None = None
 
     def cv_metadata(self) -> dict[str, Any]:
         """CV fields for :class:`EvaluationMetadata`, empty outside CV."""
@@ -176,6 +177,7 @@ class PredictOutput:
     # the result even if it's inspected independently of the config that
     # created it.
     config: dict[str, Any] | None = None
+    baseline_context: dict[str, Any] | None = None
 
 
 @dataclass

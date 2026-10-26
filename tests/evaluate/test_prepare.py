@@ -31,6 +31,7 @@ from modules.evaluate.src.dataset.workspace import (
     get_evaluation_workspace,
 )
 from modules.evaluate.src.steps import prepare as prepare_module
+from modules.evaluate.src.dataset import resolution as resolution_module
 from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
 from modules.evaluate.src.steps.prepare import PrepareConfig, PrepareStep
 from modules.evaluate.src.utils.embed import find_embedding_dataset
@@ -72,6 +73,7 @@ def _run_prepare(
     external=None,
     external_dataset=None,
     dataset=None,
+    baseline_names=None,
     **config_kwargs,
 ):
     AcceleratorState._reset_state(reset_partial_state=True)
@@ -88,7 +90,7 @@ def _run_prepare(
         lambda *args, **kwargs: HFAccelerator(cpu=True),
     )
     monkeypatch.setattr(
-        prepare_module,
+        resolution_module,
         "load_evaluation_dataset",
         lambda repo_id, **kwargs: build_raw_dataset_dict(task_type),
     )
@@ -124,7 +126,10 @@ def _run_prepare(
     workspace = _make_workspace(tmp_path, task_type, num_labels=num_labels)
     step = PrepareStep(config)
     prepared = step.run(
-        workspace, layerwise_config=layerwise_config, dataset=dataset
+        workspace,
+        layerwise_config=layerwise_config,
+        dataset=dataset,
+        baseline_names=baseline_names,
     )
     if external is None:
         return prepared
@@ -137,7 +142,7 @@ def _run_prepare(
             }
         )
     monkeypatch.setattr(
-        prepare_module,
+        resolution_module,
         "load_raw_evaluation_dataset",
         lambda repo_id: external_dataset,
     )

@@ -267,6 +267,21 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
     steps.score.n_samples=1000
 ```
 
+Sequence task presets request shared `majority_class` or `train_mean`
+baselines. Generate them before model evaluation using the same dataset,
+split settings, and `workspace.base_path` (no model overlay required):
+
+```bash
+uv run python -m modules.evaluate.src.run_evaluate --baselines \
+    modules/evaluate/configs/config.yaml \
+    modules/evaluate/configs/datasets/solubility_prediction.yaml
+```
+
+Model scoring loads these artifacts without fitting them. Use
+`baselines.names=[]` to disable shared baselines, including for CV, which is
+not supported by the baseline runner yet. See [Shared sequence
+baselines](docs/controls.md#shared-sequence-baselines).
+
 CUDA evaluation enables TensorFloat-32 by default with top-level `tf32: true`,
 matching pretraining's `trainer.tf32` convention. Append `tf32=false` to any
 standard or ProteinGym evaluation command to disable it. This controls CUDA
@@ -343,6 +358,7 @@ Append these overrides to any launch command, or put them in an overlay YAML.
 | K-fold cross-validated probe scores | `cross_validation.enabled=true` (see [Cross-validation](#cross-validation)) |
 | Classical probe on cached embeddings | Add `modules/evaluate/configs/tuning/random_forest.yaml` after the dataset overlay |
 | Disable control conditions | `steps.predict.controls=[]` |
+| Disable shared sequence baselines | `baselines.names=[]` |
 | Write results elsewhere | `workspace.base_path=/path/to/eval` |
 | Set the model output directory independently of its checkpoint path | `workspace.output_dir=/path/to/eval/01_baseline_checkpoint_100000` |
 
@@ -615,7 +631,7 @@ conditions sharing a forward pass; validation loops remain quiet.
 | `random_both` | Trunk and head re-initialized |
 | `scrambled_sequences` | Residues shuffled within each sequence |
 | `scrambled_labels` | Trained predictions scored against permuted labels |
-| `majority_class` / `train_mean` | Train class prior / train label mean |
+| `majority_class` | Train class prior; inside Predict for token tasks only |
 | `separation_prior` | Train contact rate per residue separation |
 
 Per-task presets, invalid combinations, and how to read the results are in
@@ -629,7 +645,7 @@ Per-task presets, invalid combinations, and how to read the results are in
 | `predictions_filename` | `predictions.parquet` | Output filename under `<workspace>/runs/<variant>/preds/` |
 | `persist_to_disk` | `true` | Write predictions and the prediction manifest; disable for fast in-process evaluation |
 | `store_sequences` | `false` | Decode and include source sequences in the main predictions table |
-| `controls` | `[random_trunk]` | Per-model control; task configs add supported train-only baselines |
+| `controls` | `[random_trunk]` | Per-model controls; token/contact presets add their existing priors. Sequence priors use top-level `baselines.names` and the separate `--baselines` route |
 | `embedding_batch_size` | `null` | Cached-feature rows per prediction batch, including model-based controls; `null` inherits the prepared loader size. Does not change live trunk batches. |
 
 Cached token probes batch **residues**, not proteins. The token-classification

@@ -81,6 +81,7 @@ class TestEvaluationConfig:
             model_cls=EvaluationConfig,
             overrides=[
                 "cross_validation.enabled=true",
+                "baselines.names=[]",
                 "cross_validation.n_splits=3",
                 "steps.score.bootstrap_enabled=false",
             ],

@@ -55,6 +55,9 @@ def run_pipeline(
         layerwise_config=config.steps.layerwise,
         dataset=dataset,
         cross_validation=cross_validation,
+        **(
+            {"baseline_names": config.baselines.names} if config.baselines.names else {}
+        ),
     )
     logger.info("=== Completed Prepare Step ===")
 
