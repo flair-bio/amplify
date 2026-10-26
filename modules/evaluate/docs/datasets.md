@@ -105,7 +105,7 @@ be selected.
 | UESolDS | `solubility_prediction` | `sequence_classification` | Macro-F1 |
 | FLIP / Meltome Atlas | `meltome_mixed`, `meltome_human` | `sequence_regression` | `spearmanr` |
 | Biomap-research | `stability_prediction` | `sequence_regression` | `mse`, `mae`, `r2`, `pearsonr`, `spearmanr` |
-| Biomap-research | `ssp_q3`, `ssp_q8` | `token_classification` | `f1`, `accuracy`, `precision`, `recall`, `mcc` |
+| Reprocessed BioMap SSP | `ssp_q3`, `ssp_q8` | `token_classification` | Macro-F1 |
 | Biomap-research | `contact_prediction_binary` | `contact_prediction`, `categorical_jacobian` | Contact precision at top L, L/2, L/5 and contact AUC, per short / medium / long range |
 | UniProt GO | `GO_mf`, `GO_bp`, `GO_cc` | `sequence_multilabel_classification` | `f1`, `multilabel_mcc`, `average_precision` |
 | InterPro | 7 `interpro_*` entry types | `sequence_multilabel_classification` | `f1`, `multilabel_mcc`, `average_precision` |
@@ -252,8 +252,8 @@ by proteases?
 
 **Question:** is each residue in a helix, a strand, or a coil?
 
-- **Readout:** one of 3 classes per residue: H (helix), E (strand), C (coil),
-  computed with DSSP from solved structures (NetSurfP-2.0 data).
+- **Readout:** one of 3 classes per residue: `0=H` (helix), `1=E` (strand),
+  `2=C` (coil), consistently derived from the DSSP Q8 labels.
 - **Used for:** a first look at the structure of a protein with no solved
   structure; guiding domain boundaries and design.
 - **Why it matters:** the classic per-residue benchmark. Most protein
@@ -261,20 +261,29 @@ by proteases?
   per-residue embeddings.
 - **Run:** [`ssp_q3.yaml`](../configs/datasets/ssp_q3.yaml) with
   `token_classification` ·
-  [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-ssp_q3)
+  [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-ssp_q3_masked)
 
 ##### `ssp_q8`
 
 **Question:** the same as `ssp_q3`, with finer states.
 
-- **Readout:** one of 8 DSSP classes per residue: H (α-helix), G (3₁₀-helix),
-  I (π-helix), E (strand), B (β-bridge), T (turn), S (bend), C (coil).
+- **Readout:** one of 8 DSSP classes per residue: `0=G`, `1=H`, `2=I`,
+  `3=B`, `4=E`, `5=S`, `6=T`, `7=C`.
 - **Used for:** as `ssp_q3`.
 - **Why it matters:** harder than Q3. Some states (π-helix, β-bridge) are
   rare, so macro-averaged metrics expose whether the model handles them.
 - **Run:** [`ssp_q8.yaml`](../configs/datasets/ssp_q8.yaml) with
   `token_classification` ·
-  [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-ssp_q8)
+  [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-ssp_q8_masked)
+
+Both datasets contain 9,218 train, 1,627 validation, and 663 test
+observations. Targets use `-100` for residues outside the ordered-residue and
+source scoring-region masks; these positions are excluded from loss and
+Macro-F1. There are 2,187,951, 395,726, and 119,273 scored residues in the
+three splits, respectively. Repeated sequences remain separate observations
+because their scoring regions or labels can differ. The longest sequence is
+1,632 residues; the overlays allow up to 2,048 tokens, including special
+tokens, so the supplied residues are not cropped.
 
 ##### `contact_prediction_binary`
 
