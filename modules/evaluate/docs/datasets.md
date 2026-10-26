@@ -41,7 +41,7 @@ dataset's `targets`.
 
 | Task | Predicts | Example `targets` for one protein | Meaning |
 |---|---|---|---|
-| `sequence_classification` | One class per protein | `3` | Class index, e.g. "nucleus" in `localization_prediction` |
+| `sequence_classification` | One class per protein | `3` | Class index in the dataset's label vocabulary |
 | `sequence_regression` | One number per protein | `62.0` | e.g. optimal temperature in °C |
 | `sequence_multilabel_classification` | A set of labels per protein | `[0, 1, 1, 0, …]` | One bit per vocabulary entry (GO term, InterPro entry); several can be on |
 | `token_classification` | One class per residue | `[0, 0, 2, 2, 2, 1, -100, …]` | One class index per residue (same length as the sequence); `-100` is ignored |
@@ -183,6 +183,11 @@ original study, whose dataset card has the full label definitions.
 - **Run:** [`localization_prediction.yaml`](../configs/datasets/localization_prediction.yaml)
   with `sequence_classification` ·
   [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-localization_prediction)
+- **External test:** the overlay also configures setHARD
+  ([dataset card](https://huggingface.co/datasets/flair-bio/sethard)) as a
+  test-only set scored by the DeepLoc-fitted probe. Verify that its class-index
+  mapping matches BioMap's before interpreting the score: BioMap's card
+  documents integer labels but does not name the classes.
 
 ##### `solubility_prediction`
 

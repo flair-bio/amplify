@@ -212,6 +212,12 @@ def run_cross_validation(config: EvaluationConfig, accelerator: Any) -> Path:
     """
     if accelerator.num_processes != 1:
         raise ValueError("Cross-validation currently supports a single process only.")
+    if config.external_test_sets:
+        logger.warning(
+            "Ignoring external_test_sets during cross-validation; they are "
+            "scored only by ordinary evaluation runs."
+        )
+        config = config.model_copy(update={"external_test_sets": []})
     cv = config.cross_validation
     prepare = config.steps.prepare
     ws_config = config.workspace

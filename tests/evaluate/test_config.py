@@ -26,8 +26,37 @@ def _base_config_dict() -> dict:
     }
 
 
-class TestEvaluationConfig:
+class TestExternalTestSets:
+    @staticmethod
+    def _payload(**extra):
+        payload = _base_config_dict()
+        payload["external_test_sets"] = [
+            {"name": "sethard", "dataset_repo_id": "flair-bio/sethard"}
+        ]
+        payload.update(extra)
+        return payload
 
+    def test_defaults_to_empty_and_split_to_test(self):
+        assert (
+            EvaluationConfig.model_validate(_base_config_dict()).external_test_sets
+            == []
+        )
+        config = EvaluationConfig.model_validate(self._payload())
+        assert config.external_test_sets[0].split == "test"
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"external_test_sets": [{"name": "a", "dataset_repo_id": "x/a"}] * 2},
+            {"external_test_sets": [{"name": "a/b", "dataset_repo_id": "x/a"}]},
+        ],
+    )
+    def test_invalid_combinations_rejected(self, extra):
+        with pytest.raises(ValueError):
+            EvaluationConfig.model_validate(self._payload(**extra))
+
+
+class TestEvaluationConfig:
     def test_cross_validation_defaults_to_disabled_at_top_level(self):
         config = EvaluationConfig.model_validate(_base_config_dict())
         assert not config.cross_validation.enabled

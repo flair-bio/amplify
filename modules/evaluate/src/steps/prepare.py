@@ -10,6 +10,7 @@ then instantiate the model wrapper that matches the task type.
 from __future__ import annotations
 
 import inspect
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from accelerate import Accelerator
@@ -26,8 +27,10 @@ from modules.evaluate.src.dataset.collator import (
 from modules.evaluate.src.dataset.dataloader import (
     DataLoaderConfig,
     DatasetSplitConfig,
+    ExternalTestSetConfig,
     build_dataloaders,
     load_evaluation_dataset,
+    load_raw_evaluation_dataset,
     tokenize_dataset,
 )
 from modules.evaluate.src.dataset.workspace import EvaluationWorkspace, TaskType
@@ -338,20 +341,8 @@ class PrepareStep:
                 num_labels,
                 # Match live probe representations and include those settings
                 # in cache identity, rather than using generic cache defaults.
-                cache_config=(
-                    self.config.embedding_cache.model_copy(
-                        update={
-                            "layers": resolve_layers(
-                                active_layerwise_config.layers,
-                                model.config.num_hidden_layers + 1,
-                            ),
-                            "pooling": active_layerwise_config.pooling,
-                            "autocast_dtype": active_layerwise_config.autocast_dtype,
-                            "normalize_before_pooling": active_layerwise_config.normalize_before_pooling,
-                        }
-                    )
-                    if active_layerwise_config is not None
-                    else None
+                cache_config=self._layerwise_cache_config(
+                    active_layerwise_config, model
                 ),
             )
             # Cache extraction needs the original task model; attach the
@@ -381,6 +372,199 @@ class PrepareStep:
             split=self.config.split.name,
             cross_validation=cross_validation,
             **embedding_extras,
+        )
+
+    def _layerwise_cache_config(
+        self, layerwise_config: LayerwiseConfig | None, model: nn.Module
+    ) -> EmbeddingCacheConfig | None:
+        """Cache settings matching live layerwise probe representations."""
+        if layerwise_config is None:
+            return None
+        return self.config.embedding_cache.model_copy(
+            update={
+                "layers": resolve_layers(
+                    layerwise_config.layers, model.config.num_hidden_layers + 1
+                ),
+                "pooling": layerwise_config.pooling,
+                "autocast_dtype": layerwise_config.autocast_dtype,
+                "normalize_before_pooling": layerwise_config.normalize_before_pooling,
+            }
+        )
+
+    def _test_cache_key(
+        self,
+        cache_config: EmbeddingCacheConfig,
+        *,
+        model_id: str,
+        dataset_id: str,
+        token_test_dataloader: Any,
+        model_fingerprint: str,
+        seed: int,
+    ) -> str:
+        return embedding_cache_key(
+            model_id=model_id,
+            dataset_id=dataset_id,
+            split="test",
+            max_length=self.config.max_length,
+            random_truncate=self.config.random_truncate_by_split.get("test", False),
+            seed=seed,
+            pooling=cache_config.pooling,
+            dtype=cache_config.dtype,
+            layers=cache_config.resolved_layers,
+            model_fingerprint=model_fingerprint,
+            dataset_fingerprint=getattr(
+                token_test_dataloader.dataset, "_fingerprint", None
+            ),
+            autocast_dtype=cache_config.autocast_dtype,
+            normalize_before_pooling=cache_config.normalize_before_pooling,
+            packed=self.config.packed,
+            length_grouped_sampling=self.config.length_grouped_sampling,
+        )
+
+    def prepare_external_test(
+        self,
+        workspace: EvaluationWorkspace,
+        prepared: PreparedArtifacts,
+        external: ExternalTestSetConfig,
+        *,
+        accelerator: Accelerator,
+        seed: int,
+        layerwise_config: LayerwiseConfig | None = None,
+    ) -> PreparedArtifacts:
+        """Return *prepared* with its test loaders swapped for an external set.
+
+        The fitted model, heads, and tokenizer are reused unchanged. Cached
+        runs embed the external set once with the frozen trunk and the same
+        pooling/layer settings, under a cache key naming the external dataset.
+        """
+        logger.info(
+            "Preparing external test set '%s' (%s:%s)...",
+            external.name,
+            external.dataset_repo_id,
+            external.split,
+        )
+        raw = load_raw_evaluation_dataset(external.dataset_repo_id)
+        if external.split not in raw:
+            raise ValueError(
+                f"External test set '{external.name}' has no split "
+                f"'{external.split}'. Available splits: {sorted(raw.keys())}."
+            )
+        dataset = DatasetDict({"test": raw[external.split]})
+
+        task = get_task(workspace.task_type)
+        num_labels = task.resolve_num_labels(
+            workspace.num_labels, workspace.dataset_name
+        )
+        task.validate_num_labels(
+            dataset, self.config.label_column, num_labels, external.name
+        )
+        with accelerator.main_process_first():
+            dataset = tokenize_dataset(
+                dataset,
+                tokenizer=prepared.tokenizer,
+                task_type=workspace.task_type,
+                sequence_column=self.config.sequence_column,
+                label_column=self.config.label_column,
+                max_length=self.config.max_length,
+                id_column=self.config.id_column,
+                num_proc=self.config.tokenize_num_proc,
+                random_truncate_by_split=self.config.random_truncate_by_split,
+                seed=seed,
+            )
+        _, _, raw_test_dataloader = build_dataloaders(
+            dataset=dataset,
+            collator=self._build_collator(prepared.tokenizer, workspace.task_type),
+            config=DataLoaderConfig(
+                batch_size=self.config.batch_size,
+                max_tokens_per_batch=self.config.max_tokens_per_batch,
+                num_workers=self.config.dataloader_num_workers,
+                pin_memory=self.config.dataloader_pin_memory,
+                persistent_workers=self.config.dataloader_persistent_workers,
+                seed=seed,
+                length_grouped_sampling=self.config.length_grouped_sampling,
+            ),
+        )
+        if raw_test_dataloader is None:
+            raise ValueError(
+                f"External test set '{external.name}' did not produce a test "
+                "dataloader."
+            )
+        token_test_dataloader = accelerator.prepare(raw_test_dataloader)
+
+        backend = prepared.embedding_backend
+        token_dataloaders = prepared.layerwise_token_dataloaders
+        if token_dataloaders is not None:
+            token_dataloaders = {**token_dataloaders, "test": token_test_dataloader}
+        if backend is None:
+            return replace(
+                prepared,
+                test_dataloader=token_test_dataloader,
+                layerwise_token_dataloaders=token_dataloaders,
+            )
+        if backend.cache is None or backend.model_id is None:
+            raise ValueError(
+                "Embedding-cache external evaluation requires the cache and "
+                "model ID recorded by the original Prepare step."
+            )
+
+        trunk = backend.trunk
+        cache_config = (
+            self._layerwise_cache_config(
+                layerwise_config
+                if layerwise_config and layerwise_config.enabled
+                else None,
+                trunk,
+            )
+            or self.config.embedding_cache
+        )
+        model_fingerprint = weights_fingerprint(trunk)
+        external_id = external.dataset_repo_id
+        embedding_dataloader = build_embedding_dataloaders(
+            model=trunk,
+            splits={
+                "test": (
+                    token_test_dataloader,
+                    self.config.random_truncate_by_split.get("test", False),
+                )
+            },
+            accelerator=accelerator,
+            cache=backend.cache,
+            cache_config=cache_config,
+            model_id=backend.model_id,
+            dataset_id=external_id,
+            max_length=self.config.max_length,
+            seed=seed,
+            batch_size=self.config.batch_size,
+            extraction_batch_size=(
+                None if self.config.packed else self.config.embedding_batch_size
+            ),
+            embedding_size=backend.hidden_size,
+            label_dtype=task.label_dtype,
+            is_ragged=task.is_ragged,
+            model_fingerprint=model_fingerprint,
+            length_grouped_sampling=self.config.length_grouped_sampling,
+        )["test"]
+        external_backend = replace(
+            backend,
+            token_test_dataloader=raw_test_dataloader,
+            dataset_id=external_id,
+            test_cache_key=self._test_cache_key(
+                cache_config,
+                model_id=backend.model_id,
+                dataset_id=external_id,
+                token_test_dataloader=raw_test_dataloader,
+                model_fingerprint=model_fingerprint,
+                seed=seed,
+            ),
+            test_dataset_fingerprint=getattr(
+                raw_test_dataloader.dataset, "_fingerprint", None
+            ),
+        )
+        return replace(
+            prepared,
+            test_dataloader=embedding_dataloader,
+            embedding_backend=external_backend,
+            layerwise_token_dataloaders=token_dataloaders,
         )
 
     def _apply_embedding_cache(
@@ -424,24 +608,13 @@ class PrepareStep:
         token_test_dataloader = raw_test_dataloader
         model_fingerprint = weights_fingerprint(model)
         test_random_truncate = self.config.random_truncate_by_split.get("test", False)
-        test_cache_key = embedding_cache_key(
+        test_cache_key = self._test_cache_key(
+            cache_config,
             model_id=model_id,
             dataset_id=dataset_id,
-            split="test",
-            max_length=self.config.max_length,
-            random_truncate=test_random_truncate,
-            seed=seed,
-            pooling=cache_config.pooling,
-            dtype=cache_config.dtype,
-            layers=layers,
+            token_test_dataloader=token_test_dataloader,
             model_fingerprint=model_fingerprint,
-            dataset_fingerprint=getattr(
-                token_test_dataloader.dataset, "_fingerprint", None
-            ),
-            autocast_dtype=cache_config.autocast_dtype,
-            normalize_before_pooling=cache_config.normalize_before_pooling,
-            packed=self.config.packed,
-            length_grouped_sampling=self.config.length_grouped_sampling,
+            seed=seed,
         )
 
         label_dtype = task.label_dtype

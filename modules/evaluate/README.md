@@ -363,6 +363,7 @@ EvaluationConfig
 ├── workspace: EvaluationWorkspaceConfig
 ├── wandb:     WandbConfig
 ├── cross_validation: CrossValidationConfig
+├── external_test_sets: list[ExternalTestSetConfig]
 └── steps:     StepsConfig
     ├── layerwise: LayerwiseConfig
     ├── prepare:   PrepareConfig
@@ -727,6 +728,32 @@ other hyperparameters are not part of this path, so runs with the same model,
 dataset, mode, head, and split can overwrite one another; use a separate
 `workspace.base_path` when those settings need separate artifacts. The shared
 `scores_long.parquet` records the resulting model, dataset, head, and split.
+
+### External test sets
+
+`external_test_sets` lists test-only datasets scored with the model fitted on
+the workspace dataset. They are never used for training, tuning, or selection,
+and must share the main dataset's label contract. After the main Predict and
+Score, each set is tokenized with the same settings, embedded by the same
+frozen trunk when the cache is on, and run through the same fitted probe,
+standardization, and controls. Matching the number of classes is not enough:
+the class-index-to-label mapping must also match. The current BioMap
+localization card documents integer labels but not their class names, so
+verify its mapping against setHARD before interpreting that external score.
+`localization_prediction.yaml` configures `flair-bio/sethard` this way:
+
+```yaml
+external_test_sets:
+  - name: sethard
+    dataset_repo_id: flair-bio/sethard
+    split: test
+```
+
+Outputs use the external dataset's own workspace and the same variant:
+`<model>/<external_dataset_repo>/runs/<variant>/`. Its shared comparison table
+is at `<model>/<external_dataset_repo>/scores/scores_long.parquet`. Sets are
+skipped with a warning under `evaluate_as_is` (no fitted probe) and ignored by
+cross-validation.
 
 ### Reading results
 

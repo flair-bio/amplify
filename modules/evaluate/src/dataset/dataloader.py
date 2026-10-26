@@ -42,6 +42,24 @@ _DEFAULT_VALIDATION_FRACTION = 0.1
 DEFAULT_SPLIT_NAME = "default"
 
 
+class ExternalTestSetConfig(BaseModel):
+    """A test-only dataset scored with the model fitted on the main dataset.
+
+    It is never used for training, tuning, or model selection. Its labels must
+    follow the main dataset's label contract (column names and class indices).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        ...,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+        description="Filesystem-safe label used for this test set's outputs.",
+    )
+    dataset_repo_id: str = Field(..., min_length=1)
+    split: str = Field("test", min_length=1)
+
+
 class DatasetSplitConfig(BaseModel):
     """Map dataset-specific split names onto evaluation pipeline roles.
 
