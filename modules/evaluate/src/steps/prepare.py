@@ -92,9 +92,8 @@ class PrepareConfig(BaseModel):
     label_column: str = Field(
         "targets",
         description=(
-            "Dataset column containing the label(s). The biomap-research "
-            "evaluation datasets (e.g. localization_prediction, "
-            "temperature_stability, ssp_q3) all use 'targets', not 'label'."
+            "Dataset column containing label(s). Standardized evaluation "
+            "datasets use 'targets', not the source field 'label'."
         ),
     )
     id_column: str = Field(

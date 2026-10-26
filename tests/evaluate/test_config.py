@@ -382,6 +382,21 @@ class TestShippedConfigOverlays:
         assert config.steps.score.metrics == ["spearmanr"]
         assert config.steps.predict.controls == ["random_trunk"]
 
+    def test_solubility_overlay_uses_uesolds_and_macro_f1(self):
+        config = load_and_parse(
+            [
+                self._CONFIG_ROOT / "config.yaml",
+                self._CONFIG_ROOT / "tasks" / "sequence_classification.yaml",
+                self._CONFIG_ROOT / "datasets" / "solubility_prediction.yaml",
+            ],
+            EvaluationConfig,
+        )
+        assert config.workspace.dataset_repo_id == "flair-bio/solubility_uesolds_original"
+        assert config.workspace.num_labels == 2
+        assert config.steps.tune.hyperparameter_search.metric == "f1"
+        assert config.steps.score.metrics == ["f1"]
+        assert config.steps.score.metric_aggregation == "macro"
+
     @pytest.mark.parametrize(
         ("task_name", "dataset_name"),
         [

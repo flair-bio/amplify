@@ -138,7 +138,7 @@ differs, that is noted.
 
 | Shipped config | Builds by default |
 |---|---|
-| [`source_biomap_datasets.yaml`](../configs/dataset_sourcing/source_biomap_datasets.yaml) | All 8 retained Biomap-research datasets |
+| [`source_biomap_datasets.yaml`](../configs/dataset_sourcing/source_biomap_datasets.yaml) | All 6 configured Biomap-research datasets |
 | [`source_uniprot_go.yaml`](../configs/dataset_sourcing/source_uniprot_go.yaml) | All 3 GO aspects, human Swiss-Prot |
 | [`source_uniprot_annotations.yaml`](../configs/dataset_sourcing/source_uniprot_annotations.yaml) | All 12 residue-annotation groups, human Swiss-Prot |
 | [`source_interpro.yaml`](../configs/dataset_sourcing/source_interpro.yaml) | All 7 InterPro entry types, human Swiss-Prot |
@@ -369,7 +369,7 @@ sizes. The group depends on what the target looks like:
 
 | Target | Examples | Group |
 |---|---|---|
-| A class label (or a number with at most 20 distinct values) | `localization_prediction`, `temperature_stability` | The class |
+| A class label (or a number with at most 20 distinct values) | `localization_prediction`, `fold_prediction` | The class |
 | A continuous number | `stability_prediction` | Which tenth of the value range it falls in (10 equal-sized bins, by rank), so every split covers low, middle, and high values |
 | One label per residue | `ssp_q3`, `uniprot_*` | The protein's most common residue label |
 | A set of labels per protein | GO, InterPro | The protein's rarest label, counted over the whole dataset |
@@ -489,11 +489,11 @@ Hub mirrors the local artifact.
 
 ### Biomap-research
 
-Eight retained datasets from the `biomap-research` Hugging Face organization:
+Six configured datasets from the `biomap-research` Hugging Face organization:
 `ssp_q3`, `ssp_q8`, `fold_prediction`, `localization_prediction`,
-`temperature_stability`, `stability_prediction`, `solubility_prediction`, and
-`contact_prediction_binary`. The configured datasets use the HF-repository
-flow with `seq` → `sequence` and `label` → `targets`.
+`stability_prediction`, and `contact_prediction_binary`. The configured
+datasets use the HF-repository flow with `seq` → `sequence` and `label` →
+`targets`.
 
 Choices:
 
@@ -509,7 +509,7 @@ Choices:
   subsets.
 
 ```bash
-# All 8 retained datasets, local only
+# All 6 configured datasets, local only
 uv run python modules/evaluate/scripts/dataset_sourcing/source_biomap_datasets.py \
     modules/evaluate/configs/dataset_sourcing/source_biomap_datasets.yaml
 

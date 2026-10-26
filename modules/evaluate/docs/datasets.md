@@ -101,7 +101,8 @@ be selected.
 
 | Source | Datasets | Task | Default metrics |
 |---|---|---|---|
-| Biomap-research | `fold_prediction`, `localization_prediction`, `solubility_prediction` | `sequence_classification` | `f1`, `accuracy`, `mcc`, `roc_auc` |
+| Biomap-research | `fold_prediction`, `localization_prediction` | `sequence_classification` | `f1`, `accuracy`, `mcc`, `roc_auc` |
+| UESolDS | `solubility_prediction` | `sequence_classification` | Macro-F1 |
 | FLIP / Meltome Atlas | `meltome_mixed`, `meltome_human` | `sequence_regression` | `spearmanr` |
 | Biomap-research | `stability_prediction` | `sequence_regression` | `mse`, `mae`, `r2`, `pearsonr`, `spearmanr` |
 | Biomap-research | `ssp_q3`, `ssp_q8` | `token_classification` | `f1`, `accuracy`, `precision`, `recall`, `mcc` |
@@ -136,12 +137,11 @@ Multi-label widths come from `label_vocabulary.json`; scalar and per-residue
 class counts are taken across the canonical train, validation, and test
 splits. Recheck them when hosted artifacts change.
 
-### Biomap-Research
+### Protein-level benchmarks
 
-Eight retained benchmark datasets from the `biomap-research` Hugging Face
-organization, with their published splits
-([sourcing](dataset-sourcing.md#biomap-research)). Each entry names the
-original study, whose dataset card has the full label definitions.
+These classification and regression benchmarks use their published splits.
+Each entry identifies its source and links to the dataset card for full label
+definitions.
 
 #### Per protein: one class
 
@@ -195,17 +195,18 @@ original study, whose dataset card has the full label definitions.
 **Question:** will this protein stay dissolved when produced in bacteria, or
 clump into insoluble aggregates?
 
-- **Readout:** soluble or insoluble (2 classes), from the DeepSol dataset of
-  proteins expressed in *E. coli*. Upstream removed training proteins with 30%
-  or more identity to any test protein.
+- **Readout:** soluble or insoluble protein expression, from UESolDS as
+  distributed with PLM_Sol V1.1. Targets use `0 = insoluble`, `1 = soluble`;
+  report Macro-F1 over both classes. The standardized splits contain 69,964
+  training, 3,995 validation, and 3,998 test proteins.
 - **Used for:** choosing which constructs to express before spending lab
   time, and screening designed proteins and biologics for manufacturability.
-- **Why it matters:** an insoluble protein is usually a failed experiment.
-  Solubility depends on surface charge, hydrophobic patches, and whether the
-  chain folds at all, so it tests global physicochemical knowledge.
+- **Why it matters:** soluble expression matters for producing proteins in
+  laboratory systems. The labels reflect experimental expression conditions,
+  not context-independent intrinsic solubility.
 - **Run:** [`solubility_prediction.yaml`](../configs/datasets/solubility_prediction.yaml)
   with `sequence_classification` ·
-  [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-solubility_prediction)
+  [Hub](https://huggingface.co/datasets/flair-bio/solubility_uesolds_original)
 
 #### Per protein: one number
 
