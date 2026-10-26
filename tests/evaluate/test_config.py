@@ -318,6 +318,8 @@ class TestShippedConfigOverlays:
         [
             ("sequence_classification", "localization_prediction"),
             ("sequence_regression", "stability_prediction"),
+            ("sequence_regression", "meltome_mixed"),
+            ("sequence_regression", "meltome_human"),
             ("sequence_multilabel_classification", "GO_mf"),
             ("token_classification", "ssp_q3"),
         ],
@@ -361,6 +363,24 @@ class TestShippedConfigOverlays:
         split = config.steps.prepare.split
         assert (split.train, split.validation, split.test) == ("test",) * 3
         assert not any(config.steps.prepare.random_truncate_by_split.values())
+
+    @pytest.mark.parametrize("dataset_name", ["meltome_mixed", "meltome_human"])
+    def test_meltome_overlays_use_spearman_regression(self, dataset_name):
+        config = load_and_parse(
+            [
+                self._CONFIG_ROOT / "config.yaml",
+                self._CONFIG_ROOT / "tasks" / "sequence_regression.yaml",
+                self._CONFIG_ROOT / "datasets" / f"{dataset_name}.yaml",
+            ],
+            EvaluationConfig,
+        )
+        assert config.workspace.task_type == "sequence_regression"
+        assert config.workspace.target_type == "continuous"
+        assert config.workspace.num_labels is None
+        assert config.steps.tune.hyperparameter_search.metric == "spearmanr"
+        assert config.steps.tune.hyperparameter_search.direction == "maximize"
+        assert config.steps.score.metrics == ["spearmanr"]
+        assert config.steps.predict.controls == ["random_trunk"]
 
     @pytest.mark.parametrize(
         ("task_name", "dataset_name"),
@@ -478,9 +498,15 @@ class TestShippedConfigOverlays:
                 "scalar",
             ),
             (
-                "temperature_stability",
-                "sequence_classification",
-                "categorical",
+                "meltome_mixed",
+                "sequence_regression",
+                "continuous",
+                "scalar",
+            ),
+            (
+                "meltome_human",
+                "sequence_regression",
+                "continuous",
                 "scalar",
             ),
             (

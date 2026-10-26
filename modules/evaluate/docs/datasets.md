@@ -101,7 +101,8 @@ be selected.
 
 | Source | Datasets | Task | Default metrics |
 |---|---|---|---|
-| Biomap-research | `fold_prediction`, `localization_prediction`, `solubility_prediction`, `temperature_stability` | `sequence_classification` | `f1`, `accuracy`, `mcc`, `roc_auc` |
+| Biomap-research | `fold_prediction`, `localization_prediction`, `solubility_prediction` | `sequence_classification` | `f1`, `accuracy`, `mcc`, `roc_auc` |
+| FLIP / Meltome Atlas | `meltome_mixed`, `meltome_human` | `sequence_regression` | `spearmanr` |
 | Biomap-research | `stability_prediction` | `sequence_regression` | `mse`, `mae`, `r2`, `pearsonr`, `spearmanr` |
 | Biomap-research | `ssp_q3`, `ssp_q8` | `token_classification` | `f1`, `accuracy`, `precision`, `recall`, `mcc` |
 | Biomap-research | `contact_prediction_binary` | `contact_prediction`, `categorical_jacobian` | Contact precision at top L, L/2, L/5 and contact AUC, per short / medium / long range |
@@ -206,24 +207,25 @@ clump into insoluble aggregates?
   with `sequence_classification` ·
   [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-solubility_prediction)
 
-##### `temperature_stability`
-
-**Question:** does this protein stay folded at 65 °C?
-
-- **Readout:** stable or not (2 classes), adapted from TemStaPro. TemStaPro's
-  labels come from the growth temperature of the organism the protein comes
-  from, so they are a proxy for thermostability rather than a measured
-  melting point.
-- **Used for:** industrial enzymes (detergents, biofuel production, PCR
-  polymerases) must survive heat. Predicting thermostability from sequence
-  narrows the search before any protein is made.
-- **Why it matters:** heat-stable proteins differ in subtle, distributed ways
-  (more salt bridges, tighter packing, fewer heat-labile residues).
-- **Run:** [`temperature_stability.yaml`](../configs/datasets/temperature_stability.yaml)
-  with `sequence_classification` ·
-  [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-temperature_stability)
-
 #### Per protein: one number
+
+##### `meltome_mixed` and `meltome_human`
+
+**Question:** how well does a protein tolerate heating in an experimental assay?
+
+- **Readout:** experimentally measured apparent melting temperature in °C,
+  evaluated as regression with Spearman's ρ. `meltome_mixed` covers mixed
+  species; `meltome_human` is restricted to human proteins.
+- **Used for:** ranking candidate proteins by measured thermostability,
+  including proteins considered for industrial use.
+- **Limitations:** apparent melting temperature depends on assay context and
+  is not a context-independent measure of intrinsic stability. Treat mixed
+  and human as separate benchmarks; do not combine their scores as if they
+  were independent.
+- **Run:** [`meltome_mixed.yaml`](../configs/datasets/meltome_mixed.yaml) or
+  [`meltome_human.yaml`](../configs/datasets/meltome_human.yaml) with
+  `sequence_regression` · [Mixed dataset](https://huggingface.co/datasets/flair-bio/meltome_mixed)
+  · [Human dataset](https://huggingface.co/datasets/flair-bio/meltome_human)
 
 ##### `stability_prediction`
 
