@@ -245,11 +245,12 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
 
 An explicit task YAML takes precedence over the dataset default, in either
 order. This allows a contact dataset to run both `contact_prediction` and
-`categorical_jacobian`, or `uniprot_protparams` to run regression and
-`pseudo_perplexity`. Without an explicit task YAML, a CLI
-`workspace.task_type=...` selects a different task overlay. The baseline Slurm
-launcher accepts dataset-only rows plus an optional task column for extra
-methods; ProteinGym rows select their separate runner explicitly.
+`categorical_jacobian`. `pseudo_perplexity` works with any compatible sequence
+dataset; `uniprot_ur100p_test` selects the AMPLIFY paper's UniProt test set.
+Without an explicit task YAML, a CLI `workspace.task_type=...` selects a
+different task overlay. The baseline Slurm launcher accepts dataset-only rows
+plus an optional task column for extra methods; ProteinGym rows select their
+separate runner explicitly.
 
 The entry point is `modules/evaluate/src/run_evaluate.py`. Explicit YAML files
 are merged left-to-right (later files win), followed by optional `key=value`

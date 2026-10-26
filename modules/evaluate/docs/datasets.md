@@ -112,6 +112,7 @@ be selected.
 | InterPro | 7 `interpro_*` entry types | `sequence_multilabel_classification` | `f1`, `multilabel_mcc`, `average_precision` |
 | UniProt features | 12 `uniprot_*` residue overlays | `token_classification` | `f1`, `accuracy`, `precision`, `recall`, `mcc` |
 | UniProt ProtParam | `uniprot_protparams` (one property per run) | `sequence_regression` | R² |
+| AMPLIFY / UR100P | `uniprot_ur100p_test` | `pseudo_perplexity` | `pseudo_perplexity` |
 | Any sequence dataset | MLM models with a mask token | `pseudo_perplexity` | `pseudo_perplexity` |
 | HHblits/BFD homolog profiles | `human_calibration` (test split only) | `calibration` | `kl`, `kl_t`, `kl_nt`, `calibration`, `calibration_t`, `calibration_nt`, `accuracy_t`, `accuracy_nt`, `memorization_nt` |
 | ProteinGym | 4 assay tracks | Separate runners | Spearman (DMS), AUC (clinical), per assay |
@@ -656,6 +657,24 @@ Run each property separately, changing `steps.prepare.label_column` and using
 a distinct output directory for each property. Report the per-property R²
 values; if a single summary is needed, use their unweighted arithmetic mean,
 not one R² pooled across differently scaled targets.
+
+### Pseudo-perplexity: UniProt UR100P test set
+
+#### `uniprot_ur100p_test`
+
+The 10,000-sequence UniProt test split from UR100P, used in the AMPLIFY
+paper. It is a test-only, label-free dataset for zero-shot pseudo-perplexity;
+the existing `uniprot_protparams` regression dataset remains separate.
+
+- **Readout:** pseudo-perplexity over masked residues.
+- **Sequences:** 10,000 records, with a maximum length of 15,997 residues.
+  The artifact preserves complete sequences and repeated records.
+- **Length policy:** the dataset overlay defaults to `max_length: 2048`,
+  matching AMPLIFY's configured context. The limit includes special tokens,
+  so longer sequences are cropped before scoring. Override it for models with
+  shorter context windows.
+- **Run:** [`uniprot_ur100p_test.yaml`](../configs/datasets/uniprot_ur100p_test.yaml)
+  · [Hub](https://huggingface.co/datasets/flair-bio/uniprot_ur100p_test)
 
 ### Calibration
 
