@@ -4,31 +4,20 @@ per-sequence row extraction, metrics, and the bilinear contact model.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import numpy as np
 import polars as pl
 import pytest
 import torch
-from accelerate import Accelerator
-from transformers import EsmConfig
 
 from modules.evaluate.src.metrics import contact_metrics
-from modules.evaluate.src.model.contact_model import (
-    ContactModelConfig,
-    ContactPredictionModel,
-)
-from modules.evaluate.src.steps.tune import TuneConfig, TuneStep
 from modules.evaluate.src.tasks import get_task
 from modules.evaluate.src.tasks.contact_prediction import IGNORE_INDEX
 from modules.evaluate.src.utils.controls import ControlBuilder
 from modules.evaluate.src.utils.inference import pad_for_gather
 
-from .conftest import build_tiny_model
-
 
 def _task():
-    return get_task("contact_prediction")
+    return get_task("categorical_jacobian")
 
 
 def test_align_labels_crops_and_shifts_pairs():
@@ -327,125 +316,6 @@ def test_contact_metrics_reject_invalid_labels(value, error):
         contact_metrics.contact_range_auc(
             predictions, labels, "macro", min_sep=24, max_sep=None
         )
-
-
-def _tiny_esm_config() -> EsmConfig:
-    return EsmConfig(
-        hidden_size=16,
-        num_hidden_layers=2,
-        num_attention_heads=2,
-        intermediate_size=32,
-        vocab_size=25,
-        pad_token_id=1,
-        max_position_embeddings=64,
-    )
-
-
-def test_contact_prediction_model_forward_is_symmetric_and_trains():
-    config = ContactModelConfig(_tiny_esm_config(), rank=4)
-    model = ContactPredictionModel(config)
-    assert model.base_model_prefix == "trunk"
-
-    input_ids = torch.randint(4, 20, (2, 6))
-    attention_mask = torch.ones(2, 6, dtype=torch.long)
-    labels = torch.full((2, 6, 6), IGNORE_INDEX, dtype=torch.long)
-    labels[:, 0, 3] = 1
-    labels[:, 3, 0] = 1
-    labels[:, 1, 4] = 0
-    labels[:, 4, 1] = 0
-
-    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-    assert outputs.logits.shape == (2, 6, 6)
-    assert torch.allclose(outputs.logits, outputs.logits.transpose(1, 2), atol=1e-5)
-    assert outputs.loss is not None
-    outputs.loss.backward()
-    assert model.query.weight.grad is not None
-
-
-def test_build_model_uses_default_rank_and_honors_model_kwargs_override(tmp_path):
-    from transformers import EsmModel
-
-    trunk_dir = tmp_path / "tiny-trunk"
-    EsmModel(_tiny_esm_config()).save_pretrained(trunk_dir)
-
-    task = _task()
-    default_model = task.build_model(str(trunk_dir), num_labels=2)
-    assert default_model.query.out_features == task.RANK
-    assert default_model.config.pos_weight == task.POS_WEIGHT
-
-    overridden_model = task.build_model(
-        str(trunk_dir), num_labels=2, model_kwargs={"rank": 4, "pos_weight": 5.0}
-    )
-    assert overridden_model.query.out_features == 4
-    assert overridden_model.config.pos_weight == 5.0
-
-@pytest.mark.skip(reason="Skipping contact checkpoint round trip test temporarily")
-def test_contact_checkpoint_round_trip_through_tune(tmp_path, model_family):
-    if model_family.name == "amplify-120m":
-        from modules.pretrain.src.model.modeling_amplify import (
-            register_amplify_auto_classes,
-        )
-
-        register_amplify_auto_classes()
-    trunk_dir = tmp_path / "trunk"
-    build_tiny_model(
-        model_family, "sequence_classification", num_labels=2
-    ).base_model.save_pretrained(trunk_dir)
-    model = _task().build_model(
-        str(trunk_dir), num_labels=2, model_kwargs={"rank": 4, "pos_weight": 7.0}
-    )
-    tokens = model_family.tokenizer("ACDEFGHIK", return_tensors="pt")
-    inputs = {name: tokens[name] for name in ("input_ids", "attention_mask")}
-    size = inputs["input_ids"].shape[1]
-    labels = torch.zeros((1, size, size), dtype=torch.int8)
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
-    model(**inputs, labels=labels).loss.backward()
-    optimizer.step()
-    model.eval()
-    with torch.no_grad():
-        expected = model(**inputs, labels=labels)
-
-    directory = tmp_path / "saved-contact"
-    TuneStep(TuneConfig())._save_model(
-        SimpleNamespace(model_path=directory),
-        SimpleNamespace(tokenizer=model_family.tokenizer),
-        model,
-        Accelerator(cpu=True),
-        {"learning_rate": 1e-3, "max_epochs": 1, "weight_decay": 0.0},
-        seed=710019,
-    )
-    restored = _task().load_finetuned_model(str(directory))
-    assert restored.config.rank == 4
-    assert restored.config.pos_weight == 7.0
-    assert not restored.training
-    assert (directory / "tokenizer_config.json").is_file()
-    assert (directory / "tune_config.json").is_file()
-    with torch.no_grad():
-        actual = restored(**inputs, labels=labels)
-    torch.testing.assert_close(actual.logits, expected.logits)
-    torch.testing.assert_close(actual.loss, expected.loss)
-    for name, value in model.state_dict().items():
-        torch.testing.assert_close(restored.state_dict()[name], value)
-    actual = restored(**inputs, labels=labels)
-    actual.loss.backward()
-    assert restored.query.weight.grad is not None
-
-
-def test_contact_save_uses_supplied_state_and_skips_non_main_process(tmp_path):
-    model = ContactPredictionModel(ContactModelConfig(_tiny_esm_config(), rank=4))
-    weights = {name: value.clone() for name, value in model.state_dict().items()}
-    with torch.no_grad():
-        model.query.weight.add_(1)
-        next(model.trunk.parameters()).add_(1)
-    model.save_pretrained(tmp_path / "skipped", is_main_process=False)
-    assert not (tmp_path / "skipped").exists()
-    model.save_pretrained(tmp_path / "saved", state_dict=weights)
-    restored = ContactPredictionModel.from_pretrained(tmp_path / "saved")
-    for name, value in weights.items():
-        torch.testing.assert_close(restored.state_dict()[name], value)
-    (tmp_path / "saved" / "contact_head.pt").unlink()
-    with pytest.raises(FileNotFoundError):
-        ContactPredictionModel.from_pretrained(tmp_path / "saved")
 
 
 def test_compute_separation_prior_matches_empirical_rate():

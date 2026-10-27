@@ -139,7 +139,9 @@ def main() -> None:
         # Nest outputs under this run's variant (head type + mode + non-default
         # split) so sweeping probes for the same model+dataset doesn't
         # overwrite a previous variant's checkpoint/predictions/scores.
-        workspace = get_evaluation_workspace(config.workspace, variant=config.variant)
+        workspace = get_evaluation_workspace(
+            config.workspace, variant=config.variant, seed=config.seed
+        )
         logger.info(
             "Initialized workspace: model %s dataset %s variant %s",
             workspace.model_name,

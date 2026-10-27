@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
@@ -12,10 +12,13 @@ from datasets import Dataset, DatasetDict, Features, List, Value
 
 from modules.evaluate.src.dataset import dataloader
 from modules.evaluate.src.dataset.dataloader import load_contact_dataset
+from modules.evaluate.src.dataset.workspace import (
+    EvaluationWorkspaceConfig,
+    get_evaluation_workspace,
+)
 from modules.evaluate.src.schemas.artifacts import (
     ContactEvaluationMetadata,
-    EvaluationMetadata,
-    PredictOutput,
+    PreparedArtifacts,
 )
 from modules.evaluate.src.steps.predict import PredictConfig, PredictStep
 from modules.evaluate.src.steps.prepare import PrepareConfig, PrepareStep
@@ -77,6 +80,31 @@ def hf_data(rows, *, features=FEATURES):
             "test": Dataset.from_list(rows, features=features),
         }
     )
+
+
+def prediction_inputs(dataset, predictor, tmp_path):
+    workspace = get_evaluation_workspace(
+        EvaluationWorkspaceConfig(
+            model_name="toy",
+            dataset_name="casp",
+            run_id="offline",
+            task_type="contact_prediction_embedding",
+            target_type="categorical",
+            label_format="contact_pairs",
+            output_dir=tmp_path,
+        ),
+        variant="bilinear512-frozen_trunk",
+        seed=0,
+    )
+    prepared = PreparedArtifacts(
+        model=SimpleNamespace(predict=lambda chain, tokenizer: predictor(chain)),
+        tokenizer=None,
+        train_dataloader=None,
+        val_dataloader=None,
+        test_dataloader=None,
+        contact_dataset=dataset,
+    )
+    return workspace, prepared
 
 
 def test_local_loading_uses_only_parquet_and_preserves_rows(tmp_path, monkeypatch):
@@ -182,7 +210,7 @@ def test_generic_loader_preserves_fixed_splits_but_generic_tokenization_rejects_
         )
     with pytest.raises(ValueError, match="contact step methods"):
         dataloader.tokenize_dataset(
-            hf, protein_tokenizer, "contact_prediction", "sequence", "targets", 512
+            hf, protein_tokenizer, "categorical_jacobian", "sequence", "targets", 512
         )
 
 
@@ -270,23 +298,16 @@ def test_steps_share_full_chain_predictions_and_roundtrip_outputs(tmp_path):
     predictor = Mock(
         side_effect=lambda chain: np.zeros((len(chain.alignment.clean_sequence),) * 2)
     )
-    metadata = EvaluationMetadata(
-        model_name="toy",
-        dataset_name="casp",
-        task_type="contact_prediction_embedding",
-        seed=0,
-    )
-    predictions = PredictStep(PredictConfig(controls=[])).run_contacts(
-        dataset, predictor, metadata, output_dir=tmp_path
+    workspace, prepared = prediction_inputs(dataset, predictor, tmp_path)
+    predictions = PredictStep(PredictConfig(controls=[])).run(
+        workspace, prepared, seed=0
     )
     predictor.assert_called_once_with(dataset.splits["test"][0])
     assert predictions.predictions.height == len(rows)
     assert predictions.predictions_path is not None
-    saved = json.loads((tmp_path / "contact_predict.json").read_text())
-    restored = PredictOutput(
-        ContactEvaluationMetadata.model_validate(saved["metadata"]),
-        pl.read_parquet(predictions.predictions_path),
-    )
+    restored = ScoreStep.load_predict_output(workspace)
+    assert isinstance(restored.metadata, ContactEvaluationMetadata)
+    assert restored.metadata == predictions.metadata
     scored = ScoreStep(ScoreConfig()).run_contacts(restored, output_dir=tmp_path)
     assert scored.unit_scores.height == 2 * len(rows)
     statuses = {
@@ -301,28 +322,29 @@ def test_steps_share_full_chain_predictions_and_roundtrip_outputs(tmp_path):
     assert pl.read_parquet(scored.unit_scores_path).equals(scored.unit_scores)
 
 
-def test_deleted_chains_are_unscorable_and_bad_predictions_fail():
-    metadata = EvaluationMetadata(
-        model_name="toy",
-        dataset_name="casp",
-        task_type="contact_prediction_embedding",
-        seed=0,
-    )
+def test_deleted_chains_are_unscorable_and_bad_predictions_fail(tmp_path):
     step = PredictStep(PredictConfig(controls=[], persist_to_disk=False))
     dataset = prepare_contact_dataset(
         hf_data([row(sequence="XBOUZJ", positive_pairs=[])])
     )
     predictor = Mock(side_effect=AssertionError("No retained residues"))
-    predictions = step.run_contacts(dataset, predictor, metadata)
+    workspace, prepared = prediction_inputs(dataset, predictor, tmp_path)
+    predictions = step.run(workspace, prepared, seed=0)
     predictor.assert_not_called()
     result = ScoreStep(ScoreConfig()).run_contacts(predictions)
     assert result.unit_scores["status"].to_list() == ["no_retained_members"] * 2
     dataset = prepare_contact_dataset(hf_data([row()]))
+    workspace, prepared = prediction_inputs(
+        dataset, lambda chain: np.zeros((10, 10)), tmp_path
+    )
     with pytest.raises(ValueError, match="full retained-chain"):
-        step.run_contacts(dataset, lambda chain: np.zeros((10, 10)), metadata)
+        step.run(workspace, prepared, seed=0)
+    workspace, prepared = prediction_inputs(
+        dataset, Mock(side_effect=MemoryError("too long")), tmp_path
+    )
     with pytest.raises(MemoryError, match="too long"):
-        step.run_contacts(dataset, Mock(side_effect=MemoryError("too long")), metadata)
+        step.run(workspace, prepared, seed=0)
     with pytest.raises(ValueError, match="fitted predictors"):
-        PredictStep(PredictConfig()).run_contacts(dataset, predictor, metadata)
+        PredictStep(PredictConfig()).run(workspace, prepared, seed=0)
     with pytest.raises(ValueError, match="complexes"):
         ScoreStep(ScoreConfig(bootstrap_enabled=True)).run_contacts(predictions)

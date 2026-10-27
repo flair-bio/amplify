@@ -107,7 +107,7 @@ be selected.
 | FLIP / Meltome Atlas | `meltome_mixed`, `meltome_human` | `sequence_regression` | `spearmanr` |
 | Biomap-research | `stability_prediction` | `sequence_regression` | `mse`, `mae`, `r2`, `pearsonr`, `spearmanr` |
 | Reprocessed BioMap SSP | `ssp_q3`, `ssp_q8` | `token_classification` | Macro-F1 |
-| Biomap-research | `contact_prediction_binary` | `contact_prediction`, `categorical_jacobian` | Contact precision at top L, L/2, L/5 and contact AUC, per short / medium / long range |
+| CASP14-16 | `contact_prediction_casp` | `contact_prediction_embedding` | AUC, P@L, P@L/2, P@L/5 and ROC-AUC; global and intra-EU, original separations >=6/24 |
 | UniProt GO | `GO_mf`, `GO_bp`, `GO_cc` | `sequence_multilabel_classification` | `f1`, `multilabel_mcc`, `average_precision` |
 | InterPro | 7 `interpro_*` entry types | `sequence_multilabel_classification` | `f1`, `multilabel_mcc`, `average_precision` |
 | UniProt features | 12 `uniprot_*` residue overlays | `token_classification` | `f1`, `accuracy`, `precision`, `recall`, `mcc` |
@@ -311,24 +311,28 @@ because their scoring regions or labels can differ. The longest sequence is
 1,632 residues; the overlays allow up to 2,048 tokens, including special
 tokens, so the supplied residues are not cropped.
 
-##### `contact_prediction_binary`
+##### `contact_prediction_casp`
 
 **Question:** which pairs of residues touch in the folded protein?
 
-- **Readout:** a list of residue pairs closer than 8 Å in the structure
-  (trRosetta data). Valid pairs at sequence separation 6 or more that are not
-  listed count as negatives; closer pairs are ignored because they touch
-  trivially.
+- **Readout:** self-contained global and intra-EU rows with original chain
+  indices, valid structural positions and positive contact pairs. Other
+  pairs between valid residues are negative; unresolved residues are unknown.
+  Runtime ambiguity cleaning preserves original positional gaps and pair
+  separations. There is no cropping or coordinate-file dependency.
 - **Used for:** contacts were the key input to early structure predictors
   (including the first AlphaFold), and they still help to check folds and to
   find residues that interact.
 - **Why it matters:** contacts between residues far apart in sequence define
   the fold. Good long-range precision is the clearest sign that a model has
-  learned 3D structure from sequence alone. The same data serves the
-  zero-shot `categorical_jacobian` task.
-- **Run:** [`contact_prediction_binary.yaml`](../configs/datasets/contact_prediction_binary.yaml)
-  with `contact_prediction` or `categorical_jacobian` ·
-  [Hub](https://huggingface.co/datasets/flair-bio/biomap-research-contact_prediction_binary)
+  learned 3D structure from sequence alone.
+- **Splits:** 20 training and 20 validation structures; CASP14-16 testing.
+  Metrics retain global/EU identities and aggregate EU -> chain -> complex ->
+  edition, without pooling different settings or editions.
+- **Run:** [`contact_prediction_casp.yaml`](../configs/datasets/contact_prediction_casp.yaml)
+  with `contact_prediction_embedding`, an immutable HF dataset revision and one
+  configured seed. Attention and categorical-Jacobian integration is pending.
+  [Hub](https://huggingface.co/datasets/flair-bio/contact_prediction_casp)
 
 ### UniProt Gene Ontology
 

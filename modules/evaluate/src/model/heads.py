@@ -64,6 +64,7 @@ class _HeadOutput:
 
 
 HeadType = Literal[
+    "bilinear512",
     "mlp",
     "torch_linear",
     "sklearn_linear",
@@ -129,7 +130,8 @@ class HeadConfig(BaseModel):
             "over cached embeddings; without the cache, the loaded native "
             "task head must itself be a single nn.Linear. 'mlp': existing "
             "native model-head "
-            "path. 'sklearn_linear'/'knn'/'random_forest'/'xgboost': "
+            "path. 'bilinear512': the fixed CASP contact embedding head. "
+            "'sklearn_linear'/'knn'/'random_forest'/'xgboost': "
             "classical scikit-learn-compatible estimators fit once on cached "
             "pooled embeddings -- require "
             "steps.prepare.embedding_cache.enabled=True in tune_probe mode."

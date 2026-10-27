@@ -23,6 +23,13 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
     combination. Returns *config*, so this doubles as a pydantic
     ``model_validator(mode="after")`` function directly (see config.py)."""
     steps = config.steps
+    if config.workspace.task_type == "contact_prediction_embedding":
+        _validate_contact_embedding(config)
+        return config
+    if steps.tune.head.head_type == "bilinear512":
+        raise ValueError(
+            "head_type='bilinear512' requires contact_prediction_embedding"
+        )
     if config.cross_validation.enabled:
         _validate_cross_validation(config)
     if steps.layerwise.enabled:
@@ -135,8 +142,7 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
         )
     if (
         "separation_prior" in steps.predict.controls
-        and config.workspace.task_type
-        not in {"contact_prediction", "categorical_jacobian"}
+        and config.workspace.task_type != "categorical_jacobian"
     ):
         raise ValueError(
             "control='separation_prior' is only defined for "
@@ -263,6 +269,79 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
         # also valid: it trains an equivalent standalone linear probe over
         # cached per-token embeddings instead of the native head.
     return config
+
+
+def _validate_contact_embedding(config: EvaluationConfig) -> None:
+    """Fixed scientific settings; generic schedules/refits must not leak in."""
+    from modules.evaluate.src.metrics.contact_metrics import CASP_METRICS
+
+    steps = config.steps
+    task = get_task(config.workspace.task_type)
+    task.validate_dataset_config(
+        config.workspace.target_type,
+        config.workspace.label_format,
+        config.workspace.dataset_name,
+    )
+    if steps.mode != "tune_probe":
+        raise ValueError("Contact embeddings require steps.mode='tune_probe'")
+    if (
+        config.cross_validation.enabled
+        or config.external_test_sets
+        or steps.layerwise.enabled
+        or config.baselines.names
+    ):
+        raise ValueError(
+            "Contact embeddings require fixed CASP splits, without generic CV/layers/baselines"
+        )
+    if steps.prepare.packed or steps.prepare.split.model_dump() != {
+        "name": "default",
+        "train": "train",
+        "validation": "validation",
+        "test": "test",
+        "refit_additional_splits": [],
+    }:
+        raise ValueError(
+            "Contact embeddings require unchanged fixed splits and unpadded full chains"
+        )
+    if steps.prepare.embedding_cache.enabled:
+        raise ValueError(
+            "Use the contact development cache, not the generic pooled embedding cache"
+        )
+    tune = steps.tune
+    if (
+        tune.hyperparameter_search.enabled
+        or tune.refit_on_train_validation
+        or tune.standardize_features
+        or tune.variance_seeds
+        or tune.optimizer != "adamw"
+        or tune.optimizer_kwargs
+        or tune.scheduler_kwargs
+        or tune.lr_scheduler_type != "constant"
+        or tune.learning_rate != 0.001
+        or tune.weight_decay != 10
+        or tune.early_stopping_patience != 10
+        or tune.accumulation_steps != 1
+        or tune.warmup_ratio != 0
+        or tune.max_grad_norm != 0
+        or tune.batch_size != 20
+        or tune.max_epochs < 11
+        or tune.head.head_type != "bilinear512"
+    ):
+        raise ValueError(
+            "Contact embeddings require fixed bilinear512 AdamW lr=.001/decay=10, batch=20, patience=10; no HPO/refit/standardization/schedule/clipping"
+        )
+    if steps.predict.controls or steps.predict.collect_probabilities:
+        raise ValueError("Contact controls are a subsequent stage; set controls=[]")
+    if steps.score.bootstrap_enabled:
+        raise ValueError("Contact bootstrap requires complex-level resampling")
+    if steps.score.metrics is not None and set(steps.score.metrics) != set(
+        CASP_METRICS
+    ):
+        raise ValueError("Contact embeddings report fixed CASP metrics")
+    if config.workspace.model_kwargs:
+        raise ValueError(
+            "Contact embedding head settings cannot be overridden through model_kwargs"
+        )
 
 
 def _validate_cross_validation(config: EvaluationConfig) -> None:

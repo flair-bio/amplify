@@ -1,20 +1,4 @@
-"""Pairwise residue-residue contact prediction (binary contact map).
-
-Unlike ``token_classification``'s one-label-per-residue rows, labels here are
-one-label-per-*pair*: a dense ``(S, S)`` map per example, built from a sparse
-list of positive-contact ``[i, j]`` pairs (everything else between resolved
-residues at a valid separation is an implicit negative). Only pairs with
-tokenized separation ``>= MIN_SEP`` are scored;
-closer pairs (trivially "in contact" by sequence adjacency) are masked out
-via the ``-100`` ignore value, same as padding and leading/trailing
-special-token positions (CLS/BOS, EOS/SEP), which are not residues and are
-never scored as implicit negatives.
-
-Per-example predictions and labels carry their metadata in explicit fields:
-``{"scores": ..., "separations": ...}`` and ``{"length": ..., "values":
-...}``. This lets precision-at-L rank each sequence's own candidates without
-encoding sequence length as a dummy prediction. See ``metrics/contact_metrics.py``.
-"""
+"""HF-only CASP contact units, original-coordinate alignment and evaluation."""
 
 from __future__ import annotations
 
@@ -379,9 +363,9 @@ IGNORE_INDEX = -100
 
 @register_task
 class ContactPredictionTask(TaskHandler):
-    """Binary residue-residue contact prediction."""
+    """Fixed-split CASP embedding prediction and shared contact data processing."""
 
-    name = "contact_prediction"
+    name = "contact_prediction_embedding"
     is_ragged = True
     pairwise = True
     aligns_labels = True
@@ -392,13 +376,6 @@ class ContactPredictionTask(TaskHandler):
     #: Tokenized-residue separation below which a pair is never scored (it's
     #: a sequence-adjacency contact, not a structural one).
     MIN_SEP: ClassVar[int] = 6
-    #: Default rank of the bilinear pairwise projection (see
-    #: model/contact_model.py); override per run via
-    #: ``workspace.model_kwargs: {rank: ...}`` to sweep it.
-    RANK: ClassVar[int] = 128
-    #: Default BCE positive-class weight (contact maps are extremely
-    #: imbalanced); override per run via ``workspace.model_kwargs: {pos_weight: ...}``.
-    POS_WEIGHT: ClassVar[float] = 30.0
 
     metrics: ClassVar[dict[str, MetricFn]] = {
         **contact_metrics.PRECISION_METRICS,
@@ -408,6 +385,34 @@ class ContactPredictionTask(TaskHandler):
         *contact_metrics.PRECISION_METRICS,
         *contact_metrics.RANGE_AUC_METRICS,
     )
+
+    def default_metrics(self) -> list[str]:
+        if self.name == "contact_prediction_embedding":
+            return list(contact_metrics.CASP_METRICS)
+        return super().default_metrics()
+
+    def validate_metric_names(self, metric_names: Sequence[str]) -> None:
+        if self.name != "contact_prediction_embedding":
+            return super().validate_metric_names(metric_names)
+        unknown = set(metric_names) - set(contact_metrics.CASP_METRICS)
+        if unknown:
+            raise KeyError(f"Unknown CASP contact metrics: {sorted(unknown)}")
+
+    def compute_metrics(
+        self,
+        predictions: Sequence,
+        labels: Sequence,
+        metric_names: Sequence[str],
+        average: str = "weighted",
+        probabilities: Sequence | None = None,
+    ) -> dict[str, float]:
+        if self.name == "contact_prediction_embedding":
+            raise ValueError(
+                "Use score_units: CASP aggregation requires unit, chain and complex identities"
+            )
+        return super().compute_metrics(
+            predictions, labels, metric_names, average, probabilities
+        )
 
     def prepare_dataset(
         self,
@@ -547,7 +552,7 @@ class ContactPredictionTask(TaskHandler):
         )
 
     def model_kwargs(self) -> dict[str, Any]:
-        return {"rank": self.RANK, "pos_weight": self.POS_WEIGHT}
+        return {}
 
     def build_model(
         self,
@@ -555,9 +560,11 @@ class ContactPredictionTask(TaskHandler):
         num_labels: int,
         model_kwargs: dict[str, Any] | None = None,
     ) -> Any:
-        return build_contact_model(
-            model_id, **{**self.model_kwargs(), **(model_kwargs or {})}
-        )
+        if model_kwargs:
+            raise ValueError(
+                "Contact embedding head settings are fixed by the CASP protocol"
+            )
+        return build_contact_model(model_id)
 
     def load_finetuned_model(self, model_path: str) -> Any:
         return ContactPredictionModel.from_pretrained(model_path)

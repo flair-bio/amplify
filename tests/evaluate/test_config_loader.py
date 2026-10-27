@@ -70,7 +70,7 @@ def test_token_classification_uses_residue_scale_hpo():
     [
         ("calibration", "human_calibration"),
         ("pseudo_perplexity", "uniprot_protparams"),
-        ("categorical_jacobian", "contact_prediction_binary"),
+        ("categorical_jacobian", "contact_prediction_casp"),
     ],
 )
 def test_zero_shot_tasks_disable_default_training(task, dataset):
@@ -86,17 +86,17 @@ def test_zero_shot_tasks_disable_default_training(task, dataset):
 
 def test_contact_probe_does_not_inherit_cached_mlp_search():
     config = load_evaluation_config(
-        [CONFIGS / "config.yaml", CONFIGS / "datasets/contact_prediction_binary.yaml"]
+        [CONFIGS / "config.yaml", CONFIGS / "datasets/contact_prediction_casp.yaml"]
     )
     assert config.steps.mode == "tune_probe"
     assert not config.steps.prepare.embedding_cache.enabled
     assert not config.steps.tune.refit_on_train_validation
     search = config.steps.tune.hyperparameter_search
-    assert search.enabled
-    assert search.metric == "contact_auc_long"
-    assert search.search_space.hidden_size is None
-    assert search.search_space.hidden_depth is None
-    assert search.search_space.batch_size is None
+    assert not search.enabled
+    assert not config.steps.tune.standardize_features
+    assert config.steps.tune.early_stopping_patience == 10
+    assert config.steps.tune.learning_rate == .001
+    assert config.steps.tune.weight_decay == 10
 
 
 @pytest.mark.parametrize(
@@ -126,13 +126,13 @@ def test_dataset_default_matches_explicit_task_config(dataset):
         ("sequence_regression", "stability_prediction", ["random_trunk"]),
         ("token_classification", "ssp_q3", ["random_trunk"]),
         (
-            "contact_prediction",
-            "contact_prediction_binary",
-            ["random_trunk"],
+            "contact_prediction_embedding",
+            "contact_prediction_casp",
+            [],
         ),
         (
             "categorical_jacobian",
-            "contact_prediction_binary",
+            "contact_prediction_casp",
             ["random_trunk"],
         ),
         ("pseudo_perplexity", "uniprot_protparams", ["random_trunk"]),
@@ -175,7 +175,7 @@ def test_protparams_uses_sequence_regression_r2_defaults():
 @pytest.mark.parametrize(
     "dataset,task",
     [
-        ("contact_prediction_binary", "categorical_jacobian"),
+        ("contact_prediction_casp", "categorical_jacobian"),
         ("uniprot_protparams", "pseudo_perplexity"),
     ],
 )
@@ -222,7 +222,7 @@ def test_later_overlays_and_cli_can_customize_implicit_task(tmp_path):
 
 def test_cli_task_selection_loads_method_behavior():
     config = load_evaluation_config(
-        [CONFIGS / "config.yaml", CONFIGS / "datasets/contact_prediction_binary.yaml"],
+        [CONFIGS / "config.yaml", CONFIGS / "datasets/contact_prediction_casp.yaml"],
         overrides=["workspace.task_type=categorical_jacobian"],
     )
     assert config.workspace.task_type == "categorical_jacobian"

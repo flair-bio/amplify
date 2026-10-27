@@ -19,6 +19,7 @@ from modules.evaluate.src.dataset.workspace import (
     get_evaluation_workspace,
 )
 from modules.evaluate.src.schemas.artifacts import (
+    ContactScoreOutput,
     CrossValidationIdentity,
     PredictOutput,
     PreparedArtifacts,
@@ -39,7 +40,9 @@ class PipelineResult:
     ``scores`` is populated on the main process only."""
 
     predictions: dict[int | None, PredictOutput]
-    scores: dict[int | None, ScoreOutput] = field(default_factory=dict)
+    scores: dict[int | None, ScoreOutput | ContactScoreOutput] = field(
+        default_factory=dict
+    )
     # Results of the same fitted model on each configured external test set.
     external: dict[str, PipelineResult] = field(default_factory=dict)
 
@@ -54,6 +57,18 @@ def run_pipeline(
     overwrite: bool = False,
 ) -> PipelineResult:
     """Run every step once for *workspace*, optionally on a supplied dataset."""
+    if config.workspace.task_type == "contact_prediction_embedding":
+        if (
+            cross_validation is not None
+            or getattr(accelerator, "num_processes", 1) != 1
+        ):
+            raise ValueError(
+                "Contact embeddings require a single-process fixed-split run"
+            )
+        if workspace.seed != config.seed:
+            raise ValueError(
+                "Contact workspace must be created with the configured seed"
+            )
     if cross_validation is not None:
         if overwrite:
             raise ValueError(
@@ -92,6 +107,7 @@ def _reserve_outputs(
                                 }
                             ),
                             variant=workspace.variant,
+                            seed=workspace.seed,
                         )
                         for external in config.external_test_sets
                     )
@@ -138,6 +154,8 @@ def _execute_steps(
     dataset: DatasetDict | None,
     cross_validation: CrossValidationIdentity | None,
 ) -> PipelineResult:
+    if workspace.task_type == "contact_prediction_embedding":
+        return _execute_contacts(config, workspace, accelerator, dataset)
     logger.info("=== Starting Prepare Step ===")
     prepared_artifacts = PrepareStep(config.steps.prepare).run(
         workspace,
@@ -204,6 +222,7 @@ def _execute_steps(
                     }
                 ),
                 variant=workspace.variant,
+                seed=workspace.seed,
             )
             external_workspace.setup_directories()
             result.external[external.name] = _predict_and_score(
@@ -212,6 +231,68 @@ def _execute_steps(
             logger.info("=== Completed external test set '%s' ===", external.name)
     accelerator.wait_for_everyone()
     return result
+
+
+def _execute_contacts(
+    config: EvaluationConfig,
+    workspace: EvaluationWorkspace,
+    accelerator: Any,
+    dataset: DatasetDict | None,
+) -> PipelineResult:
+    from transformers import AutoTokenizer
+
+    from modules.evaluate.src.model.contact_model import build_contact_model
+    from modules.evaluate.src.tasks.contact_prediction import prepare_contact_dataset
+
+    source = workspace.config.dataset_repo_id
+    if source is None or workspace.config.model_repo_id is None:
+        raise ValueError("Contact embeddings require dataset_repo_id and model_repo_id")
+    if dataset is None:
+        contacts = PrepareStep(config.steps.prepare).run_contacts(
+            source,
+            revision=workspace.config.dataset_revision,
+            edition=workspace.config.edition,
+        )
+    else:
+        contacts = prepare_contact_dataset(
+            dataset,
+            source=source,
+            revision=workspace.config.dataset_revision,
+            edition=workspace.config.edition,
+        )
+    tokenizer = AutoTokenizer.from_pretrained(
+        workspace.config.model_repo_id, trust_remote_code=True
+    )
+    model = build_contact_model(workspace.config.model_repo_id).to(accelerator.device)
+    TuneStep(config.steps.tune).run_contacts(
+        workspace,
+        contacts,
+        model,
+        tokenizer,
+        seed=config.seed,
+        device=accelerator.device,
+        cache_config=config.steps.prepare.embedding_cache,
+    )
+    prepared = PreparedArtifacts(
+        model=model,
+        tokenizer=tokenizer,
+        contact_dataset=contacts,
+        train_dataloader=None,
+        val_dataloader=None,
+        test_dataloader=None,
+    )
+    predictions = PredictStep(config.steps.predict).run(
+        workspace,
+        prepared,
+        seed=config.seed,
+        head_type="bilinear512",
+        variant=workspace.variant,
+        accelerator=accelerator,
+    )
+    scores = ScoreStep(config.steps.score).run_contacts(
+        predictions, output_dir=workspace.scores_path
+    )
+    return PipelineResult(predictions={None: predictions}, scores={None: scores})
 
 
 def _predict_and_score(
@@ -260,7 +341,9 @@ def _predict_and_score(
                 workspace
                 if layer is None
                 else get_evaluation_workspace(
-                    workspace.config, variant=f"{workspace.variant}-layer_{layer}"
+                    workspace.config,
+                    variant=f"{workspace.variant}-layer_{layer}",
+                    seed=workspace.seed,
                 )
             )
             score = score_step.run(

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import polars as pl
 from pydantic import BaseModel, ConfigDict
@@ -20,6 +20,9 @@ from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizerBase
 
 from modules.evaluate.src.utils.embed import EmbeddingBackend
+
+if TYPE_CHECKING:
+    from modules.evaluate.src.tasks.contact_prediction import ContactDataset
 
 
 @dataclass
@@ -64,6 +67,7 @@ class PreparedArtifacts:
     # Set when this run is one cross-validation fold.
     cross_validation: CrossValidationIdentity | None = None
     baseline_context: dict[str, Any] | None = None
+    contact_dataset: ContactDataset | None = None
 
     def cv_metadata(self) -> dict[str, Any]:
         """CV fields for :class:`EvaluationMetadata`, empty outside CV."""

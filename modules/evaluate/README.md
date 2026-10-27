@@ -105,41 +105,37 @@ only. `tasks/contact_prediction.py` owns its data/prediction/scoring orchestrati
 the existing step classes delegate to that handler and persist its artifacts.
 The data contract/alignment also live in that task module, shared extraction in
 `utils/inference.py`, and ranking/aggregation in `metrics/contact_metrics.py`.
-The foundation is available through the existing step classes;
-the three predictor implementations and CLI wiring are a subsequent stage.
-The old contact overlays do **not** implement this benchmark.
+The frozen-embedding predictor runs through the normal CLI and prediction
+entry point. Attention, categorical-Jacobian migration and CASP controls remain
+subsequent stages. The old Biomap contact overlay and embedding head are removed.
 
-```python
-from pathlib import Path
-
-from modules.evaluate.src.schemas.artifacts import EvaluationMetadata
-from modules.evaluate.src.steps.prepare import PrepareConfig, PrepareStep
-from modules.evaluate.src.steps.predict import PredictConfig, PredictStep
-from modules.evaluate.src.steps.score import ScoreConfig, ScoreStep
-
-data = PrepareStep(PrepareConfig()).run_contacts(
-    "flair-bio/contact_prediction_casp",
-    revision=dataset_commit_sha,  # Immutable 40-character Hub commit.
-    edition=14,  # Optional: retain all editions when omitted.
-)
-metadata = EvaluationMetadata(
-    model_name="my-model", dataset_name="contact_prediction_casp",
-    task_type="contact_prediction_embedding", seed=0,
-)
-predictions = PredictStep(PredictConfig(controls=[])).run_contacts(
-    data, predictor, metadata, output_dir=Path("contact-example"),
-)
-scores = ScoreStep(ScoreConfig()).run_contacts(
-    predictions, output_dir=Path("contact-example"),
-)
+```bash
+uv run python modules/evaluate/src/run_evaluate.py \
+    modules/evaluate/configs/config.yaml \
+    modules/evaluate/configs/models/amplify_120m.yaml \
+    modules/evaluate/configs/datasets/contact_prediction_casp.yaml \
+    "workspace.dataset_revision=<immutable-40-character-HF-commit>" \
+    workspace.run_id=casp-embedding \
+    seed=0
 ```
 
-`predictor(chain)` must return the full cleaned-chain square score matrix in
-retained-residue order, as a NumPy array or PyTorch tensor. Use
-`tasks.contact_prediction.tokenize_contact_chain` to get uncropped tokens, residue-token
-indices and original-coordinate `position_ids`; the model adapter must honor
-these positions and grow native positional caches without rescaling.
-Pass a local dataset directory instead of the Hub ID (and omit `revision`) for
+The final residue embeddings are frozen, unpooled and unnormalized. Two
+independent bias-free 512-dimensional projections produce averaged directional
+logits plus a zero-initialized scalar bias. Fitting uses all known unordered
+training pairs at original separation >=6, equal pair weighting, AdamW
+(lr=0.001, matrix weight decay=10, bias decay=0), and one effective 20-protein
+batch per epoch. Validation uses mean structure P@L over the fixed 20 validation
+structures, strict improvement and patience 10; the best head is restored.
+There is no HPO, class weighting, negative subsampling, scheduler, clipping,
+feature standardization or train+validation refit. `max_epochs` is a safety
+limit: reaching it before patience is a failed fit.
+
+`tokenize_contact_chain` supplies uncropped tokens and original-coordinate
+position IDs. Native AMPLIFY and ESM rotary computations preserve gaps and
+grow positional caches without rescaling. `PreparedArtifacts.contact_dataset`
+passes these chains to the standard `PredictStep.run()`, which delegates
+scientific processing to the task handler and uses ordinary prediction
+persistence. Pass a local `workspace.dataset_repo_id` directory and omit the revision for
 offline Parquet loading. No source coordinate files or source-manifest joins
 are used. The runtime dataset fingerprint covers the scoring rows and fixed
 development splits.
@@ -149,6 +145,10 @@ and exact original sequences share predictions without merging their identities.
 Reference-free chains skip inference but retain unscored rows. Test features
 are transient; persisted predictions contain candidate scores, labels and
 original pair indices, not embeddings or attention maps.
+Only development embeddings are cached across seeds; content keys include the
+backbone weights/configuration, tokens, original positions and precision.
+Use `steps.prepare.embedding_cache.cache_policy=off` to disable this cache.
+Run one seed per invocation; final repetitions use seeds 0 through 4.
 
 Score writes `unit_scores.parquet` and `scores.parquet`, reporting both original
 separations (>=6 and >=24), AUC (mean precision at ten length cutoffs), P@L,
@@ -185,7 +185,7 @@ until their CASP-specific integration is implemented.
 | `sequence_regression` | One number per protein |
 | `sequence_multilabel_classification` | A set of labels per protein |
 | `token_classification` | One class per residue |
-| `contact_prediction` | Which residue pairs touch |
+| `contact_prediction_embedding` | Which residue pairs touch (fixed CASP protocol) |
 | `categorical_jacobian` | Contacts, zero-shot |
 | `pseudo_perplexity` | Nothing; scores masked residues, zero-shot |
 | `calibration` | Homolog amino-acid profiles at conserved positions, zero-shot |
@@ -253,8 +253,8 @@ To use fixed training settings instead, set
 apply. During HPO, searched values replace their fixed counterparts, not cap them.
 Classical-estimator overlays retain their estimator-specific spaces.
 Calibration, pseudo-perplexity, and categorical Jacobian task overlays disable
-caching, HPO, and refitting. The live contact probe disables cached refitting and
-MLP architecture/batch search; its replacement CASP protocol remains pending.
+caching, HPO, and refitting. The CASP embedding overlay selects a fixed bilinear
+head and rejects generic HPO, refitting, standardization and incompatible controls.
 
 | File | Use |
 |---|---|
@@ -282,8 +282,8 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
 ```
 
 An explicit task YAML takes precedence over the dataset default, in either
-order. This allows a contact dataset to run both `contact_prediction` and
-`categorical_jacobian`. `pseudo_perplexity` works with any compatible sequence
+order. The CASP dataset defaults to `contact_prediction_embedding`; the other
+CASP predictors are not integrated yet. `pseudo_perplexity` works with any compatible sequence
 dataset; `uniprot_ur100p_test` selects the AMPLIFY paper's UniProt test set.
 Without an explicit task YAML, a CLI `workspace.task_type=...` selects a
 different task overlay. The baseline Slurm launcher accepts dataset-only rows
@@ -497,7 +497,7 @@ split.
 Packed mode requires a CUDA device and a compatible AMPLIFY checkpoint whose
 forward signature accepts `cu_seqlens` and `max_seqlen`; sequence-classification
 heads must also accept `num_sequences`. Pairwise tasks such as
-`contact_prediction` are not supported. The collator emits flattened token
+`contact_prediction_embedding` are not supported. The collator emits flattened token
 inputs with sequence-boundary metadata, and prediction/embedding utilities
 unpack outputs to the usual per-example rows.
 
@@ -646,7 +646,7 @@ inference skips loss computation.
 
 Contact checkpoints save the trunk and tokenizer alongside `contact_head.pt`
 and `contact_config.json`. Reload them with
-`get_task("contact_prediction").load_finetuned_model(path)`.
+`get_task("contact_prediction_embedding").load_finetuned_model(path)`.
 
 ---
 
@@ -773,7 +773,7 @@ groups outputs by **benchmark root -> task -> dataset -> baselines/models -> run
 └── models/<model_name>/
     ├── workspace_manifest.json
     ├── tmp/embeddings/                 ← reusable across model runs
-    └── <variant>-<run_id>/
+    └── <variant>-<run_id>/seed_<seed>/
         ├── model/
         ├── predictions.parquet
         ├── controls/random_trunk/
@@ -805,12 +805,18 @@ A non-default `steps.prepare.split.name` is appended to the variant.
 
 Ordinary pipeline runs refuse existing variant outputs, including interrupted
 evaluations. Choose a new `workspace.run_id` to retain both experiments, or
-explicitly pass `--overwrite` to replace only that variant/run and its derived
+explicitly pass `--overwrite` to replace only that variant/run seed and its derived
 layer outputs. Nested controls and run-local comparison tables are replaced too;
-other variants, models, caches, and shared baselines are preserved. Matching
+other seeds, variants, models, caches, and shared baselines are preserved. Matching
 concurrent jobs fail rather than overwriting an active run. There is no
 ordinary-run resume mode. CV retains its existing fold-resume behavior;
 `--overwrite` is rejected for CV.
+
+Ordinary CLI runs isolate artifacts under `seed_<seed>`. The experiment directory
+also records seed-independent settings; sibling seeds cannot use different
+settings or, for CASP embeddings, different dataset/backbone content. Historical
+unseeded outputs are not migrated or removed: choose a new run ID. CV retains
+its configuration-hashed layout.
 
 Even with `--overwrite`, a model/dataset label already associated with a
 different input source cannot be reused in the same workspace: choose a new
@@ -1064,53 +1070,11 @@ not automatically resumed.
 interval (folds share training data). Pooled OOF scores generally differ from
 the mean of fold scores, especially for rank or threshold metrics.
 
-### Categorical-Jacobian contact prediction
+### Remaining contact predictors
 
-A zero-shot contact predictor: nothing is trained. The idea is that if mutating
-residue *i* changes what the model predicts at residue *j*, the two are likely
-in contact. Concretely, for each residue the model scores all 20 canonical
-substitutions and records the change in its 20 canonical output logits at every
-position, relative to the wild type. The `(L, 20, L, 20)` Jacobian is centered
-on all four axes, symmetrized, Frobenius-reduced to `(L, L)`, and Average
-Product Corrected (diagonal excluded). Scores are rankings, not calibrated
-probabilities.
-
-This bounded example keeps sequence length and batch small for a local check:
-
-```bash
-uv run accelerate launch modules/evaluate/src/run_evaluate.py \
-    modules/evaluate/configs/config.yaml \
-    modules/evaluate/configs/models/amplify_120m.yaml \
-    modules/evaluate/configs/tasks/categorical_jacobian.yaml \
-    modules/evaluate/configs/datasets/contact_prediction_binary.yaml \
-    steps.prepare.max_length=32 \
-    steps.prepare.batch_size=64 \
-    steps.prepare.dataloader_num_workers=0 \
-    steps.prepare.dataloader_persistent_workers=false \
-    steps.prepare.dataloader_pin_memory=false \
-    steps.prepare.tokenize_num_proc=1 \
-    steps.prepare.length_grouped_sampling=false \
-    steps.prepare.pad_to_multiple_of=null \
-    steps.predict.controls=[] \
-    steps.score.bootstrap_enabled=false \
-    workspace.base_path=./eval/smoke_test
-```
-
-For a full run, drop the bounded overrides:
-
-```bash
-uv run accelerate launch modules/evaluate/src/run_evaluate.py \
-    modules/evaluate/configs/config.yaml \
-    modules/evaluate/configs/models/amplify_120m.yaml \
-    modules/evaluate/configs/tasks/categorical_jacobian.yaml \
-    modules/evaluate/configs/datasets/contact_prediction_binary.yaml
-```
-
-Sequences are processed one at a time, with `20 * L` mutant inputs batched by
-`workspace.model_kwargs.mutant_batch_size`. The Jacobian is held in float32,
-falls back to float16, and the run fails before allocation if it still exceeds
-`workspace.model_kwargs.max_jacobian_bytes`. On limited hardware, lower
-`steps.prepare.max_length` or `mutant_batch_size`.
+Attention and categorical-Jacobian predictors have not yet been integrated
+with the HF-only CASP pipeline. The existing categorical-Jacobian handler is
+not the replacement scientific protocol and must not be used for CASP results.
 
 ---
 
@@ -1194,7 +1158,7 @@ adding one handler module, not editing the steps.
    is parametrized over every registered task, so the new handler is also
    exercised by the shared contract suite automatically.
 
-`contact_prediction` is the non-standard example: it overrides the model
+`contact_prediction_embedding` is the non-standard example: it overrides the model
 builder, pairwise label collation, ragged prediction-row handling, and contact
 metrics. Its labels are sparse positive `[i, j]` residue pairs, with implicit
 negative labels for valid pairs at separation six or greater. It uses a

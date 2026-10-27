@@ -1342,7 +1342,7 @@ def contact_predict_output():
         metadata=EvaluationMetadata(
             model_name="toy-model",
             dataset_name="toy_dataset",
-            task_type="contact_prediction",
+            task_type="categorical_jacobian",
         ),
         predictions=pl.DataFrame(
             {
@@ -1375,7 +1375,7 @@ def contact_predict_output():
 def test_cached_contact_permutations_match_predictions(
     contact_predict_output, two_sided, grouped
 ):
-    task = get_task("contact_prediction")
+    task = get_task("categorical_jacobian")
     frame = contact_predict_output.predictions
     predictions = as_indexable_array(frame["prediction"].to_list(), True)
     labels = as_indexable_array(frame["label"].to_list(), True)
@@ -1434,7 +1434,7 @@ def test_cached_contact_permutations_match_predictions(
 def test_contact_score_cache_preserves_outputs_and_avoids_recomputation(
     tmp_path, monkeypatch, contact_predict_output, bootstrap_enabled, degenerate
 ):
-    task_type = type(get_task("contact_prediction"))
+    task_type = type(get_task("categorical_jacobian"))
     if degenerate:
         # None of these metrics has an eligible pair in the chosen bin.
         frame = contact_predict_output.predictions
@@ -1459,7 +1459,7 @@ def test_contact_score_cache_preserves_outputs_and_avoids_recomputation(
                 run_id="test",
                 model_name="toy-model",
                 dataset_name="toy_dataset",
-                task_type="contact_prediction",
+                task_type="categorical_jacobian",
                 target_type="categorical",
                 label_format="contact_pairs",
                 base_path=str(tmp_path / name),

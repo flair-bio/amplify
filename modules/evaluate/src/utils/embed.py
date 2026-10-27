@@ -25,19 +25,20 @@ of filling the disk.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Literal, Sequence
 
 import torch
 from accelerate import Accelerator
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from safetensors import safe_open
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
@@ -45,6 +46,12 @@ from tqdm import tqdm
 from modules.evaluate.src.dataset.collator import input_id_rows, unpack_packed
 from modules.evaluate.src.dataset.dataloader import LengthGroupedSampler, token_lengths
 from modules.evaluate.src.utils.inference import pad_for_gather
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizerBase
+
+    from modules.evaluate.src.model.contact_model import ContactPredictionModel
+    from modules.evaluate.src.tasks.contact_prediction import ContactDataset
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +71,87 @@ BYTES_PER_GB = 1024**3
 # Splits eligible for the on-disk cache. Test embeddings are shared by probe
 # variants and model-based controls, so they are worth persisting too.
 CACHEABLE_SPLITS = frozenset({"train", "validation", "test"})
+
+
+def contact_development_features(
+    model: ContactPredictionModel,
+    tokenizer: PreTrainedTokenizerBase,
+    dataset: ContactDataset,
+    cache_dir: Path | None,
+    *,
+    refresh: bool = False,
+    max_cache_gb: float = 50,
+) -> tuple[dict[str, torch.Tensor], str]:
+    """Cache only deterministic full-chain train/validation residue embeddings."""
+    from modules.evaluate.src.tasks.contact_prediction import tokenize_contact_chain
+
+    chains = [*dataset.splits["train"], *dataset.splits["validation"]]
+    tokens = [tokenize_contact_chain(chain, tokenizer) for chain in chains]
+    identity = {
+        "extraction": "casp-final-embeddings-v1",
+        "weights": weights_fingerprint(model.trunk),
+        "backbone_config": json.loads(model.trunk.config.to_json_string()),
+        "dtype": "float32",
+        "tf32": torch.backends.cuda.matmul.allow_tf32,
+        "matmul_precision": torch.get_float32_matmul_precision(),
+        "chains": [
+            (
+                chain.split,
+                chain.record_id,
+                chain.alignment.sequence,
+                token.input_ids,
+                token.position_ids,
+                token.residue_token_indices,
+            )
+            for chain, token in zip(chains, tokens)
+        ],
+    }
+    key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+    def extract() -> dict[str, torch.Tensor]:
+        return {
+            str(i): model.extract(chain, tokenizer) for i, chain in enumerate(chains)
+        }
+
+    if cache_dir is None:
+        values = extract()
+    else:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        path = cache_dir / f"contact-development-{key}.safetensors"
+        with path.with_suffix(".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if path.exists() and not refresh:
+                values = load_file(str(path))
+            else:
+                values = extract()
+                size = sum(
+                    tensor.numel() * tensor.element_size() for tensor in values.values()
+                )
+                if size <= max_cache_gb * BYTES_PER_GB:
+                    temporary = path.with_suffix(".tmp")
+                    try:
+                        save_file(
+                            values,
+                            str(temporary),
+                            metadata={"identity": json.dumps(identity)},
+                        )
+                        temporary.replace(path)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+    if set(values) != {str(i) for i in range(len(chains))}:
+        raise ValueError("Contact feature cache has inconsistent structure identities")
+    result = {}
+    for i, chain in enumerate(chains):
+        features = values[str(i)]
+        if (
+            features.shape
+            != (len(chain.alignment.retained_positions), model.head.left.in_features)
+            or features.dtype != torch.float32
+            or not torch.isfinite(features).all()
+        ):
+            raise ValueError("Contact feature cache has invalid shapes or values")
+        result[chain.record_id] = features
+    return result, key
 
 
 class EmbeddingCacheConfig(BaseModel):

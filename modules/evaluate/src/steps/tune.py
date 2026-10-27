@@ -68,6 +68,10 @@ from modules.evaluate.src.utils.hpo import (
 
 if TYPE_CHECKING:
     import optuna
+    from transformers import PreTrainedTokenizerBase
+
+    from modules.evaluate.src.model.contact_model import ContactPredictionModel
+    from modules.evaluate.src.tasks.contact_prediction import ContactDataset
 from modules.evaluate.src.utils.inference import run_inference
 from modules.evaluate.src.utils.io import (
     write_settings_json,
@@ -259,6 +263,52 @@ class TuneStep:
     ) -> None:
         self.config = config
         self.train_trunk = mode == "finetune"
+
+    def run_contacts(
+        self,
+        workspace: EvaluationWorkspace,
+        dataset: ContactDataset,
+        model: ContactPredictionModel,
+        tokenizer: PreTrainedTokenizerBase,
+        *,
+        seed: int,
+        device: torch.device,
+        cache_config: EmbeddingCacheConfig,
+    ) -> dict[str, Any]:
+        from modules.evaluate.src.model.contact_model import fit_contact_head
+        from modules.evaluate.src.utils.embed import contact_development_features
+        from modules.evaluate.src.utils.io import write_json
+
+        features, key = contact_development_features(
+            model,
+            tokenizer,
+            dataset,
+            workspace.embeddings_path if cache_config.cache_policy != "off" else None,
+            refresh=cache_config.cache_policy == "refresh",
+            max_cache_gb=cache_config.max_cache_gb,
+        )
+        workspace.validate_experiment(
+            "inputs",
+            {
+                "dataset_fingerprint": dataset.fingerprint,
+                "development_features": key,
+                "protocol": "casp-contact-v1",
+            },
+        )
+        settings = fit_contact_head(
+            model,
+            dataset,
+            features,
+            seed=seed,
+            max_epochs=self.config.max_epochs,
+            device=device,
+        )
+        write_json(workspace.stats_path / "contact_training.json", settings)
+        if self.config.save_best_model:
+            model.save_pretrained(workspace.model_path)
+            tokenizer.save_pretrained(workspace.model_path)
+            write_json(workspace.model_path / "tune_config.json", settings)
+        return settings
 
     def run(
         self,
@@ -693,7 +743,9 @@ class TuneStep:
         if self.config.save_best_model and accelerator.is_main_process:
             for position, layer in enumerate(inner.layers):
                 layer_workspace = get_evaluation_workspace(
-                    workspace.config, variant=f"{workspace.variant}-layer_{layer}"
+                    workspace.config,
+                    variant=f"{workspace.variant}-layer_{layer}",
+                    seed=workspace.seed,
                 )
                 layer_workspace.model_path.mkdir(parents=True, exist_ok=True)
                 torch.save(

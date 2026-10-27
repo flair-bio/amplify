@@ -34,6 +34,8 @@ class DatasetWorkspaceConfig(BaseModel):
     dataset_repo_id: str | None = (
         None  # path to HuggingFace dataset repo e.g. biomap-research/stability_prediction
     )
+    dataset_revision: str | None = None
+    edition: Literal[14, 15, 16] | None = None
     task_type: TaskType
     default_task_type: TaskType | None = None  # dataset default evaluation method
     target_type: Literal["categorical", "continuous"]
@@ -122,11 +124,15 @@ class EvaluationWorkspace:
     """
 
     def __init__(
-        self, config: EvaluationWorkspaceConfig, variant: str | None = None
+        self,
+        config: EvaluationWorkspaceConfig,
+        variant: str | None = None,
+        seed: int | None = None,
     ) -> None:
 
         self.config = config
         self.variant = variant
+        self.seed = seed
 
         self.dataset_name = config.dataset_name
         self.dataset_repo_id = config.dataset_repo_id
@@ -153,6 +159,11 @@ class EvaluationWorkspace:
 
         self.run_name = f"{variant}-{config.run_id}" if variant else config.run_id
         run_root = workspace_root / self.run_name
+        self.experiment_root = run_root
+        if seed is not None:
+            if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+                raise ValueError("Run seed must be a nonnegative integer")
+            run_root = run_root / f"seed_{seed}"
         self.model_path = run_root / "model"
         self.run_root = run_root
         self.preds_path = run_root
@@ -174,7 +185,7 @@ class EvaluationWorkspace:
     def control_workspace(self, name: str) -> EvaluationWorkspace:
         """Keep a fitted control and its predictions inside the owning run."""
         validate_directory_label(name)
-        workspace = EvaluationWorkspace(self.config, self.variant)
+        workspace = EvaluationWorkspace(self.config, self.variant, self.seed)
         workspace.run_root = self.run_root / "controls" / name
         workspace.model_path = workspace.run_root / "model"
         workspace.preds_path = workspace.run_root
@@ -196,7 +207,8 @@ class EvaluationWorkspace:
         if self.variant is None:
             raise ValueError("Pipeline output protection requires a run variant.")
         self.workspace_root.mkdir(parents=True, exist_ok=True)
-        lock_path = self.workspace_root / f".{self.run_name}.lock"
+        suffix = "" if self.seed is None else f"-seed_{self.seed}"
+        lock_path = self.workspace_root / f".{self.run_name}{suffix}.lock"
         with lock_path.open("a") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -231,14 +243,28 @@ class EvaluationWorkspace:
                 rf"{re.escape(self.variant)}-layer_\d+-{re.escape(self.config.run_id)}"
             )
             targets = [self.run_root]
+            if (
+                self.seed is None
+                and (self.experiment_root / "experiment_config.json").exists()
+            ):
+                raise ValueError(
+                    "Seeded outputs already use this run_id; select a seed or a new run_id"
+                )
+            if (
+                self.seed is not None
+                and (self.experiment_root / "run_manifest.json").exists()
+            ):
+                raise ValueError(
+                    "Unseeded outputs already use this run_id; choose a new run_id"
+                )
             if runs_path.exists():
                 targets.extend(
-                    path
+                    path if self.seed is None else path / f"seed_{self.seed}"
                     for path in runs_path.iterdir()
                     if dependent_pattern.fullmatch(path.name)
                 )
             for target in targets:
-                if target.is_symlink():
+                if target.is_symlink() or target.parent.is_symlink():
                     raise ValueError(f"Refusing to modify symlinked outputs: {target}")
                 for source in (
                     self.tmp_path,
@@ -263,6 +289,9 @@ class EvaluationWorkspace:
         self, targets: list[Path], *, overwrite: bool, config: dict[str, Any]
     ) -> None:
         """Clean only reserved variant outputs, preserving caches and siblings."""
+        if self.seed is not None:
+            identity = {key: value for key, value in config.items() if key != "seed"}
+            self.validate_experiment("config", identity)
         if overwrite:
             runs_path = self.workspace_root
             pattern = re.compile(
@@ -270,8 +299,17 @@ class EvaluationWorkspace:
             )
             for target in targets:
                 if (
-                    target.parent != runs_path
-                    or not pattern.fullmatch(target.name)
+                    (
+                        target.parent != runs_path
+                        if self.seed is None
+                        else (
+                            target.parent.parent != runs_path
+                            or target.name != f"seed_{self.seed}"
+                        )
+                    )
+                    or not pattern.fullmatch(
+                        target.name if self.seed is None else target.parent.name
+                    )
                     or target.is_symlink()
                 ):
                     raise ValueError(
@@ -286,9 +324,31 @@ class EvaluationWorkspace:
             {"status": "running", "config": config},
         )
 
+    def validate_experiment(self, kind: str, identity: dict[str, Any]) -> None:
+        """Bind sibling seed runs to identical settings and immutable inputs."""
+        if self.experiment_root.is_symlink() or self.workspace_root.is_symlink():
+            raise ValueError("Refusing to modify symlinked experiment outputs")
+        validate_directory_label(kind)
+        path = self.experiment_root / f"experiment_{kind}.json"
+        lock_path = self.workspace_root / f".{self.run_name}-experiment.lock"
+        with lock_path.open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if path.is_symlink():
+                raise ValueError("Refusing to modify symlinked experiment identity")
+            if path.exists():
+                if json.loads(path.read_text()) != identity:
+                    raise ValueError(
+                        f"Experiment {kind} differs across seeds; choose a new run_id"
+                    )
+            else:
+                self.experiment_root.mkdir(parents=True, exist_ok=True)
+                write_json(path, identity)
+
 
 def get_evaluation_workspace(
-    config: EvaluationWorkspaceConfig, variant: str | None = None
+    config: EvaluationWorkspaceConfig,
+    variant: str | None = None,
+    seed: int | None = None,
 ) -> EvaluationWorkspace:
     """Build a workspace, optionally identifying the probe/mode variant."""
-    return EvaluationWorkspace(config, variant=variant)
+    return EvaluationWorkspace(config, variant=variant, seed=seed)

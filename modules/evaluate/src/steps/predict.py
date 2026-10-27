@@ -9,12 +9,10 @@ is :class:`~modules.evaluate.src.steps.score.ScoreStep`'s job.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, cast
 
-import numpy as np
 import polars as pl
 import torch
 from accelerate import Accelerator
@@ -36,11 +34,7 @@ from modules.evaluate.src.schemas.artifacts import (
     PreparedArtifacts,
 )
 from modules.evaluate.src.tasks import get_task
-from modules.evaluate.src.tasks.contact_prediction import (
-    ContactChain,
-    ContactDataset,
-    ContactPredictionTask,
-)
+from modules.evaluate.src.tasks.contact_prediction import ContactPredictionTask
 from modules.evaluate.src.utils.controls import (
     NO_INFERENCE_CONTROLS,
     ControlBuilder,
@@ -55,7 +49,6 @@ from modules.evaluate.src.utils.io import (
     downcast_prediction_dtypes,
     update_run_manifest,
     write_parquet,
-    write_settings_json,
 )
 from modules.evaluate.src.utils.layerwise import (
     run_layerwise_control_conditions,
@@ -169,43 +162,6 @@ class PredictStep:
     def __init__(self, config: PredictConfig) -> None:
         self.config = config
 
-    def run_contacts(
-        self,
-        dataset: ContactDataset,
-        predictor: Callable[[ContactChain], np.ndarray | torch.Tensor],
-        metadata: EvaluationMetadata,
-        *,
-        split: str = "test",
-        output_dir: Path | None = None,
-    ) -> PredictOutput:
-        """Predict full chains once and retain unit candidates, not test features."""
-        if self.config.controls:
-            raise ValueError(
-                "Contact controls require independently fitted predictors; use controls=[]"
-            )
-        if self.config.collect_probabilities:
-            raise ValueError(
-                "CASP contacts consume pair scores, not class probabilities"
-            )
-        output = ContactPredictionTask().predict_units(
-            dataset, predictor, metadata, split=split
-        )
-        output.config = self.config.model_dump()
-        if output_dir is not None and self.config.persist_to_disk:
-            seed = output.metadata.seed
-            assert seed is not None
-            output.predictions_path = write_parquet(
-                output.predictions, output_dir / self.config.predictions_filename
-            )
-            write_settings_json(
-                output_dir / "contact_predict.json",
-                seed,
-                output.config,
-                metadata=output.metadata.model_dump(mode="json"),
-                data_split=split,
-            )
-        return output
-
     def run_layerwise(
         self,
         workspace: EvaluationWorkspace,
@@ -244,7 +200,9 @@ class PredictStep:
             "trained"
         ].items():
             layer_workspace = get_evaluation_workspace(
-                workspace.config, variant=f"{workspace.variant}-layer_{layer}"
+                workspace.config,
+                variant=f"{workspace.variant}-layer_{layer}",
+                seed=workspace.seed,
             )
             layer_workspace.setup_directories()
             metadata = EvaluationMetadata(
@@ -341,13 +299,45 @@ class PredictStep:
         variant: str | None = None,
         accelerator: Accelerator | None = None,
     ) -> PredictOutput:
-        # Guard in case the user misconfigures the pipeline and tries to run PredictStep without a test dataloader (e.g. no 'test' split in the dataset).
-        if prepared.test_dataloader is None:
+        if prepared.test_dataloader is None and prepared.contact_dataset is None:
             raise ValueError(
                 "PredictStep requires a test_dataloader, but the Prepare "
                 "step did not produce one (no 'test' split in the dataset)."
             )
-
+        metadata = EvaluationMetadata(
+            model_name=workspace.model_name,
+            model_repo_id=workspace.model_repo_id,
+            dataset_name=workspace.dataset_name,
+            dataset_repo_id=workspace.dataset_repo_id,
+            task_type=workspace.task_type,
+            split=prepared.split,
+            seed=seed,
+            head_type=head_type,
+            variant=variant,
+            **prepared.cv_metadata(),
+        )
+        if prepared.contact_dataset is not None:
+            if self.config.controls:
+                raise ValueError(
+                    "Contact controls require independently fitted predictors; use controls=[]"
+                )
+            if self.config.collect_probabilities:
+                raise ValueError(
+                    "CASP contacts consume pair scores, not class probabilities"
+                )
+            if accelerator is not None and accelerator.num_processes != 1:
+                raise ValueError("Contact prediction requires a single process")
+            predictor = cast(Any, prepared.model).predict
+            output = ContactPredictionTask().predict_units(
+                prepared.contact_dataset,
+                lambda chain: predictor(chain, prepared.tokenizer),
+                metadata,
+            )
+            output.config = self.config.model_dump(mode="json")
+            if self.config.persist_to_disk:
+                persist_predictions(workspace, output, seed)
+            return output
+        assert prepared.test_dataloader is not None
         # The pipeline passes the same instance used by Prepare/Tune, so
         # gather_for_metrics() and is_main_process use one process state.
         if accelerator is None:
@@ -449,19 +439,6 @@ class PredictStep:
             )
 
         # Keep track of conditions for reproducibility and downstream steps like ScoreStep
-        metadata = EvaluationMetadata(
-            model_name=workspace.model_name,
-            model_repo_id=workspace.model_repo_id,
-            dataset_name=workspace.dataset_name,
-            dataset_repo_id=workspace.dataset_repo_id,
-            task_type=workspace.task_type,
-            split=prepared.split,
-            seed=seed,
-            head_type=head_type,
-            variant=variant,
-            **prepared.cv_metadata(),
-        )
-
         prediction_data: dict[str, list[Any]] = {
             "id": ids,
             "prediction": predictions,

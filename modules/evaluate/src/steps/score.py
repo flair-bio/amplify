@@ -26,6 +26,7 @@ from modules.evaluate.src.metrics.contact_metrics import (
 )
 from modules.evaluate.src.schemas.artifacts import (
     ConfidenceInterval,
+    ContactEvaluationMetadata,
     ContactScoreOutput,
     EvaluationMetadata,
     PredictOutput,
@@ -527,7 +528,11 @@ class ScoreStep:
             for control, path in predict_section.get("control_paths", {}).items()
         }
         return PredictOutput(
-            metadata=EvaluationMetadata.model_validate(metadata_dict),
+            metadata=(
+                ContactEvaluationMetadata
+                if "protocol_version" in metadata_dict
+                else EvaluationMetadata
+            ).model_validate(metadata_dict),
             predictions=pl.read_parquet(predictions_path),
             predictions_path=predictions_path,
             controls={

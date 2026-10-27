@@ -41,6 +41,7 @@ from modules.evaluate.src.schemas.artifacts import (
     CrossValidationIdentity,
     EvaluationMetadata,
     PredictOutput,
+    ScoreOutput,
 )
 from modules.evaluate.src.steps.predict import persist_predictions
 from modules.evaluate.src.steps.score import ScoreStep
@@ -286,7 +287,10 @@ def run_cross_validation(config: EvaluationConfig, accelerator: Any) -> Path:
                     cv_id=plan.cv_id, fold_id=fold.fold_id, split_seed=cv.split_seed
                 ),
             )
-            prediction, scores = result.predictions[None], result.scores[None].scores
+            prediction = result.predictions[None]
+            scored = result.scores[None]
+            assert isinstance(scored, ScoreOutput)
+            scores = scored.scores
             validate_prediction_coverage(
                 prediction.predictions, expected_ids, context=f"Fold {fold.fold_id}"
             )

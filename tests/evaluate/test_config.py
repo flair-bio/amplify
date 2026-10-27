@@ -139,7 +139,7 @@ class TestEvaluationConfig:
             EvaluationConfig.model_validate(payload)
 
     @pytest.mark.parametrize(
-        "task_type", ["contact_prediction", "categorical_jacobian", "calibration"]
+        "task_type", ["categorical_jacobian", "calibration"]
     )
     def test_pairwise_tasks_reject_packing(self, task_type):
         payload = _base_config_dict()
@@ -244,7 +244,6 @@ class TestEvaluationConfig:
             ("sequence_classification", "categorical", "scalar", 2),
             ("sequence_regression", "continuous", "scalar", None),
             ("token_classification", "categorical", "per_token", 3),
-            ("contact_prediction", "categorical", "contact_pairs", None),
             ("categorical_jacobian", "categorical", "contact_pairs", None),
             ("pseudo_perplexity", "categorical", "scalar", 2),
             ("calibration", "categorical", "consensus_profile", None),
@@ -271,7 +270,7 @@ class TestEvaluationConfig:
             ("sequence_classification", "continuous", "scalar"),
             ("sequence_regression", "categorical", "scalar"),
             ("token_classification", "categorical", "scalar"),
-            ("contact_prediction", "categorical", "per_token"),
+            ("contact_prediction_embedding", "categorical", "per_token"),
             ("calibration", "categorical", "scalar"),
         ],
     )
@@ -405,11 +404,11 @@ class TestShippedConfigOverlays:
             ("sequence_classification", "localization_prediction"),
             ("sequence_regression", "stability_prediction"),
             ("token_classification", "ssp_q3"),
-            ("contact_prediction", "contact_prediction_binary"),
-            ("categorical_jacobian", "contact_prediction_binary"),
+            ("contact_prediction_embedding", "contact_prediction_casp"),
+            ("categorical_jacobian", "contact_prediction_casp"),
             ("pseudo_perplexity", "localization_prediction"),
             ("pseudo_perplexity", "ssp_q3"),
-            ("pseudo_perplexity", "contact_prediction_binary"),
+            ("pseudo_perplexity", "contact_prediction_casp"),
             ("calibration", "human_calibration"),
         ],
     )
@@ -539,8 +538,8 @@ class TestShippedConfigOverlays:
                 "scalar",
             ),
             (
-                "contact_prediction_binary",
-                "contact_prediction",
+                "contact_prediction_casp",
+                "contact_prediction_embedding",
                 "categorical",
                 "contact_pairs",
             ),

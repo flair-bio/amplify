@@ -162,7 +162,9 @@ def test_online_layerwise_cli_branch(monkeypatch, tmp_path, model_family):
     run_evaluate.main()
     for layer in (0, 2):
         layer_workspace = get_evaluation_workspace(
-            config.workspace, variant=f"{config.variant}-layer_{layer}"
+            config.workspace,
+            variant=f"{config.variant}-layer_{layer}",
+            seed=config.seed,
         )
         assert (layer_workspace.preds_path / "predictions.parquet").exists()
         assert layer_workspace.run_manifest_path.exists()
@@ -839,7 +841,7 @@ def test_contact_inference_preserves_true_cropped_length():
         def gather_for_metrics(values, **kwargs):
             return values
 
-    task = get_task("contact_prediction")
+    task = get_task("categorical_jacobian")
     aligned = task.align_labels(
         {"pairs": [[2, 9]], "valid_positions": [2, 9, 12]},
         num_residues=15,
@@ -859,7 +861,7 @@ def test_contact_inference_preserves_true_cropped_length():
     }
 
     ids, predictions, labels, _, _ = run_inference(
-        Model(), [batch], "contact_prediction", Accelerator()
+        Model(), [batch], "categorical_jacobian", Accelerator()
     )
 
     assert ids == ["protein"]
