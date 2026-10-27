@@ -57,7 +57,7 @@ def run_pipeline(
     overwrite: bool = False,
 ) -> PipelineResult:
     """Run every step once for *workspace*, optionally on a supplied dataset."""
-    if config.workspace.task_type == "contact_prediction_embedding":
+    if config.workspace.task_type == "contact_prediction":
         if (
             cross_validation is not None
             or getattr(accelerator, "num_processes", 1) != 1
@@ -154,7 +154,7 @@ def _execute_steps(
     dataset: DatasetDict | None,
     cross_validation: CrossValidationIdentity | None,
 ) -> PipelineResult:
-    if workspace.task_type == "contact_prediction_embedding":
+    if workspace.task_type == "contact_prediction":
         return _execute_contacts(config, workspace, accelerator, dataset)
     logger.info("=== Starting Prepare Step ===")
     prepared_artifacts = PrepareStep(config.steps.prepare).run(

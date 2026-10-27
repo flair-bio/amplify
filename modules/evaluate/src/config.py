@@ -114,8 +114,6 @@ class EvaluationConfig(BaseModel):
     def variant(self) -> str:
         """Filesystem-safe label for this run's evaluation condition."""
         mode = self.steps.mode
-        if self.workspace.task_type == "contact_prediction_embedding":
-            return "bilinear512-frozen_trunk"
         if mode == "evaluate_as_is":
             variant = "pretrained"
         elif self.steps.layerwise.enabled:

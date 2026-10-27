@@ -270,7 +270,7 @@ class TestEvaluationConfig:
             ("sequence_classification", "continuous", "scalar"),
             ("sequence_regression", "categorical", "scalar"),
             ("token_classification", "categorical", "scalar"),
-            ("contact_prediction_embedding", "categorical", "per_token"),
+            ("contact_prediction", "categorical", "per_token"),
             ("calibration", "categorical", "scalar"),
         ],
     )
@@ -338,7 +338,7 @@ class TestShippedConfigOverlays:
         assert config.steps.prepare.embedding_cache.autocast_dtype == "float32"
 
         finetune = load_and_parse(
-            [*paths, self._CONFIG_ROOT / "tuning" / "mlp_finetuning.yaml"],
+            [*paths, self._CONFIG_ROOT / "predictors" / "mlp_finetuning.yaml"],
             EvaluationConfig,
         )
         assert finetune.steps.mode == "finetune"
@@ -404,7 +404,7 @@ class TestShippedConfigOverlays:
             ("sequence_classification", "localization_prediction"),
             ("sequence_regression", "stability_prediction"),
             ("token_classification", "ssp_q3"),
-            ("contact_prediction_embedding", "contact_prediction_casp"),
+            ("contact_prediction", "contact_prediction_casp"),
             ("categorical_jacobian", "contact_prediction_casp"),
             ("pseudo_perplexity", "localization_prediction"),
             ("pseudo_perplexity", "ssp_q3"),
@@ -419,6 +419,7 @@ class TestShippedConfigOverlays:
                 self._CONFIG_ROOT / "models" / "esm2_35m.yaml",
                 self._CONFIG_ROOT / "tasks" / f"{task_name}.yaml",
                 self._CONFIG_ROOT / "datasets" / f"{dataset_name}.yaml",
+                *([self._CONFIG_ROOT / "predictors/contact_embedding.yaml"] if task_name == "contact_prediction" else []),
             ],
             model_cls=EvaluationConfig,
         )
@@ -539,7 +540,7 @@ class TestShippedConfigOverlays:
             ),
             (
                 "contact_prediction_casp",
-                "contact_prediction_embedding",
+                "contact_prediction",
                 "categorical",
                 "contact_pairs",
             ),
@@ -554,6 +555,7 @@ class TestShippedConfigOverlays:
                 self._CONFIG_ROOT / "models" / "esm2_35m.yaml",
                 self._CONFIG_ROOT / "tasks" / f"{task_type}.yaml",
                 self._CONFIG_ROOT / "datasets" / f"{dataset_name}.yaml",
+                *([self._CONFIG_ROOT / "predictors/contact_embedding.yaml"] if task_type == "contact_prediction" else []),
             ],
             model_cls=EvaluationConfig,
         )

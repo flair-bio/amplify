@@ -785,7 +785,7 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
     modules/evaluate/configs/models/amplify_120m.yaml \
     modules/evaluate/configs/tasks/sequence_regression.yaml \
     modules/evaluate/configs/datasets/uniprot_protparams.yaml \
-    modules/evaluate/configs/tuning/torch_linear.yaml \
+    modules/evaluate/configs/predictors/torch_linear.yaml \
     workspace.base_path=./eval/protparams/gravy
 
 # Run another of the 31 numeric properties independently. Use a separate
@@ -795,7 +795,7 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
     modules/evaluate/configs/models/amplify_120m.yaml \
     modules/evaluate/configs/tasks/sequence_regression.yaml \
     modules/evaluate/configs/datasets/uniprot_protparams.yaml \
-    modules/evaluate/configs/tuning/torch_linear.yaml \
+    modules/evaluate/configs/predictors/torch_linear.yaml \
     steps.prepare.label_column=isoelectric_point \
     workspace.base_path=./eval/protparams/isoelectric_point
 ```

@@ -92,6 +92,7 @@ def config_for(tmp_path, model_path, seed=13):
         [
             CONFIGS / "config.yaml",
             CONFIGS / "datasets/contact_prediction_casp.yaml",
+            CONFIGS / "predictors/contact_embedding.yaml",
         ],
         overrides=[
             f"workspace.output_dir={tmp_path / 'output'}",
@@ -134,8 +135,8 @@ def test_head_directional_symmetry_and_pair_weighted_gradient():
 
 
 def test_embedding_task_exposes_only_casp_metrics_and_rejects_flat_scoring():
-    task = get_task("contact_prediction_embedding")
-    assert "contact_prediction" not in available_tasks()
+    task = get_task("contact_prediction")
+    assert "contact_prediction_embedding" not in available_tasks()
     assert task.default_metrics() == ["AUC", "P@L", "P@L/2", "P@L/5", "ROC-AUC"]
     task.validate_metric_names(task.default_metrics())
     with pytest.raises(KeyError):
@@ -329,6 +330,13 @@ def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
     result = results[0]
     assert workspace.run_root.name == "seed_13"
     assert result.predictions[None].predictions.height == 3
+    assert workspace.task_type == "contact_prediction"
+    assert workspace.variant == "bilinear512-frozen_trunk"
+    manifest = json.loads(workspace.run_manifest_path.read_text())
+    assert manifest["predict"]["metadata"]["head_type"] == "bilinear512"
+    from modules.evaluate.src.steps.score import ScoreStep
+
+    assert ScoreStep.load_predict_output(workspace).metadata.head_type == "bilinear512"
     assert (
         json.loads(workspace.run_manifest_path.read_text())["evaluation"]["status"]
         == "complete"
@@ -378,6 +386,7 @@ def test_protocol_rejects_generic_settings(tmp_path, override):
             [
                 CONFIGS / "config.yaml",
                 CONFIGS / "datasets/contact_prediction_casp.yaml",
+                CONFIGS / "predictors/contact_embedding.yaml",
             ],
             overrides=[override],
         )

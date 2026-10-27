@@ -110,7 +110,7 @@ def _calibration_label_rows(batch_size: int, seq_len: int) -> list[list[float]]:
 
 @pytest.fixture(
     params=[
-        name for name in available_tasks() if name != "contact_prediction_embedding"
+        name for name in available_tasks() if name != "contact_prediction"
     ]
 )
 def task(request) -> TaskHandler:

@@ -107,7 +107,7 @@ be selected.
 | FLIP / Meltome Atlas | `meltome_mixed`, `meltome_human` | `sequence_regression` | `spearmanr` |
 | Biomap-research | `stability_prediction` | `sequence_regression` | `mse`, `mae`, `r2`, `pearsonr`, `spearmanr` |
 | Reprocessed BioMap SSP | `ssp_q3`, `ssp_q8` | `token_classification` | Macro-F1 |
-| CASP14-16 | `contact_prediction_casp` | `contact_prediction_embedding` | AUC, P@L, P@L/2, P@L/5 and ROC-AUC; global and intra-EU, original separations >=6/24 |
+| CASP14-16 | `contact_prediction_casp` | `contact_prediction` | AUC, P@L, P@L/2, P@L/5 and ROC-AUC; global and intra-EU, original separations >=6/24 |
 | UniProt GO | `GO_mf`, `GO_bp`, `GO_cc` | `sequence_multilabel_classification` | `f1`, `multilabel_mcc`, `average_precision` |
 | InterPro | 7 `interpro_*` entry types | `sequence_multilabel_classification` | `f1`, `multilabel_mcc`, `average_precision` |
 | UniProt features | 12 `uniprot_*` residue overlays | `token_classification` | `f1`, `accuracy`, `precision`, `recall`, `mcc` |
@@ -330,7 +330,9 @@ tokens, so the supplied residues are not cropped.
   Metrics retain global/EU identities and aggregate EU -> chain -> complex ->
   edition, without pooling different settings or editions.
 - **Run:** [`contact_prediction_casp.yaml`](../configs/datasets/contact_prediction_casp.yaml)
-  with `contact_prediction_embedding`, an immutable HF dataset revision and one
+  with task `contact_prediction`, the explicit
+  [`contact_embedding` predictor](../configs/predictors/contact_embedding.yaml),
+  an immutable HF dataset revision and one
   configured seed. Attention and categorical-Jacobian integration is pending.
   [Hub](https://huggingface.co/datasets/flair-bio/contact_prediction_casp)
 

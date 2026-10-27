@@ -1,7 +1,3 @@
-workspace:
-  task_type: contact_prediction_embedding
-  model_kwargs: {}
-
 steps:
   mode: tune_probe
   prepare:
@@ -28,9 +24,3 @@ steps:
     variance_seeds: []
     hyperparameter_search:
       enabled: false
-  predict:
-    controls: []
-    collect_probabilities: false
-  score:
-    metrics: [AUC, P@L, P@L/2, P@L/5, ROC-AUC]
-    bootstrap_enabled: false

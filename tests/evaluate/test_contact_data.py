@@ -88,7 +88,7 @@ def prediction_inputs(dataset, predictor, tmp_path):
             model_name="toy",
             dataset_name="casp",
             run_id="offline",
-            task_type="contact_prediction_embedding",
+            task_type="contact_prediction",
             target_type="categorical",
             label_format="contact_pairs",
             output_dir=tmp_path,

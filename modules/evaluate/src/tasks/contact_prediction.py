@@ -363,9 +363,9 @@ IGNORE_INDEX = -100
 
 @register_task
 class ContactPredictionTask(TaskHandler):
-    """Fixed-split CASP embedding prediction and shared contact data processing."""
+    """Fixed-split CASP contact prediction, alignment and scoring."""
 
-    name = "contact_prediction_embedding"
+    name = "contact_prediction"
     is_ragged = True
     pairwise = True
     aligns_labels = True
@@ -387,12 +387,12 @@ class ContactPredictionTask(TaskHandler):
     )
 
     def default_metrics(self) -> list[str]:
-        if self.name == "contact_prediction_embedding":
+        if self.name == "contact_prediction":
             return list(contact_metrics.CASP_METRICS)
         return super().default_metrics()
 
     def validate_metric_names(self, metric_names: Sequence[str]) -> None:
-        if self.name != "contact_prediction_embedding":
+        if self.name != "contact_prediction":
             return super().validate_metric_names(metric_names)
         unknown = set(metric_names) - set(contact_metrics.CASP_METRICS)
         if unknown:
@@ -406,7 +406,7 @@ class ContactPredictionTask(TaskHandler):
         average: str = "weighted",
         probabilities: Sequence | None = None,
     ) -> dict[str, float]:
-        if self.name == "contact_prediction_embedding":
+        if self.name == "contact_prediction":
             raise ValueError(
                 "Use score_units: CASP aggregation requires unit, chain and complex identities"
             )

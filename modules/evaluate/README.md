@@ -53,7 +53,7 @@ Deeper guides on controls, datasets, dataset sourcing, and ProteinGym are in
   - [Output disk layout](#output-disk-layout)
   - [Reading results](#reading-results)
 - [Advanced Workflows](#advanced-workflows)
-  - [Frozen-trunk probe overlays (`configs/tuning/`)](#frozen-trunk-probe-overlays-configstuning)
+  - [Predictor overlays (`configs/predictors/`)](#predictor-overlays-configspredictors)
   - [Layerwise linear probes](#layerwise-linear-probes)
   - [Cross-validation](#cross-validation)
   - [Categorical-Jacobian contact prediction](#categorical-jacobian-contact-prediction)
@@ -95,8 +95,8 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
 
 If the run prints `=== Evaluation Pipeline Completed Successfully ===`, your
 environment and the Prepare, Predict, and Score steps work. To exercise training
-too, append a [probe overlay](#frozen-trunk-probe-overlays-configstuning) such as
-`modules/evaluate/configs/tuning/torch_linear.yaml`.
+too, append a [probe overlay](#predictor-overlays-configspredictors) such as
+`modules/evaluate/configs/predictors/torch_linear.yaml`.
 
 ### Contact prediction
 
@@ -108,12 +108,15 @@ The data contract/alignment also live in that task module, shared extraction in
 The frozen-embedding predictor runs through the normal CLI and prediction
 entry point. Attention, categorical-Jacobian migration and CASP controls remain
 subsequent stages. The old Biomap contact overlay and embedding head are removed.
+The dataset selects the shared `contact_prediction` task; an explicit predictor
+overlay selects extraction, fitting and inference without changing that task.
 
 ```bash
 uv run python modules/evaluate/src/run_evaluate.py \
     modules/evaluate/configs/config.yaml \
     modules/evaluate/configs/models/amplify_120m.yaml \
     modules/evaluate/configs/datasets/contact_prediction_casp.yaml \
+    modules/evaluate/configs/predictors/contact_embedding.yaml \
     "workspace.dataset_revision=<immutable-40-character-HF-commit>" \
     workspace.run_id=casp-embedding \
     seed=0
@@ -185,7 +188,7 @@ until their CASP-specific integration is implemented.
 | `sequence_regression` | One number per protein |
 | `sequence_multilabel_classification` | A set of labels per protein |
 | `token_classification` | One class per residue |
-| `contact_prediction_embedding` | Which residue pairs touch (fixed CASP protocol) |
+| `contact_prediction` | Which residue pairs touch (fixed CASP protocol) |
 | `categorical_jacobian` | Contacts, zero-shot |
 | `pseudo_perplexity` | Nothing; scores masked residues, zero-shot |
 | `calibration` | Homolog amino-acid profiles at conserved positions, zero-shot |
@@ -212,7 +215,7 @@ The base [`configs/config.yaml`](configs/config.yaml) defines the complete defau
 protocol: an MLP probe trained over cached embeddings from a frozen trunk, with
 100-trial hyperparameter search and fresh train+validation refitting. Supply the
 base, model, and dataset configs; no MLP tuning overlay is needed. Full trunk
-fine-tuning and other probe types remain explicit alternatives in `configs/tuning/`.
+fine-tuning and other probe types remain explicit alternatives in `configs/predictors/`.
 Composition is base → model/task → dataset → optional alternative → smoke
 settings → CLI overrides; later values win.
 
@@ -256,6 +259,11 @@ Calibration, pseudo-perplexity, and categorical Jacobian task overlays disable
 caching, HPO, and refitting. The CASP embedding overlay selects a fixed bilinear
 head and rejects generic HPO, refitting, standardization and incompatible controls.
 
+`datasets/` selects the source, label contract and default scientific task.
+`tasks/` owns task data handling and scoring. `predictors/` selects how predictions
+are produced across preparation, optional fitting and inference, including future
+zero-shot contact predictors; it is not restricted to tuning.
+
 | File | Use |
 |---|---|
 | `configs/config.yaml` | Complete default cached-MLP benchmark protocol |
@@ -263,7 +271,7 @@ head and rejects generic HPO, refitting, standardization and incompatible contro
 | `configs/models/*.yaml` | One overlay per evaluated model (name, repo) |
 | `configs/tasks/*.yaml` | Task type, behavior, and default controls |
 | `configs/datasets/*.yaml` | One overlay per dataset; see the [catalog](docs/datasets.md) |
-| `configs/tuning/*.yaml` | Explicit alternatives to the default cached MLP |
+| `configs/predictors/*.yaml` | Explicit prediction approaches, including CASP embeddings and alternative probes |
 | `configs/accelerate/*.yaml` | `accelerate launch` configs (e.g. single-process local runs) |
 
 Dataset overlays declare `workspace.default_task_type`, for example
@@ -282,8 +290,10 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
 ```
 
 An explicit task YAML takes precedence over the dataset default, in either
-order. The CASP dataset defaults to `contact_prediction_embedding`; the other
-CASP predictors are not integrated yet. `pseudo_perplexity` works with any compatible sequence
+order. The CASP dataset defaults to `contact_prediction` and requires
+`configs/predictors/contact_embedding.yaml`; attention and Jacobian presets are
+not provided until their implementations are integrated. Ordinary tasks retain
+their default MLP behavior without a predictor overlay. `pseudo_perplexity` works with any compatible sequence
 dataset; `uniprot_ur100p_test` selects the AMPLIFY paper's UniProt test set.
 Without an explicit task YAML, a CLI `workspace.task_type=...` selects a
 different task overlay. The baseline Slurm launcher accepts dataset-only rows
@@ -387,12 +397,12 @@ Append these overrides to any launch command, or put them in an overlay YAML.
 | Goal | Overrides |
 |---|---|
 | Skip tuning and score the checkpoint as-is | `steps.mode=evaluate_as_is steps.prepare.embedding_cache.enabled=false steps.tune.hyperparameter_search.enabled=false steps.tune.refit_on_train_validation=false`. For supervised tasks the head comes from the checkpoint; a pretrained-only checkpoint gets a randomly initialized head, so use this for fine-tuned checkpoints or zero-shot tasks |
-| Fine-tune the trunk and native MLP head | Append `configs/tuning/mlp_finetuning.yaml`; it disables caching/refitting and clears cached-MLP search dimensions |
+| Fine-tune the trunk and native MLP head | Append `configs/predictors/mlp_finetuning.yaml`; it disables caching/refitting and clears cached-MLP search dimensions |
 | Bootstrap confidence intervals and control tests | `steps.score.bootstrap_enabled=true` |
 | Disable TF32 for CUDA FP32 operations | `tf32=false` (default: `tf32=true`) |
 | Use a generated split instead of the default | `steps.prepare.split.name=stratified` (see [Named benchmark splits](#named-benchmark-splits)) |
 | K-fold cross-validated probe scores | `cross_validation.enabled=true` (see [Cross-validation](#cross-validation)) |
-| Classical probe on cached embeddings | Add `modules/evaluate/configs/tuning/random_forest.yaml` after the dataset overlay |
+| Classical probe on cached embeddings | Add `modules/evaluate/configs/predictors/random_forest.yaml` after the dataset overlay |
 | Disable control conditions | `steps.predict.controls=[]` |
 | Disable shared sequence baselines | `baselines.names=[]` |
 | Write results elsewhere | `workspace.base_path=/path/to/eval` |
@@ -497,7 +507,7 @@ split.
 Packed mode requires a CUDA device and a compatible AMPLIFY checkpoint whose
 forward signature accepts `cu_seqlens` and `max_seqlen`; sequence-classification
 heads must also accept `num_sequences`. Pairwise tasks such as
-`contact_prediction_embedding` are not supported. The collator emits flattened token
+`contact_prediction` are not supported. The collator emits flattened token
 inputs with sequence-boundary metadata, and prediction/embedding utilities
 unpack outputs to the usual per-example rows.
 
@@ -646,7 +656,7 @@ inference skips loss computation.
 
 Contact checkpoints save the trunk and tokenizer alongside `contact_head.pt`
 and `contact_config.json`. Reload them with
-`get_task("contact_prediction_embedding").load_finetuned_model(path)`.
+`get_task("contact_prediction").load_finetuned_model(path)`.
 
 ---
 
@@ -920,7 +930,7 @@ across layers per metric.
 These build on the steps above; each is a few extra overlays or overrides on a
 normal run.
 
-### Frozen-trunk probe overlays (`configs/tuning/`)
+### Predictor overlays (`configs/predictors/`)
 
 Cached MLP probing is already the base default. Each alternative probe overlay
 (`knn.yaml`, `sklearn_linear.yaml`, `random_forest.yaml`,
@@ -934,11 +944,20 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
     modules/evaluate/configs/models/amplify_120m.yaml \
     modules/evaluate/configs/tasks/sequence_classification.yaml \
     modules/evaluate/configs/datasets/localization_prediction.yaml \
-    modules/evaluate/configs/tuning/random_forest.yaml
+    modules/evaluate/configs/predictors/random_forest.yaml
 ```
 
 The exception is `mlp_finetuning.yaml`, which trains the trunk too and so does
 not use the embedding cache.
+
+These are composable presets over existing `steps.prepare`, `steps.tune` and
+`steps.predict` settings, not a separate selector or registry. Later overlays
+and CLI overrides remain authoritative, subject to normal task/protocol validation.
+Existing metadata and output variants identify the head and trunk condition;
+contacts use `bilinear512-frozen_trunk` under the shared `contact_prediction` task.
+The former `configs/tuning/` paths and
+`contact_prediction_embedding` task identity are removed, without aliases.
+Calibration, pseudo-perplexity and the separate ProteinGym runners are unchanged.
 
 ### Layerwise linear probes
 
@@ -1158,7 +1177,7 @@ adding one handler module, not editing the steps.
    is parametrized over every registered task, so the new handler is also
    exercised by the shared contract suite automatically.
 
-`contact_prediction_embedding` is the non-standard example: it overrides the model
+`contact_prediction` is the non-standard example: it overrides the model
 builder, pairwise label collation, ragged prediction-row handling, and contact
 metrics. Its labels are sparse positive `[i, j]` residue pairs, with implicit
 negative labels for valid pairs at separation six or greater. It uses a
@@ -1218,7 +1237,7 @@ overrides the ragged-label hooks (`is_ragged`, `aligns_labels`,
 | `One of the subprocesses has abruptly died during map operation` | A tokenization worker exited, often because the job exceeded its CPU RAM allocation. Check Slurm/cgroup OOM counters; `steps.prepare.tokenize_num_proc=1` disables map multiprocessing for diagnosis (Accelerate's `--num_processes` does not). Pseudo-perplexity expands each protein into one masked row per residue, so it uses one source protein per map batch to bound RAM; the expanded on-disk dataset can still be large. |
 | `ValueError: Configured <role> source split '...' was not found` | The dataset doesn't publish that split; check `steps.prepare.split` against the listed available splits (see [Named benchmark splits](#named-benchmark-splits)) |
 | `ValueError: Packed evaluation requires CUDA.` | `steps.prepare.packed=true` on a machine without a GPU; set it to `false` |
-| `head_type='...' requires steps.prepare.embedding_cache.enabled=True` | Classical probes fit on cached pooled embeddings; add `steps.prepare.embedding_cache.enabled=true` or use a `configs/tuning/` overlay |
+| `head_type='...' requires steps.prepare.embedding_cache.enabled=True` | Classical probes fit on cached pooled embeddings; add `steps.prepare.embedding_cache.enabled=true` or use a `configs/predictors/` overlay |
 | Multi-GPU run hangs | A rank skipped a collective call; see [Distributed execution patterns](#distributed-execution-accelerate-patterns) |
 
 ---

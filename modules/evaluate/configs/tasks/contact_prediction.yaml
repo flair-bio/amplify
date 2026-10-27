@@ -1,0 +1,11 @@
+workspace:
+  task_type: contact_prediction
+  model_kwargs: {}
+
+steps:
+  predict:
+    controls: []
+    collect_probabilities: false
+  score:
+    metrics: [AUC, P@L, P@L/2, P@L/5, ROC-AUC]
+    bootstrap_enabled: false
