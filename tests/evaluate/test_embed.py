@@ -962,6 +962,7 @@ class TestPrepareStepWithEmbeddingCache:
 
         workspace = get_evaluation_workspace(
             EvaluationWorkspaceConfig(
+                run_id="test",
                 dataset_name="toy_dataset",
                 dataset_repo_id="biomap-research/toy_dataset",
                 model_name="toy-model",
@@ -1026,6 +1027,7 @@ class TestPrepareStepWithEmbeddingCache:
 
         workspace = get_evaluation_workspace(
             EvaluationWorkspaceConfig(
+                run_id="test",
                 dataset_name="toy_dataset",
                 dataset_repo_id="biomap-research/toy_dataset",
                 model_name="toy-model",
@@ -1051,6 +1053,7 @@ class TestEmbeddingCacheCrossStepValidation:
             EvaluationConfig(
                 seed=1,
                 workspace=dict(
+                    run_id="test",
                     dataset_name="d",
                     model_name="m",
                     task_type="sequence_classification",
@@ -1068,6 +1071,7 @@ class TestEmbeddingCacheCrossStepValidation:
         config = EvaluationConfig(
             seed=1,
             workspace=dict(
+                run_id="test",
                 dataset_name="d",
                 model_name="m",
                 task_type="sequence_classification",

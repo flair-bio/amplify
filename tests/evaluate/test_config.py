@@ -16,6 +16,7 @@ def _base_config_dict() -> dict:
     return {
         "seed": 710019,
         "workspace": {
+            "run_id": "test",
             "dataset_name": "toy_dataset",
             "model_name": "toy_model",
             "task_type": "sequence_classification",
@@ -81,6 +82,7 @@ class TestEvaluationConfig:
             model_cls=EvaluationConfig,
             overrides=[
                 "cross_validation.enabled=true",
+                "baselines.names=[]",
                 "cross_validation.n_splits=3",
                 "steps.score.bootstrap_enabled=false",
             ],

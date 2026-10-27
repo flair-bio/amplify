@@ -4,9 +4,13 @@ ordinary evaluation and each cross-validation fold."""
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+from accelerate.utils import broadcast_object_list
 from datasets import DatasetDict
 
 from modules.evaluate.src.config import EvaluationConfig
@@ -24,6 +28,7 @@ from modules.evaluate.src.steps.predict import PredictStep
 from modules.evaluate.src.steps.prepare import PrepareStep
 from modules.evaluate.src.steps.score import ScoreStep
 from modules.evaluate.src.steps.tune import TuneStep
+from modules.evaluate.src.utils.io import log_to_file, update_run_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +50,94 @@ def run_pipeline(
     accelerator: Any,
     dataset: DatasetDict | None = None,
     cross_validation: CrossValidationIdentity | None = None,
+    *,
+    overwrite: bool = False,
 ) -> PipelineResult:
     """Run every step once for *workspace*, optionally on a supplied dataset."""
+    if cross_validation is not None:
+        if overwrite:
+            raise ValueError(
+                "--overwrite is not supported for CV; choose a new run_id."
+            )
+        return _execute_steps(config, workspace, accelerator, dataset, cross_validation)
+    with _reserve_outputs(config, workspace, accelerator, overwrite=overwrite):
+        result = _execute_steps(
+            config, workspace, accelerator, dataset, cross_validation
+        )
+        return result
+
+
+@contextmanager
+def _reserve_outputs(
+    config: EvaluationConfig,
+    workspace: EvaluationWorkspace,
+    accelerator: Any,
+    *,
+    overwrite: bool,
+) -> Iterator[None]:
+    """Reserve all ordinary targets before any model work or replacement."""
+    with ExitStack() as stack:
+        reserved: list[tuple[EvaluationWorkspace, list[Path]]] = []
+        error: Exception | None = None
+        if accelerator.is_main_process:
+            try:
+                workspaces = [workspace]
+                if config.steps.mode != "evaluate_as_is":
+                    workspaces.extend(
+                        get_evaluation_workspace(
+                            workspace.config.model_copy(
+                                update={
+                                    "dataset_name": external.name,
+                                    "dataset_repo_id": external.dataset_repo_id,
+                                }
+                            ),
+                            variant=workspace.variant,
+                        )
+                        for external in config.external_test_sets
+                    )
+                if len({item.run_root.resolve() for item in workspaces}) != len(
+                    workspaces
+                ):
+                    raise ValueError(
+                        "Main and external test output labels must differ."
+                    )
+                for item in workspaces:
+                    targets = stack.enter_context(item.reserve_run(overwrite=overwrite))
+                    reserved.append((item, targets))
+                for item, targets in reserved:
+                    item.initialize_run(
+                        targets,
+                        overwrite=overwrite,
+                        config=config.model_dump(mode="json"),
+                    )
+                    stack.enter_context(log_to_file(item.run_root / "log"))
+            except Exception as exception:
+                logger.exception("Cannot reserve evaluation outputs")
+                error = exception
+        messages = [str(error) if error is not None else None]
+        if getattr(accelerator, "num_processes", 1) > 1:
+            messages = broadcast_object_list(messages, from_process=0)
+        if messages[0] is not None:
+            if error is not None:
+                raise error
+            raise RuntimeError(messages[0])
+        yield
+        if accelerator.is_main_process:
+            for item, _ in reserved:
+                update_run_manifest(
+                    item.run_manifest_path,
+                    "evaluation",
+                    {"status": "complete", "config": config.model_dump(mode="json")},
+                )
+
+
+def _execute_steps(
+    config: EvaluationConfig,
+    workspace: EvaluationWorkspace,
+    accelerator: Any,
+    dataset: DatasetDict | None,
+    cross_validation: CrossValidationIdentity | None,
+) -> PipelineResult:
     logger.info("=== Starting Prepare Step ===")
     prepared_artifacts = PrepareStep(config.steps.prepare).run(
         workspace,
@@ -55,6 +146,9 @@ def run_pipeline(
         layerwise_config=config.steps.layerwise,
         dataset=dataset,
         cross_validation=cross_validation,
+        **(
+            {"baseline_names": config.baselines.names} if config.baselines.names else {}
+        ),
     )
     logger.info("=== Completed Prepare Step ===")
 

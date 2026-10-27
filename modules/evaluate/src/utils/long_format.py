@@ -1,6 +1,6 @@
 """Flatten ScoreStep results into a tidy, one-row-per-(metric[, control])
 table for downstream plotting/aggregation, and merge that table into a
-per-(model, dataset) sidecar across repeated runs. Kept out of score.py
+run-local sidecar across repeated scoring calls. Kept out of score.py
 since these are pure data-reshaping/merge functions independent of
 ScoreStep's own state (config/workspace/IO orchestration).
 """
@@ -108,9 +108,8 @@ def upsert_long_df(
     """Merge *new_df* into the ``scores_long.parquet`` at *path*, replacing
     any existing rows for the same ``variant`` and ``split`` rather than
     duplicating or discarding
-    other variants' rows -- so this file accumulates one comparable table
-    across every condition tried for a model+dataset, without the caller
-    having to glob/concatenate per-variant files by hand.
+    other variants' rows. Pipeline score tables are run-local; callers can
+    concatenate them for cross-run comparisons.
     """
     if not path.exists():
         return new_df

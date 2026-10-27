@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import fcntl
+import json
+import re
+import shutil
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from modules.evaluate.src.tasks import TaskType, available_tasks
+from modules.evaluate.src.utils.io import update_run_manifest, write_json
 
 __all__ = [
+    "DatasetWorkspaceConfig",
     "EvaluationWorkspace",
     "EvaluationWorkspaceConfig",
     "TaskType",
@@ -17,18 +25,14 @@ __all__ = [
 ]
 
 
-class EvaluationWorkspaceConfig(BaseModel):
-    """Config for an EvaluationWorkspace, organizing files pertaining to a specific dataset and model."""
+class DatasetWorkspaceConfig(BaseModel):
+    """Dataset/task settings shared by model and baseline runs."""
 
     model_config = ConfigDict(extra="forbid")
 
     dataset_name: str  # dataset name that serves as a mnemonic for the dataset being evaluated, e.g. "stability_prediction"
     dataset_repo_id: str | None = (
         None  # path to HuggingFace dataset repo e.g. biomap-research/stability_prediction
-    )
-    model_name: str  # model name that serves as a mnemonic for the model being evaluated, e.g. "amplify-120m"
-    model_repo_id: str | None = (
-        None  # path to HuggingFace model repo e.g. flair-bio/amplify-120m
     )
     task_type: TaskType
     default_task_type: TaskType | None = None  # dataset default evaluation method
@@ -39,14 +43,21 @@ class EvaluationWorkspaceConfig(BaseModel):
     num_labels: int | None = (
         None  # number of classes for *_classification tasks; unused (forced to 1) for sequence_regression
     )
-    model_kwargs: dict[str, Any] = Field(
-        default_factory=dict
-    )  # extra task.build_model() kwargs, e.g. {"rank": 64} for contact_prediction
     base_path: str = "./eval"  # base path where the EvaluationWorkspace is stored
-    output_dir: Path | None = (
-        None  # explicit model-level output directory; dataset folders are added beneath it
-    )
-    tmp_path: str | None = None  # temporary path for intermediate files
+    output_dir: Path | None = None
+
+    @field_validator("dataset_name")
+    @classmethod
+    def _validate_dataset_label(cls, value: str) -> str:
+        return validate_directory_label(value)
+
+    @property
+    def benchmark_root(self) -> Path:
+        return self.output_dir if self.output_dir is not None else Path(self.base_path)
+
+    @property
+    def dataset_root(self) -> Path:
+        return self.benchmark_root / self.task_type / self.dataset_name
 
     @field_validator("task_type")
     @classmethod
@@ -65,25 +76,49 @@ class EvaluationWorkspaceConfig(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _validate_target_metadata(self) -> "EvaluationWorkspaceConfig":
+    def _validate_target_metadata(self) -> DatasetWorkspaceConfig:
         if self.target_type == "continuous":
             if self.label_format != "scalar" or self.num_labels is not None:
                 raise ValueError(
                     "target_type='continuous' requires label_format='scalar' and "
                     "num_labels=null."
                 )
-        elif self.label_format in {"scalar", "per_token", "multilabel"}:
-            if self.num_labels is None or self.num_labels <= 1:
-                raise ValueError("Categorical targets require num_labels > 1.")
+        elif self.label_format in {"scalar", "per_token", "multilabel"} and (
+            self.num_labels is None or self.num_labels <= 1
+        ):
+            raise ValueError("Categorical targets require num_labels > 1.")
         return self
+
+
+class EvaluationWorkspaceConfig(DatasetWorkspaceConfig):
+    """Paths and model settings for one model/dataset evaluation."""
+
+    model_name: str
+    run_id: str
+    model_repo_id: str | None = None
+    model_kwargs: dict[str, Any] = Field(default_factory=dict)
+    tmp_path: str | None = None
+
+    @field_validator("run_id", "model_name")
+    @classmethod
+    def _validate_directory_label(cls, value: str) -> str:
+        return validate_directory_label(value)
+
+
+def validate_directory_label(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
+        raise ValueError(
+            "Output labels must start with a letter or digit and contain "
+            "only letters, digits, '.', '_', or '-'."
+        )
+    return value
 
 
 class EvaluationWorkspace:
     """Resolve paths for one (model, dataset) pair.
 
-    The embedding cache and ``scores/scores_long.parquet`` are shared by every
-    variant; models, predictions, manifests, and per-variant scores live under
-    ``runs/<variant>/`` so sequential sweeps don't overwrite each other.
+    Embeddings are shared across runs. Each run owns its predictions, scores,
+    fitted controls, and manifest.
     """
 
     def __init__(
@@ -101,25 +136,12 @@ class EvaluationWorkspace:
         self.num_labels = config.num_labels
         self.model_kwargs = config.model_kwargs
         self.base_path = config.base_path
-
-        # If possible, enforce a model name that includes the repo it came from, for saving
-        dataset_save_name = (
-            self.dataset_repo_id.replace("/", "_")
-            if self.dataset_repo_id
-            else self.dataset_name.replace("/", "_")
-        )
-        model_save_name = (
-            self.model_repo_id.replace("/", "_")
-            if self.model_repo_id
-            else self.model_name.replace("/", "_")
-        )
-
-        model_output_dir = (
-            config.output_dir
-            if config.output_dir is not None
-            else Path(config.base_path) / model_save_name
-        )
-        workspace_root = model_output_dir / dataset_save_name
+        if variant is not None and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.-]*", variant
+        ):
+            raise ValueError("Run variants must be safe single-directory labels.")
+        workspace_root = config.dataset_root / "models" / config.model_name
+        self.workspace_root = workspace_root
         self.tmp_path = (
             Path(config.tmp_path) if config.tmp_path else workspace_root / "tmp"
         )
@@ -129,21 +151,13 @@ class EvaluationWorkspace:
         # sweep for this model+dataset can reuse the same cache.
         self.embeddings_path = self.tmp_path / "embeddings"
 
-        # Per-condition outputs (trained model/head, its predictions, and its
-        # own detailed scores) are nested under a `variant`-named
-        # subdirectory so sweeping head_type/mode for the same
-        # model+dataset doesn't overwrite a previous variant's results.
-        # Direct workspace construction (used by isolated tests) keeps the
-        # flat layout; pipeline runs always provide a variant.
-        run_root = (
-            workspace_root / "runs" / self.variant.replace("/", "_")
-            if self.variant
-            else workspace_root
-        )
+        self.run_name = f"{variant}-{config.run_id}" if variant else config.run_id
+        run_root = workspace_root / self.run_name
         self.model_path = run_root / "model"
-        self.preds_path = run_root / "preds"
-        self.stats_path = run_root / "stats"
-        self.scores_path = run_root / "scores"
+        self.run_root = run_root
+        self.preds_path = run_root
+        self.stats_path = run_root
+        self.scores_path = run_root
 
         # Consolidated Predict/Score settings + results sidecar (replaces
         # separate predict_config.json/scores.json/bootstrap_summary.json
@@ -153,30 +167,128 @@ class EvaluationWorkspace:
         # on its own.
         self.run_manifest_path = run_root / "run_manifest.json"
 
-        # Shared across every variant, unlike `scores_path` above: this is
-        # where ScoreStep upserts `scores_long.parquet`, so comparing every
-        # head_type/mode condition tried for this model+dataset never
-        # requires globbing/concatenating multiple files by hand.
-        self.comparison_path = workspace_root / "scores"
+        self.comparison_path = run_root
 
-        self._all_paths = [
-            self.stats_path,
-            self.tmp_path,
-            self.preds_path,
-            self.scores_path,
-            self.model_path,
-            self.embeddings_path,
-            self.comparison_path,
-        ]
+        self._all_paths = [run_root]
+
+    def control_workspace(self, name: str) -> EvaluationWorkspace:
+        """Keep a fitted control and its predictions inside the owning run."""
+        validate_directory_label(name)
+        workspace = EvaluationWorkspace(self.config, self.variant)
+        workspace.run_root = self.run_root / "controls" / name
+        workspace.model_path = workspace.run_root / "model"
+        workspace.preds_path = workspace.run_root
+        workspace.stats_path = workspace.run_root
+        workspace.scores_path = workspace.run_root
+        workspace.comparison_path = workspace.run_root
+        workspace.run_manifest_path = workspace.run_root / "run_manifest.json"
+        workspace._all_paths = [workspace.run_root]
+        return workspace
 
     def setup_directories(self) -> None:
         """Create all required directories on disk."""
         for path in self._all_paths:
             path.mkdir(parents=True, exist_ok=True)
 
+    @contextmanager
+    def reserve_run(self, *, overwrite: bool = False) -> Iterator[list[Path]]:
+        """Hold a nonblocking lock until this ordinary pipeline finishes."""
+        if self.variant is None:
+            raise ValueError("Pipeline output protection requires a run variant.")
+        self.workspace_root.mkdir(parents=True, exist_ok=True)
+        lock_path = self.workspace_root / f".{self.run_name}.lock"
+        with lock_path.open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise FileExistsError(
+                    f"Evaluation is already running for {self.run_root}."
+                ) from error
+            provenance_path = self.workspace_root / "workspace_manifest.json"
+            provenance = {
+                "dataset_name": self.dataset_name,
+                "dataset_repo_id": self.dataset_repo_id,
+                "task_type": self.task_type,
+                "model_name": self.model_name,
+                "model_repo_id": self.model_repo_id,
+            }
+            with (self.workspace_root / ".workspace.lock").open("a") as workspace_lock:
+                fcntl.flock(workspace_lock, fcntl.LOCK_EX)
+                if provenance_path.exists():
+                    if json.loads(provenance_path.read_text()) != provenance:
+                        raise ValueError(
+                            f"Output labels already identify different inputs at "
+                            f"{self.workspace_root}; choose a new model/dataset label or benchmark root."
+                        )
+                else:
+                    write_json(provenance_path, provenance)
+            runs_path = self.workspace_root
+            if runs_path.is_symlink():
+                raise ValueError(
+                    f"Refusing to modify symlinked run outputs: {runs_path}"
+                )
+            dependent_pattern = re.compile(
+                rf"{re.escape(self.variant)}-layer_\d+-{re.escape(self.config.run_id)}"
+            )
+            targets = [self.run_root]
+            if runs_path.exists():
+                targets.extend(
+                    path
+                    for path in runs_path.iterdir()
+                    if dependent_pattern.fullmatch(path.name)
+                )
+            for target in targets:
+                if target.is_symlink():
+                    raise ValueError(f"Refusing to modify symlinked outputs: {target}")
+                for source in (
+                    self.tmp_path,
+                    Path(self.model_repo_id) if self.model_repo_id else None,
+                    Path(self.dataset_repo_id) if self.dataset_repo_id else None,
+                ):
+                    if source is not None and source.resolve().is_relative_to(
+                        target.resolve()
+                    ):
+                        raise ValueError(
+                            f"Output target {target} overlaps input/cache path {source}."
+                        )
+                if target.exists() and any(target.iterdir()) and not overwrite:
+                    raise FileExistsError(
+                        f"Evaluation outputs already exist at {target}. "
+                        "Choose another workspace.run_id or use --overwrite "
+                        "to replace this variant and its derived outputs."
+                    )
+            yield targets
+
+    def initialize_run(
+        self, targets: list[Path], *, overwrite: bool, config: dict[str, Any]
+    ) -> None:
+        """Clean only reserved variant outputs, preserving caches and siblings."""
+        if overwrite:
+            runs_path = self.workspace_root
+            pattern = re.compile(
+                rf"{re.escape(self.variant or '')}(?:-layer_\d+)?-{re.escape(self.config.run_id)}"
+            )
+            for target in targets:
+                if (
+                    target.parent != runs_path
+                    or not pattern.fullmatch(target.name)
+                    or target.is_symlink()
+                ):
+                    raise ValueError(
+                        f"Refusing to remove unreserved output path: {target}"
+                    )
+            for target in targets:
+                if target.exists():
+                    shutil.rmtree(target)
+        update_run_manifest(
+            self.run_manifest_path,
+            "evaluation",
+            {"status": "running", "config": config},
+        )
+
 
 def get_evaluation_workspace(
     config: EvaluationWorkspaceConfig, variant: str | None = None
 ) -> EvaluationWorkspace:
-    """Build a workspace; pipeline runs pass a variant, tests may omit it for a flat layout."""
+    """Build a workspace, optionally identifying the probe/mode variant."""
     return EvaluationWorkspace(config, variant=variant)

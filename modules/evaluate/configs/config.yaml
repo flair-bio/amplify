@@ -1,7 +1,11 @@
 seed: 710019
 tf32: true # allow TensorFloat-32 for CUDA FP32 operations; false restores full FP32
 
+baselines:
+  names: [] # sequence task presets request shared artifacts; generate with --baselines
+
 workspace:
+  run_id: run01 # appended to the probe/mode variant; change to keep another run
   dataset_name: base_dataset
   dataset_repo_id: null
   model_name: base_model
@@ -12,8 +16,8 @@ workspace:
   label_format: null # scalar, per_token, multilabel, or contact_pairs
   num_labels: null # number of classes for *_classification tasks; unused (forced to 1) for sequence_regression
   model_kwargs: {} # extra task.build_model() kwargs, e.g. Jacobian mutant_batch_size/max_jacobian_bytes
-  base_path: "./eval"
-  output_dir: null # optional model-level output directory; overrides base_path/model identifier
+  base_path: "./eval" # benchmark root; task/dataset/baselines and task/dataset/models live here
+  output_dir: null # optional benchmark-root override for both models and baselines
   tmp_path: null
 
 wandb:
@@ -119,7 +123,7 @@ steps:
     collect_probabilities: false # auto-enabled when effective metrics need probabilities, e.g. roc_auc or multilabel average_precision
     predictions_filename: predictions.parquet
     store_sequences: false # include decoded input sequences in main predictions parquet (larger output)
-    controls: [random_trunk] # optional: untrained, random_head, random_both, scrambled_labels, scrambled_sequences, majority_class, train_mean, separation_prior
+    controls: [random_trunk] # model controls; token majority_class/contact separation_prior remain per-model
   score:
     metrics: null # task overlays declare reported metrics explicitly
     metric_aggregation: macro # one of micro, macro, weighted, samples

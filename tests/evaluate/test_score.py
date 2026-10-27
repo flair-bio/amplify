@@ -119,6 +119,7 @@ def test_score_and_bootstrap_keep_classes_missing_from_test_split(tmp_path, num_
     values = [0, 0] if num_labels == 2 else [[0, 0], [0]]
     workspace = get_evaluation_workspace(
         EvaluationWorkspaceConfig(
+            run_id="test",
             model_name="toy-model",
             dataset_name="toy",
             task_type=task_type,
@@ -200,6 +201,7 @@ def test_token_confusion_bootstrap_preserves_results(
     def run(name):
         workspace = get_evaluation_workspace(
             EvaluationWorkspaceConfig(
+                run_id="test",
                 model_name="toy-model",
                 dataset_name="toy_dataset",
                 task_type="token_classification",
@@ -250,15 +252,17 @@ def test_token_confusion_bootstrap_preserves_results(
             assert comparison == pytest.approx(reference, abs=1e-14)
             assert comparison["p_value"] == reference["p_value"]
             assert comparison["p_value_adjusted"] == reference["p_value_adjusted"]
-    assert score_spy.call_count == 1  # Only the unchanged full-test point estimate.
+    assert score_spy.call_count == 1 + len(output.requested_controls)
     permutation_spy.assert_not_called()
     assert actual.output_path.exists()
     assert actual.long_path.exists()
+    for name in ["variant", "split"]:
+        assert actual_layers[name].to_list() == expected_layers[name].to_list()
     for name in ["p_value", "p_value_adjusted"]:
         assert actual_layers[name].to_list() == expected_layers[name].to_list()
     np.testing.assert_allclose(
-        actual_layers.drop("metric").to_numpy(),
-        expected_layers.drop("metric").to_numpy(),
+        actual_layers.drop("metric", "variant", "split").to_numpy(),
+        expected_layers.drop("metric", "variant", "split").to_numpy(),
         rtol=1e-14,
         atol=1e-14,
         equal_nan=True,
@@ -802,6 +806,7 @@ def _make_workspace(tmp_path, task_type, num_labels=2):
     label_format = "per_token" if task_type == "token_classification" else "scalar"
     dataset_num_labels = None if task_type == "sequence_regression" else num_labels
     config = EvaluationWorkspaceConfig(
+        run_id="test",
         dataset_name="toy_dataset",
         model_name="toy-model",
         task_type=task_type,
@@ -994,9 +999,27 @@ class TestScoreStepBootstrap:
     def test_bootstrap_disabled_by_default(self, tmp_path, model_family):
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
-        PredictStep(PredictConfig(controls=[])).run(workspace, prepared)
+        prediction = PredictStep(PredictConfig(controls=["random_trunk"])).run(
+            workspace, prepared
+        )
 
-        result = ScoreStep(ScoreConfig(metrics=["accuracy", "f1"])).run(workspace)
+        step = ScoreStep(ScoreConfig(metrics=["accuracy", "f1"]))
+        result = step.run(workspace)
+        condition_path = workspace.run_root / "condition_scores.parquet"
+        conditions = pl.read_parquet(condition_path)
+        assert set(conditions["condition"]) == {"trained", "random_trunk"}
+        expected = full_scores(
+            get_task("sequence_classification", workspace.num_labels),
+            prediction.controls["random_trunk"]["prediction"].to_list(),
+            prediction.predictions["label"].to_list(),
+            None,
+            ["accuracy", "f1"],
+            "macro",
+        )
+        actual = conditions.filter(pl.col("condition") == "random_trunk")
+        assert dict(zip(actual["metric"], actual["score"])) == expected
+        step.run(workspace)
+        assert pl.read_parquet(condition_path).equals(conditions)
 
         assert result.confidence_intervals is None
         assert result.control_comparisons is None
@@ -1433,6 +1456,7 @@ def test_contact_score_cache_preserves_outputs_and_avoids_recomputation(
     def run(name):
         workspace = get_evaluation_workspace(
             EvaluationWorkspaceConfig(
+                run_id="test",
                 model_name="toy-model",
                 dataset_name="toy_dataset",
                 task_type="contact_prediction",
@@ -1475,11 +1499,13 @@ def test_contact_score_cache_preserves_outputs_and_avoids_recomputation(
     )
     if manifest is not None:
         assert "bootstrap" in manifest
-    # One call per protein, metric, and condition, independent of resamples.
+    # Cached per-protein scores plus one full-test call per reported control.
     conditions = 4 if bootstrap_enabled else 1
     for metric in metric_spies.values():
         assert (
-            metric.call_count == contact_predict_output.predictions.height * conditions
+            metric.call_count
+            == contact_predict_output.predictions.height * conditions
+            + len(contact_predict_output.requested_controls)
         )
 
 
@@ -1576,6 +1602,7 @@ def test_shared_control_labels_preserve_bootstrap_results(
     def run(name):
         workspace = get_evaluation_workspace(
             EvaluationWorkspaceConfig(
+                run_id="test",
                 model_name="toy-model",
                 dataset_name="toy_dataset",
                 task_type=task_name,

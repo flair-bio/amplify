@@ -29,9 +29,11 @@ from modules.evaluate.src.dataset.dataloader import (
     DatasetSplitConfig,
     ExternalTestSetConfig,
     build_dataloaders,
-    load_evaluation_dataset,
-    load_raw_evaluation_dataset,
     tokenize_dataset,
+)
+from modules.evaluate.src.dataset.resolution import (
+    resolve_evaluation_data,
+    resolve_external_data,
 )
 from modules.evaluate.src.dataset.workspace import EvaluationWorkspace, TaskType
 from modules.evaluate.src.model.heads import EmbeddingProbeHead
@@ -41,6 +43,11 @@ from modules.evaluate.src.schemas.artifacts import (
     PreparedArtifacts,
 )
 from modules.evaluate.src.tasks import get_task
+from modules.evaluate.src.utils.baselines import (
+    BaselineName,
+    baseline_context,
+    external_baseline_context,
+)
 from modules.evaluate.src.utils.embed import (
     EmbeddingBackend,
     EmbeddingCache,
@@ -165,6 +172,7 @@ class PrepareStep:
         layerwise_config: LayerwiseConfig | None = None,
         dataset: DatasetDict | None = None,
         cross_validation: CrossValidationIdentity | None = None,
+        baseline_names: list[BaselineName] | None = None,
     ) -> PreparedArtifacts:
         """Load task data and models, optionally replacing tokens with features.
 
@@ -200,14 +208,27 @@ class PrepareStep:
         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
 
         # Load the evaluation dataset from HF hub or local cache
-        if dataset is None:
-            logger.info("Loading dataset '%s'...", dataset_id)
-            dataset = load_evaluation_dataset(
-                dataset_id,
-                seed=seed,
-                validation_fraction=self.config.validation_fraction,
-                split=self.config.split,
+        logger.info("Resolving dataset '%s'...", dataset_id)
+        dataset = resolve_evaluation_data(
+            dataset_id,
+            seed=seed,
+            validation_fraction=self.config.validation_fraction,
+            split=self.config.split,
+            dataset=dataset,
+        )
+        shared_context = (
+            baseline_context(
+                workspace.config,
+                dataset,
+                baseline_names,
+                sequence_column=self.config.sequence_column,
+                label_column=self.config.label_column,
+                id_column=self.config.id_column,
+                split_roles=self.config.split.model_dump(),
             )
+            if baseline_names
+            else None
+        )
 
         task = get_task(workspace.task_type)
         num_labels = task.resolve_num_labels(
@@ -395,6 +416,7 @@ class PrepareStep:
             },
             split=self.config.split.name,
             cross_validation=cross_validation,
+            baseline_context=shared_context,
             **embedding_extras,
         )
 
@@ -467,13 +489,21 @@ class PrepareStep:
             external.dataset_repo_id,
             external.split,
         )
-        raw = load_raw_evaluation_dataset(external.dataset_repo_id)
-        if external.split not in raw:
-            raise ValueError(
-                f"External test set '{external.name}' has no split "
-                f"'{external.split}'. Available splits: {sorted(raw.keys())}."
+        dataset = resolve_external_data(external.dataset_repo_id, external.split)
+        shared_context = (
+            external_baseline_context(
+                prepared.baseline_context,
+                workspace.config,
+                dataset,
+                dataset_id=external.dataset_repo_id,
+                split=external.split,
+                sequence_column=self.config.sequence_column,
+                label_column=self.config.label_column,
+                id_column=self.config.id_column,
             )
-        dataset = DatasetDict({"test": raw[external.split]})
+            if prepared.baseline_context
+            else None
+        )
 
         task = get_task(workspace.task_type)
         num_labels = task.resolve_num_labels(
@@ -524,6 +554,7 @@ class PrepareStep:
                 prepared,
                 test_dataloader=token_test_dataloader,
                 layerwise_token_dataloaders=token_dataloaders,
+                baseline_context=shared_context,
             )
         if backend.cache is None or backend.model_id is None:
             raise ValueError(
@@ -589,6 +620,7 @@ class PrepareStep:
             test_dataloader=embedding_dataloader,
             embedding_backend=external_backend,
             layerwise_token_dataloaders=token_dataloaders,
+            baseline_context=shared_context,
         )
 
     def _apply_embedding_cache(

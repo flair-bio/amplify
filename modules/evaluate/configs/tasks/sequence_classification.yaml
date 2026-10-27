@@ -1,6 +1,9 @@
 workspace:
   task_type: sequence_classification
 
+baselines:
+  names: [majority_class]
+
 steps:
   tune:
     hyperparameter_search:
@@ -10,4 +13,4 @@ steps:
     metrics: [f1]
     metric_aggregation: macro # equal weight across the configured class vocabulary, including absent classes
   predict:
-    controls: [random_trunk, majority_class]
+    controls: [random_trunk]

@@ -17,4 +17,4 @@ steps:
   score:
     metrics: [contact_auc_long]
   predict:
-    controls: [random_trunk, separation_prior]
+    controls: [random_trunk]
