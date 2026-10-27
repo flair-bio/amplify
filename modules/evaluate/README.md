@@ -100,24 +100,62 @@ too, append a [probe overlay](#frozen-trunk-probe-overlays-configstuning) such a
 
 ### Contact prediction
 
-The same smoke overlay works for contact prediction. `local.yaml` runs a single
-local process, and `n_permutations=5` keeps the trained-vs-control statistics
-cheap enough for a laptop:
+The replacement CASP14-16 benchmark consumes the schema-6.0 Hugging Face dataset
+only. `tasks/contact_prediction.py` owns its data/prediction/scoring orchestration;
+the existing step classes delegate to that handler and persist its artifacts.
+The data contract/alignment also live in that task module, shared extraction in
+`utils/inference.py`, and ranking/aggregation in `metrics/contact_metrics.py`.
+The foundation is available through the existing step classes;
+the three predictor implementations and CLI wiring are a subsequent stage.
+The old contact overlays do **not** implement this benchmark.
 
-```bash
-uv run accelerate launch \
-    --config_file modules/evaluate/configs/accelerate/local.yaml \
-    modules/evaluate/src/run_evaluate.py \
-    modules/evaluate/configs/config.yaml \
-    modules/evaluate/configs/models/amplify_120m.yaml \
-    modules/evaluate/configs/tasks/contact_prediction.yaml \
-    modules/evaluate/configs/datasets/contact_prediction_binary.yaml \
-    modules/evaluate/configs/smoke_test.yaml \
-    steps.score.n_permutations=5
+```python
+from pathlib import Path
+
+from modules.evaluate.src.schemas.artifacts import EvaluationMetadata
+from modules.evaluate.src.steps.prepare import PrepareConfig, PrepareStep
+from modules.evaluate.src.steps.predict import PredictConfig, PredictStep
+from modules.evaluate.src.steps.score import ScoreConfig, ScoreStep
+
+data = PrepareStep(PrepareConfig()).run_contacts(
+    "flair-bio/contact_prediction_casp",
+    revision=dataset_commit_sha,  # Immutable 40-character Hub commit.
+    edition=14,  # Optional: retain all editions when omitted.
+)
+metadata = EvaluationMetadata(
+    model_name="my-model", dataset_name="contact_prediction_casp",
+    task_type="contact_prediction_embedding", seed=0,
+)
+predictions = PredictStep(PredictConfig(controls=[])).run_contacts(
+    data, predictor, metadata, output_dir=Path("contact-example"),
+)
+scores = ScoreStep(ScoreConfig()).run_contacts(
+    predictions, output_dir=Path("contact-example"),
+)
 ```
 
-Smoke-test results are written under `./eval/smoke_test/`; see [Outputs](#outputs)
-for the layout and how to read them.
+`predictor(chain)` must return the full cleaned-chain square score matrix in
+retained-residue order, as a NumPy array or PyTorch tensor. Use
+`tasks.contact_prediction.tokenize_contact_chain` to get uncropped tokens, residue-token
+indices and original-coordinate `position_ids`; the model adapter must honor
+these positions and grow native positional caches without rescaling.
+Pass a local dataset directory instead of the Hub ID (and omit `revision`) for
+offline Parquet loading. No source coordinate files or source-manifest joins
+are used. The runtime dataset fingerprint covers the scoring rows and fixed
+development splits.
+
+Inputs are cleaned once per chain; global/EU rows share full-chain inference,
+and exact original sequences share predictions without merging their identities.
+Reference-free chains skip inference but retain unscored rows. Test features
+are transient; persisted predictions contain candidate scores, labels and
+original pair indices, not embeddings or attention maps.
+
+Score writes `unit_scores.parquet` and `scores.parquet`, reporting both original
+separations (>=6 and >=24), AUC (mean precision at ten length cutoffs), P@L,
+P@L/2, P@L/5 and ROC-AUC. EUs, chains and complexes are averaged equally within
+each edition, with metric-specific contributing counts. Development validation
+averages structures equally. Generic flat bootstrap and controls are rejected
+until their CASP-specific integration is implemented.
 
 ---
 

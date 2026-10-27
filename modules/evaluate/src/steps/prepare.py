@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from accelerate import Accelerator
@@ -43,6 +44,10 @@ from modules.evaluate.src.schemas.artifacts import (
     PreparedArtifacts,
 )
 from modules.evaluate.src.tasks import get_task
+from modules.evaluate.src.tasks.contact_prediction import (
+    ContactDataset,
+    ContactPredictionTask,
+)
 from modules.evaluate.src.utils.baselines import (
     BaselineName,
     baseline_context,
@@ -163,6 +168,19 @@ class PrepareConfig(BaseModel):
 class PrepareStep:
     def __init__(self, config: PrepareConfig) -> None:
         self.config = config
+
+    def run_contacts(
+        self,
+        path_or_repo: str | Path,
+        *,
+        revision: str | None = None,
+        edition: int | None = None,
+        cache_dir: str | Path | None = None,
+    ) -> ContactDataset:
+        """Prepare HF-only units without generic crops, split synthesis or models."""
+        return ContactPredictionTask().prepare_dataset(
+            path_or_repo, revision=revision, edition=edition, cache_dir=cache_dir
+        )
 
     def run(
         self,

@@ -21,13 +21,18 @@ import polars as pl
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from modules.evaluate.src.dataset.workspace import EvaluationWorkspace
+from modules.evaluate.src.metrics.contact_metrics import (
+    CASP_METRICS,
+)
 from modules.evaluate.src.schemas.artifacts import (
     ConfidenceInterval,
+    ContactScoreOutput,
     EvaluationMetadata,
     PredictOutput,
     ScoreOutput,
 )
 from modules.evaluate.src.tasks import get_task
+from modules.evaluate.src.tasks.contact_prediction import ContactPredictionTask
 from modules.evaluate.src.utils.baselines import (
     align_baseline,
     artifact_identity,
@@ -50,6 +55,7 @@ from modules.evaluate.src.utils.bootstrap import (
 from modules.evaluate.src.utils.io import (
     update_run_manifest,
     write_parquet,
+    write_settings_json,
 )
 from modules.evaluate.src.utils.long_format import build_long_df, upsert_long_df
 from modules.evaluate.src.utils.tracking import log_wandb
@@ -127,6 +133,34 @@ class ScoreConfig(BaseModel):
 class ScoreStep:
     def __init__(self, config: ScoreConfig) -> None:
         self.config = config
+
+    def run_contacts(
+        self, predictions: PredictOutput, *, output_dir: Path | None = None
+    ) -> ContactScoreOutput:
+        """Score HF units without flat-sequence aggregation or bootstrap."""
+        if self.config.bootstrap_enabled:
+            raise ValueError("CASP bootstrap must resample complexes, not flat rows")
+        if self.config.metrics is not None and set(self.config.metrics) != set(
+            CASP_METRICS
+        ):
+            raise ValueError("Contact scoring reports the fixed CASP metrics")
+        result = ContactPredictionTask().score_units(predictions)
+        if output_dir is not None:
+            seed = result.metadata.seed
+            assert seed is not None
+            result.unit_scores_path = write_parquet(
+                result.unit_scores, output_dir / "unit_scores.parquet"
+            )
+            result.summaries_path = write_parquet(
+                result.summaries, output_dir / "scores.parquet"
+            )
+            write_settings_json(
+                output_dir / "contact_score.json",
+                seed,
+                self.config.model_dump(),
+                metadata=result.metadata.model_dump(mode="json"),
+            )
+        return result
 
     def run(
         self,

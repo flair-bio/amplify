@@ -13,23 +13,72 @@ one another just to share this loop.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
+from collections.abc import Callable, Iterator
 from time import monotonic
-from typing import Any, Callable
+from typing import Any
 
+import numpy as np
 import torch
 from accelerate import Accelerator
 
 from modules.evaluate.src.dataset.collator import input_id_rows, unpack_packed
 from modules.evaluate.src.tasks import TaskType, get_task
-from modules.evaluate.src.tasks.contact_prediction import ContactPredictionTask
+from modules.evaluate.src.tasks.contact_prediction import (
+    ContactChain,
+    ContactDataset,
+    ContactPredictionTask,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def run_contact_inference(
+    dataset: ContactDataset,
+    predictor: Callable[[ContactChain], np.ndarray | torch.Tensor],
+    *,
+    split: str = "test",
+) -> Iterator[tuple[ContactChain, np.ndarray | None]]:
+    """Stream full-chain scores to units; exact original sequences share inference.
+
+    Predictors consume the cleaned sequence and original positional mapping in
+    ``chain.alignment`` and return a square matrix in retained-residue order.
+    No feature or attention cache is written by this loop.
+    """
+    grouped: dict[str, list[ContactChain]] = defaultdict(list)
+    for chain in dataset.splits[split]:
+        grouped[chain.alignment.sequence].append(chain)
+    for shared in grouped.values():
+        needed = next(
+            (
+                chain
+                for chain in shared
+                if any(unit.labels_available for unit in chain.units)
+            ),
+            None,
+        )
+        scores = None
+        if needed is not None and needed.alignment.retained_positions:
+            with torch.inference_mode():
+                predicted = predictor(needed)
+            if isinstance(predicted, torch.Tensor):
+                predicted = predicted.detach().float().cpu().numpy()
+            scores = np.asarray(predicted)
+            del predicted
+            length = len(needed.alignment.retained_positions)
+            if scores.shape != (length, length):
+                raise ValueError(
+                    "Predictor must return a full retained-chain score matrix"
+                )
+        for chain in shared:
+            yield chain, scores
+        del scores
 
 
 def pad_for_gather(
     tensor: torch.Tensor,
     accelerator: Accelerator,
-    pad_index: int | float = 0,
+    pad_index: float = 0,
     dims: tuple[int, ...] = (1,),
 ) -> torch.Tensor:
     """Pad variable-length sequence tensors before a cross-process gather."""

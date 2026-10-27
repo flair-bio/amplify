@@ -140,6 +140,15 @@ class EvaluationMetadata(BaseModel):
     split_seed: int | None = None
 
 
+class ContactEvaluationMetadata(EvaluationMetadata):
+    """Dataset/protocol identity specific to the HF-only CASP scoring contract."""
+
+    dataset_revision: str | None = None
+    dataset_fingerprint: str
+    schema_version: str
+    protocol_version: str
+
+
 @dataclass
 class PredictOutput:
     """Output of :class:`~modules.evaluate.src.steps.predict.PredictStep`.
@@ -231,6 +240,17 @@ class ScoreOutput:
     # the settings needed to reproduce this step (metrics, bootstrap sample
     # count, confidence level, etc.) travel with the result.
     config: dict[str, Any] | None = None
+
+
+@dataclass
+class ContactScoreOutput:
+    """Unit and hierarchical CASP scores, without flattening editions/settings."""
+
+    metadata: ContactEvaluationMetadata
+    unit_scores: pl.DataFrame
+    summaries: pl.DataFrame
+    unit_scores_path: Path | None = None
+    summaries_path: Path | None = None
 
 
 class ConfidenceInterval(TypedDict):

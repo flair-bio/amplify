@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import logging
 import random
-from typing import Any, Iterator
+import re
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
 
 import torch
 from datasets import Dataset, DatasetDict, load_dataset  # type: ignore[attr-defined]
@@ -26,6 +29,10 @@ from transformers import PreTrainedTokenizerBase
 
 from modules.evaluate.src.dataset.collator import EvaluationCollator
 from modules.evaluate.src.tasks import TaskType, get_task
+from modules.evaluate.src.tasks.contact_prediction import (
+    ContactDataset,
+    prepare_contact_dataset,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -358,9 +365,39 @@ def select_dataset_splits(
     return selected
 
 
-def load_raw_evaluation_dataset(dataset_repo_id: str) -> DatasetDict:
+def load_raw_evaluation_dataset(
+    dataset_repo_id: str | Path,
+    *,
+    revision: str | None = None,
+    cache_dir: str | Path | None = None,
+) -> DatasetDict:
     """Load every source split as-is, without role mapping or synthesized splits."""
-    dataset = load_dataset(dataset_repo_id)
+    kwargs: dict[str, Any] = {}
+    if cache_dir is not None:
+        kwargs["cache_dir"] = str(cache_dir)
+    path = Path(dataset_repo_id)
+    files = (
+        {
+            split: sorted(
+                str(file) for file in (path / "data").glob(f"{split}-*.parquet")
+            )
+            for split in ("train", "validation", "test")
+        }
+        if path.is_dir()
+        else {}
+    )
+    if files and all(files.values()):
+        if revision is not None:
+            raise ValueError("revision applies only to Hub datasets")
+        dataset = load_dataset("parquet", data_files=files, **kwargs)
+    else:
+        if not path.exists() and (
+            isinstance(dataset_repo_id, Path) or path.is_absolute()
+        ):
+            raise FileNotFoundError(path)
+        if revision is not None:
+            kwargs["revision"] = revision
+        dataset = load_dataset(str(dataset_repo_id), **kwargs)
     if not isinstance(dataset, DatasetDict):
         raise ValueError(
             f"Expected a DatasetDict with train/validation/test splits from "
@@ -369,18 +406,69 @@ def load_raw_evaluation_dataset(dataset_repo_id: str) -> DatasetDict:
     return dataset
 
 
+def load_contact_dataset(
+    path_or_repo: str | Path,
+    *,
+    revision: str | None = None,
+    edition: int | None = None,
+    cache_dir: str | Path | None = None,
+) -> ContactDataset:
+    """Load HF scoring rows without split synthesis or coordinate dependencies."""
+    path = Path(path_or_repo)
+    if path.is_dir():
+        if revision is not None:
+            raise ValueError("revision applies only to Hub datasets")
+        if any(
+            not list((path / "data").glob(f"{split}-*.parquet"))
+            for split in ("train", "validation", "test")
+        ):
+            raise ValueError("Local contact data requires data/{split}-*.parquet")
+    else:
+        if isinstance(path_or_repo, Path) or path.is_absolute():
+            raise FileNotFoundError(path)
+        if revision is None or re.fullmatch(r"[0-9a-fA-F]{40}", revision) is None:
+            raise ValueError(
+                "Hub contact data requires a pinned 40-character commit SHA"
+            )
+    raw = load_raw_evaluation_dataset(
+        path_or_repo, revision=revision, cache_dir=cache_dir
+    )
+    return prepare_contact_dataset(
+        raw, source=str(path_or_repo), revision=revision, edition=edition
+    )
+
+
 def load_evaluation_dataset(
     dataset_repo_id: str,
     seed: int = 710019,
     validation_fraction: float = _DEFAULT_VALIDATION_FRACTION,
     split: DatasetSplitConfig | None = None,
+    *,
+    revision: str | None = None,
 ) -> DatasetDict:
     """Load the configured evaluation and final-refit splits from the Hub.
 
     If the loaded dataset has no ``validation`` split, one is synthesized
     from ``train`` (see :func:`ensure_validation_split`).
     """
-    dataset = load_raw_evaluation_dataset(dataset_repo_id)
+    dataset = (
+        load_raw_evaluation_dataset(dataset_repo_id, revision=revision)
+        if revision is not None
+        else load_raw_evaluation_dataset(dataset_repo_id)
+    )
+    if any("positive_pairs" in data.column_names for data in dataset.values()):
+        if not Path(dataset_repo_id).is_dir() and (
+            revision is None or re.fullmatch(r"[0-9a-fA-F]{40}", revision) is None
+        ):
+            raise ValueError(
+                "Hub contact data requires a pinned 40-character commit SHA"
+            )
+        if split is not None and split != DatasetSplitConfig(name=DEFAULT_SPLIT_NAME):
+            raise ValueError(
+                "CASP contacts require unchanged fixed train/validation/test splits"
+            )
+        prepare_contact_dataset(dataset, source=dataset_repo_id, revision=revision)
+        return dataset
     if split is not None:
         dataset = select_dataset_splits(dataset, split)
     return ensure_validation_split(
@@ -426,6 +514,11 @@ def tokenize_dataset(
     tokenizer special token ids instead of ``build_inputs_with_special_tokens``
     (which some custom tokenizers do not implement).
     """
+    if any("positive_pairs" in data.column_names for data in dataset.values()):
+        raise ValueError(
+            "CASP scoring rows require tokenize_contact_chain and the contact step methods; "
+            "generic tokenization would crop inputs and lose unit metadata"
+        )
     task = get_task(task_type)
     if task.aligns_labels and getattr(tokenizer, "remove_ambiguous", False):
         logger.info(

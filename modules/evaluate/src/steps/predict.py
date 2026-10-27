@@ -9,10 +9,12 @@ is :class:`~modules.evaluate.src.steps.score.ScoreStep`'s job.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from time import monotonic
 from typing import Any
 
+import numpy as np
 import polars as pl
 import torch
 from accelerate import Accelerator
@@ -34,6 +36,11 @@ from modules.evaluate.src.schemas.artifacts import (
     PreparedArtifacts,
 )
 from modules.evaluate.src.tasks import get_task
+from modules.evaluate.src.tasks.contact_prediction import (
+    ContactChain,
+    ContactDataset,
+    ContactPredictionTask,
+)
 from modules.evaluate.src.utils.controls import (
     NO_INFERENCE_CONTROLS,
     ControlBuilder,
@@ -48,6 +55,7 @@ from modules.evaluate.src.utils.io import (
     downcast_prediction_dtypes,
     update_run_manifest,
     write_parquet,
+    write_settings_json,
 )
 from modules.evaluate.src.utils.layerwise import (
     run_layerwise_control_conditions,
@@ -160,6 +168,43 @@ def persist_predictions(
 class PredictStep:
     def __init__(self, config: PredictConfig) -> None:
         self.config = config
+
+    def run_contacts(
+        self,
+        dataset: ContactDataset,
+        predictor: Callable[[ContactChain], np.ndarray | torch.Tensor],
+        metadata: EvaluationMetadata,
+        *,
+        split: str = "test",
+        output_dir: Path | None = None,
+    ) -> PredictOutput:
+        """Predict full chains once and retain unit candidates, not test features."""
+        if self.config.controls:
+            raise ValueError(
+                "Contact controls require independently fitted predictors; use controls=[]"
+            )
+        if self.config.collect_probabilities:
+            raise ValueError(
+                "CASP contacts consume pair scores, not class probabilities"
+            )
+        output = ContactPredictionTask().predict_units(
+            dataset, predictor, metadata, split=split
+        )
+        output.config = self.config.model_dump()
+        if output_dir is not None and self.config.persist_to_disk:
+            seed = output.metadata.seed
+            assert seed is not None
+            output.predictions_path = write_parquet(
+                output.predictions, output_dir / self.config.predictions_filename
+            )
+            write_settings_json(
+                output_dir / "contact_predict.json",
+                seed,
+                output.config,
+                metadata=output.metadata.model_dump(mode="json"),
+                data_split=split,
+            )
+        return output
 
     def run_layerwise(
         self,
