@@ -551,9 +551,7 @@ class TuneStep:
             random_trunk_model=None,
             random_trunk_seed=None,
         )
-        baseline_workspace = get_evaluation_workspace(
-            workspace.config, variant=f"{workspace.variant or 'probe'}-random_trunk"
-        )
+        baseline_workspace = workspace.control_workspace("random_trunk")
         baseline_workspace.setup_directories()
         TuneStep(self.config.model_copy(update={"variance_seeds": []})).run(
             baseline_workspace, baseline, seed=seed, accelerator=accelerator
@@ -697,7 +695,7 @@ class TuneStep:
                 layer_workspace = get_evaluation_workspace(
                     workspace.config, variant=f"{workspace.variant}-layer_{layer}"
                 )
-                layer_workspace.setup_directories()
+                layer_workspace.model_path.mkdir(parents=True, exist_ok=True)
                 torch.save(
                     {
                         "state_dict": inner.heads[str(layer)].state_dict(),

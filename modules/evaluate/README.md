@@ -337,12 +337,10 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
     workspace.base_path=/path/to/eval
 ```
 
-Give each array task its own (model, dataset) pair. Per-variant outputs under
-`runs/<variant>/` never clash, but two files are deliberately shared by every
-variant of a pair: `scores/scores_long.parquet`, which Score updates by
-read-merge-write without a lock, and the `tmp/embeddings/` cache. Concurrent
-tasks on the same pair (e.g. different heads) can therefore drop each other's
-`scores_long` rows; run those sequentially within one task.
+Give each array task its own model/dataset/run combination. Score tables are
+run-local, so different runs do not overwrite each other's rows. Embedding
+caches remain shared across a model's runs; avoid concurrent cache refreshes
+for the same model/dataset pair.
 
 ### Common recipes
 
@@ -360,7 +358,10 @@ Append these overrides to any launch command, or put them in an overlay YAML.
 | Disable control conditions | `steps.predict.controls=[]` |
 | Disable shared sequence baselines | `baselines.names=[]` |
 | Write results elsewhere | `workspace.base_path=/path/to/eval` |
-| Set the model output directory independently of its checkpoint path | `workspace.output_dir=/path/to/eval/01_baseline_checkpoint_100000` |
+| Group model versions into one benchmark comparison | `workspace.base_path=/path/to/client-benchmark-v1` |
+| Keep another evaluation of the same model/probe | `workspace.run_id=run02` |
+| Label a specific checkpoint version | `workspace.model_name=amplify-350m-muon workspace.model_repo_id=/path/to/checkpoint` |
+| Override the benchmark output root | `workspace.output_dir=/path/to/client-benchmark-v1` (task/dataset are appended; applies to models and baselines) |
 
 ### New dataset, task, or model overlay
 
@@ -603,7 +604,7 @@ Cached validation features stay on the device across epochs, and validation
 inference skips loss computation.
 
 **Input:** `PreparedArtifacts` from the Prepare step (or a resumed checkpoint)
-**Output:** in-memory updated `PreparedArtifacts.model`; `<workspace>/runs/<variant>/model/` on disk when `save_best_model=true`
+**Output:** in-memory updated `PreparedArtifacts.model`; `<run>/model/` on disk when `save_best_model=true`
 
 Contact checkpoints save the trunk and tokenizer alongside `contact_head.pt`
 and `contact_config.json`. Reload them with
@@ -642,7 +643,7 @@ Per-task presets, invalid combinations, and how to read the results are in
 | Field | Default | Description |
 |---|---|---|
 | `collect_probabilities` | `false` | Collect task-appropriate per-class/per-label probabilities (softmax for single-label, sigmoid for multilabel); auto-enabled when an effective metric requires probabilities, such as `roc_auc` or `average_precision` |
-| `predictions_filename` | `predictions.parquet` | Output filename under `<workspace>/runs/<variant>/preds/` |
+| `predictions_filename` | `predictions.parquet` | Output filename directly under the run directory |
 | `persist_to_disk` | `true` | Write predictions and the prediction manifest; disable for fast in-process evaluation |
 | `store_sequences` | `false` | Decode and include source sequences in the main predictions table |
 | `controls` | `[random_trunk]` | Per-model controls; token/contact presets add their existing priors. Sequence priors use top-level `baselines.names` and the separate `--baselines` route |
@@ -667,7 +668,7 @@ uses the searched batch size by default. With HPO disabled, it uses
 null. Embedding extraction has its own `steps.prepare.embedding_batch_size` setting.
 
 **Input:** `PreparedArtifacts` (trained model + test dataloader) from Prepare/Tune
-**Output:** `<workspace>/runs/<variant>/preds/predictions.parquet`; settings are also recorded in `<workspace>/runs/<variant>/run_manifest.json`'s "predict" section
+**Output:** `<run>/predictions.parquet` and `<run>/controls/<control>/predictions.parquet`; settings and control paths are recorded in `<run>/run_manifest.json`'s "predict" section.
 
 ---
 
@@ -700,8 +701,8 @@ custom metrics, and unsupported aggregation modes retain the existing path.
 | `confidence_interval` | `0.95` | Confidence level for bootstrap intervals |
 | `long_filename` | `scores_long.parquet` | Tidy/long-format sidecar written on every run, with or without bootstrap — concatenable across (model, dataset) runs for plotting |
 
-**Input:** `<workspace>/runs/<variant>/preds/predictions.parquet`
-**Output:** `<workspace>/scores/scores_long.parquet` (always, shared across run variants), plus `<workspace>/runs/<variant>/scores/bootstrap_results.parquet` when `bootstrap_enabled=true`; scores/confidence intervals are also recorded in `<workspace>/runs/<variant>/run_manifest.json` under the `score`/`bootstrap` sections.
+**Input:** `<run>/predictions.parquet`
+**Output:** `<run>/scores_long.parquet` (always), plus `<run>/bootstrap_results.parquet` when `bootstrap_enabled=true`; scores/confidence intervals are also recorded in `<run>/run_manifest.json` under the `score`/`bootstrap` sections. Concatenate run-local score tables when comparing models or repeated runs.
 `bootstrap.control_comparisons` records each control's bootstrap mean, the
 trained-minus-control mean difference and confidence interval, and raw/adjusted
 permutation p-values (an empty object when there are no comparisons). These
@@ -713,38 +714,81 @@ intervals describe the paired differences, not standalone control-score interval
 
 ### Output disk layout
 
-`get_evaluation_workspace()` (in [`src/dataset/workspace.py`](src/dataset/workspace.py)) resolves a workspace directory keyed by model + dataset, so results for different (model, dataset) pairs never collide:
+`get_evaluation_workspace()` (in [`src/dataset/workspace.py`](src/dataset/workspace.py))
+groups outputs by **benchmark root -> task -> dataset -> baselines/models -> run**:
 
 ```
-<base_path>/
-└── <model_repo_or_name>/
-    └── <dataset_repo_or_name>/
-        ├── tmp/
-        │   └── embeddings/            ← reusable frozen-trunk embedding cache
-        ├── scores/
-        │   ├── scores_long.parquet    ← shared comparison table across variants
-        │   └── layerwise_comparison.parquet ← layerwise runs only
-        └── runs/
-            └── <variant>/
-                ├── stats/              ← per-variant statistics, when produced
-                ├── model/              ← saved model/head artifacts when enabled
-                ├── run_manifest.json   ← Predict/Score settings and results
-                ├── preds/
-                │   ├── predictions.parquet
-                │   └── control_*_predictions.parquet
-                └── scores/
-                    └── bootstrap_results.parquet ← written when bootstrap is enabled
+<base_path>/<task_type>/<dataset_name>/
+├── baselines/<baseline>/fit-<12-char-hash>/
+│   ├── fit_manifest.json
+│   └── test-<12-char-hash>/
+│       ├── manifest.json
+│       ├── predictions.parquet
+│       └── log
+└── models/<model_name>/
+    ├── workspace_manifest.json
+    ├── tmp/embeddings/                 ← reusable across model runs
+    └── <variant>-<run_id>/
+        ├── model/
+        ├── predictions.parquet
+        ├── controls/random_trunk/
+        │   ├── model/
+        │   └── predictions.parquet
+        ├── bootstrap_results.parquet
+        ├── scores_long.parquet
+        ├── layerwise_comparison.parquet  ← when layer comparisons apply
+        ├── run_manifest.json
+        └── log
 ```
 
-`model_repo_id`/`dataset_repo_id` are preferred over `model_name`/`dataset_name` for the on-disk folder name when set, so results stay unambiguous across Hub repos that share a short mnemonic.
+`workspace.base_path` names the benchmark root, for example
+`eval_results/controls_verification`. No extra `experiments/` or `runs/` level
+is added. `workspace.run_id` is required for model runs; the base YAML sets
+`run01`. It is appended to the variant, for example `mlp-frozen_trunk-run01`.
+Override it to retain another run. Use the same ID across compared models,
+and short, distinct
+`model_name` labels for different checkpoints, for example
+`amplify-350m-reference`, `amplify-350m-muon`, and `amplify-350m-mask30`.
+Repository IDs and local paths are input locations, not directory names.
+Run/model/dataset labels must be safe single-directory labels (letters,
+digits, dots, underscores, hyphens; starting with a letter or digit).
 
 For training runs, `<variant>` is `<head_type>-frozen_trunk` for `tune_probe`
 or `<head_type>-tuned_trunk` for `finetune`; `evaluate_as_is` uses `pretrained`.
-A non-default `steps.prepare.split.name` is appended to the variant. Seeds and
-other hyperparameters are not part of this path, so runs with the same model,
-dataset, mode, head, and split can overwrite one another; use a separate
-`workspace.base_path` when those settings need separate artifacts. The shared
-`scores_long.parquet` records the resulting model, dataset, head, and split.
+A non-default `steps.prepare.split.name` is appended to the variant.
+
+Ordinary pipeline runs refuse existing variant outputs, including interrupted
+evaluations. Choose a new `workspace.run_id` to retain both experiments, or
+explicitly pass `--overwrite` to replace only that variant/run and its derived
+layer outputs. Nested controls and run-local comparison tables are replaced too;
+other variants, models, caches, and shared baselines are preserved. Matching
+concurrent jobs fail rather than overwriting an active run. There is no
+ordinary-run resume mode. CV retains its existing fold-resume behavior;
+`--overwrite` is rejected for CV.
+
+Even with `--overwrite`, a model/dataset label already associated with a
+different input source cannot be reused in the same workspace: choose a new
+label or benchmark root. Treat checkpoint versions as immutable; replacing file
+contents at an unchanged source path does not automatically create a new
+version label.
+
+`workspace.output_dir` overrides the **benchmark root** for both model and
+baseline jobs. It does not change model loading. Keep the root stable to
+reuse baseline artifacts across run IDs. Baseline directories use short hashes
+for navigation; full identities are verified in manifests, and collisions
+raise an error rather than reusing incompatible results. Separate fit/test
+identities allow one fit to serve internal and external tests.
+
+Application logs are written directly to `log` inside each ordinary model run
+and baseline test directory; compatible baseline reruns append to their log.
+Model logs start after output reservation; baseline logs start after data
+resolution. Shell timing output and progress bars remain in the terminal.
+Directories are created only when needed. Fitted random-trunk probes are not
+separate sibling runs: their models and predictions live together in
+`controls/random_trunk/`. Layerwise outputs remain separately named layer runs.
+Existing output directories are not moved or removed automatically. These
+guards apply to pipeline execution; individual step APIs remain usable for
+standalone scoring and low-level workflows.
 
 ### External test sets
 
@@ -767,8 +811,9 @@ external_test_sets:
 ```
 
 Outputs use the external dataset's own workspace and the same variant:
-`<model>/<external_dataset_repo>/runs/<variant>/`. Its shared comparison table
-is at `<model>/<external_dataset_repo>/scores/scores_long.parquet`. Sets are
+`<task>/<external.name>/models/<model>/<variant>-<run_id>/`.
+Its comparison table lives directly inside that run.
+All requested output targets are checked before training or replacement. Sets are
 skipped with a warning under `evaluate_as_is` (no fitted probe) and ignored by
 cross-validation.
 

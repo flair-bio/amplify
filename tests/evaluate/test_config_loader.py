@@ -124,16 +124,16 @@ def test_dataset_default_matches_explicit_task_config(dataset):
         ),
         ("sequence_multilabel_classification", "GO_bp", ["random_trunk"]),
         ("sequence_regression", "stability_prediction", ["random_trunk"]),
-        ("token_classification", "ssp_q3", ["random_trunk", "majority_class"]),
+        ("token_classification", "ssp_q3", ["random_trunk"]),
         (
             "contact_prediction",
             "contact_prediction_binary",
-            ["random_trunk", "separation_prior"],
+            ["random_trunk"],
         ),
         (
             "categorical_jacobian",
             "contact_prediction_binary",
-            ["random_trunk", "separation_prior"],
+            ["random_trunk"],
         ),
         ("pseudo_perplexity", "uniprot_protparams", ["random_trunk"]),
         ("calibration", "human_calibration", ["random_trunk"]),
@@ -228,7 +228,7 @@ def test_cli_task_selection_loads_method_behavior():
     assert config.workspace.task_type == "categorical_jacobian"
     assert config.steps.mode == "evaluate_as_is"
     assert not config.steps.prepare.embedding_cache.enabled
-    assert config.steps.predict.controls == ["random_trunk", "separation_prior"]
+    assert config.steps.predict.controls == ["random_trunk"]
 
 
 def test_unknown_default_fails_before_loading_task_file():

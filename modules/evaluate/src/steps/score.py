@@ -399,6 +399,8 @@ class ScoreStep:
                 )
                 rows.append(
                     {
+                        "variant": workspace.variant,
+                        "split": layer_predictions[reference].metadata.split,
                         "layer_index": layer,
                         "reference_layer": reference,
                         "metric": name,
@@ -423,8 +425,15 @@ class ScoreStep:
                     row["p_value_adjusted"] = value
         comparison = pl.DataFrame(rows)
         logger.info("Cross-layer comparison vs layer %d:\n%s", reference, comparison)
+        path = workspace.comparison_path / LAYERWISE_COMPARISON_FILENAME
         return write_parquet(
-            comparison, workspace.comparison_path / LAYERWISE_COMPARISON_FILENAME
+            upsert_long_df(
+                path,
+                comparison,
+                workspace.variant,
+                layer_predictions[reference].metadata.split,
+            ),
+            path,
         )
 
     @staticmethod

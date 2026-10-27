@@ -136,7 +136,7 @@ def persist_predictions(
         if name not in output.control_paths:
             output.control_paths[name] = write_parquet(
                 downcast_prediction_dtypes(frame),
-                workspace.preds_path / f"control_{name}_predictions.parquet",
+                workspace.control_workspace(name).preds_path / "predictions.parquet",
             )
     update_run_manifest(
         workspace.run_manifest_path,

@@ -5,6 +5,7 @@ baselines:
   names: [] # sequence task presets request shared artifacts; generate with --baselines
 
 workspace:
+  run_id: run01 # appended to the probe/mode variant; change to keep another run
   dataset_name: base_dataset
   dataset_repo_id: null
   model_name: base_model
@@ -15,8 +16,8 @@ workspace:
   label_format: null # scalar, per_token, multilabel, or contact_pairs
   num_labels: null # number of classes for *_classification tasks; unused (forced to 1) for sequence_regression
   model_kwargs: {} # extra task.build_model() kwargs, e.g. Jacobian mutant_batch_size/max_jacobian_bytes
-  base_path: "./eval"
-  output_dir: null # optional model-level output directory; overrides base_path/model identifier
+  base_path: "./eval" # benchmark root; task/dataset/baselines and task/dataset/models live here
+  output_dir: null # optional benchmark-root override for both models and baselines
   tmp_path: null
 
 wandb:

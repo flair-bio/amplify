@@ -45,6 +45,7 @@ def test_cli_applies_tf32_before_model_work(
     if entrypoint_name == "run_evaluate":
         payload = {
             "workspace": {
+                "run_id": "test",
                 "model_name": "offline_model",
                 "dataset_name": "offline_dataset",
                 "task_type": "sequence_classification",

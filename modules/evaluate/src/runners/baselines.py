@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
+import logging
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,7 @@ from modules.evaluate.src.dataset.workspace import DatasetWorkspaceConfig
 from modules.evaluate.src.steps.prepare import PrepareConfig
 from modules.evaluate.src.tasks import get_task
 from modules.evaluate.src.utils.baselines import (
+    BaselineName,
     BaselinesConfig,
     artifact_directory,
     artifact_identity,
@@ -31,7 +34,9 @@ from modules.evaluate.src.utils.baselines import (
     load_baseline_artifact,
     sequence_rows,
 )
-from modules.evaluate.src.utils.io import write_json
+from modules.evaluate.src.utils.io import log_to_file, write_json
+
+logger = logging.getLogger(__name__)
 
 
 class BaselineRunConfig(BaseModel):
@@ -140,27 +145,57 @@ def run_baselines(
         for name in config.baselines.names:
             directory = artifact_directory(test_context, name)
             directory.mkdir(parents=True, exist_ok=True)
-            with (directory / ".lock").open("a") as lock:
+            with (directory.parent / ".lock").open("a") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
-                if not (directory / "manifest.json").exists():
-                    frame = build_sequence_baseline(
-                        name, train_rows, test_rows, workspace.num_labels
-                    )
-                    temporary = directory / f".{uuid4().hex}.parquet"
-                    path = directory / "predictions.parquet"
-                    try:
-                        frame.write_parquet(temporary)
-                        temporary.replace(path)
-                        write_json(
-                            directory / "manifest.json",
-                            {
-                                "identity": artifact_identity(test_context, name),
-                                "rows": frame.height,
-                                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                            },
+                fit_path = directory.parent / "fit_manifest.json"
+                fit_identity = {"baseline": name, "fit": test_context["fit"]}
+                if fit_path.exists():
+                    if json.loads(fit_path.read_text()) != fit_identity:
+                        raise ValueError(
+                            f"Incompatible baseline fit manifest: {fit_path}"
                         )
-                    finally:
-                        temporary.unlink(missing_ok=True)
-                _, path = load_baseline_artifact(test_context, name)
+                else:
+                    write_json(fit_path, fit_identity)
+                with log_to_file(directory / "log"):
+                    logger.info(
+                        "Resolving baseline %s for %s at %s", name, test_name, directory
+                    )
+                    _publish_baseline(
+                        directory,
+                        test_context,
+                        name,
+                        train_rows,
+                        test_rows,
+                        workspace.num_labels,
+                    )
+                    _, path = load_baseline_artifact(test_context, name)
+                    logger.info("Baseline predictions ready: %s", path)
                 outputs[test_name][name] = path
     return outputs
+
+
+def _publish_baseline(
+    directory: Path,
+    context: dict[str, Any],
+    name: BaselineName,
+    train_rows: list[dict[str, Any]],
+    test_rows: list[dict[str, Any]],
+    num_labels: int | None,
+) -> None:
+    if not (directory / "manifest.json").exists():
+        frame = build_sequence_baseline(name, train_rows, test_rows, num_labels)
+        temporary = directory / f".{uuid4().hex}.parquet"
+        path = directory / "predictions.parquet"
+        try:
+            frame.write_parquet(temporary)
+            temporary.replace(path)
+            write_json(
+                directory / "manifest.json",
+                {
+                    "identity": artifact_identity(context, name),
+                    "rows": frame.height,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                },
+            )
+        finally:
+            temporary.unlink(missing_ok=True)

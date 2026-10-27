@@ -50,6 +50,7 @@ def _make_workspace(tmp_path, task_type, num_labels=2):
     )
     dataset_num_labels = None if task_type == "sequence_regression" else num_labels
     config = EvaluationWorkspaceConfig(
+        run_id="test",
         dataset_name="toy_dataset",
         dataset_repo_id="biomap-research/toy_dataset",
         model_name="toy-model",

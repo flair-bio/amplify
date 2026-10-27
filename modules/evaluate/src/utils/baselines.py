@@ -121,7 +121,7 @@ def baseline_context(
             "split": split_roles["test"],
             "fingerprint": identity_hash(test_rows),
         },
-        "root": str((Path(workspace.base_path) / "baselines").resolve()),
+        "root": str((workspace.dataset_root / "baselines").resolve()),
         "names": names,
     }
 
@@ -164,9 +164,8 @@ def artifact_directory(context: dict[str, Any], name: str) -> Path:
     return (
         Path(context["root"])
         / name
-        / identity_hash(identity["fit"])
-        / "tests"
-        / identity_hash(identity["test"])
+        / f"fit-{identity_hash(identity['fit'])[:12]}"
+        / f"test-{identity_hash(identity['test'])[:12]}"
     )
 
 

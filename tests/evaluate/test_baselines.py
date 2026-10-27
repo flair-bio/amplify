@@ -93,14 +93,20 @@ def _context(config, data):
 
 @pytest.mark.parametrize("regression", [False, True])
 def test_standalone_baseline_reuses_predictions_and_never_fits_validation(
-    tmp_path, monkeypatch, regression
+    tmp_path, monkeypatch, regression, caplog
 ):
+    caplog.set_level("INFO")
     config, data = _config(tmp_path, regression), _data(regression)
     outputs = run_baselines(config, dataset=data)
     context = _context(config, data)
     name = config.baselines.names[0]
     baseline, path = load_baseline_artifact(context, name)
     assert outputs["test"][name] == path
+    assert path.is_relative_to(config.workspace.dataset_root / "baselines" / name)
+    assert path.parent.name.startswith("test-")
+    assert path.parent.parent.name.startswith("fit-")
+    assert (path.parent / "log").read_text()
+    assert (path.parent.parent / "fit_manifest.json").exists()
     assert baseline["id"].to_list() == ["repeat", "repeat", "other"]
     if regression:
         assert baseline["prediction"].to_list() == [2.0] * 3
@@ -111,6 +117,28 @@ def test_standalone_baseline_reuses_predictions_and_never_fits_validation(
     monkeypatch.setattr(runner, "build_sequence_baseline", builder)
     assert run_baselines(config, dataset=data) == outputs
     builder.assert_not_called()
+
+
+@pytest.mark.parametrize("role", ["train", "test"])
+def test_short_hash_collisions_reject_different_full_identities(
+    tmp_path, monkeypatch, role
+):
+    from modules.evaluate.src.utils import baselines
+
+    original_hash = baselines.identity_hash
+    monkeypatch.setattr(
+        baselines, "identity_hash", lambda value: "0" * 12 + original_hash(value)[12:]
+    )
+    config, data = _config(tmp_path), _data()
+    path = run_baselines(config, dataset=data)["test"]["majority_class"]
+    before = path.read_bytes()
+    data[role] = data[role].map(
+        lambda row, index: {"targets": 2 if index == 0 else row["targets"]},
+        with_indices=True,
+    )
+    with pytest.raises(ValueError, match="Incompatible baseline"):
+        run_baselines(config, dataset=data)
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize("change", ["train", "test", "split", "task_classes"])

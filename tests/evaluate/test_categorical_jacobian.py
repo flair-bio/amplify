@@ -240,6 +240,7 @@ def test_categorical_jacobian_requires_evaluate_as_is_mode():
         "workspace": {
             "dataset_name": "toy_dataset",
             "model_name": "toy_model",
+            "run_id": "test",
             "task_type": "categorical_jacobian",
             "target_type": "categorical",
             "label_format": "contact_pairs",
@@ -262,6 +263,7 @@ def test_separation_prior_allowed_for_categorical_jacobian():
         "workspace": {
             "dataset_name": "toy_dataset",
             "model_name": "toy_model",
+            "run_id": "test",
             "task_type": "categorical_jacobian",
             "target_type": "categorical",
             "label_format": "contact_pairs",

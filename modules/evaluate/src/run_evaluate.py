@@ -31,7 +31,7 @@ def main() -> None:
 
     Usage::
 
-        uv run run_evaluate.py [--baselines] <config.yaml> [<override.yaml> ...] [key=value ...]
+        uv run run_evaluate.py [--baselines | --overwrite] <config.yaml> [<override.yaml> ...] [key=value ...]
 
     One or more YAML files may be supplied; later files override earlier ones
     for shared keys.  Any ``key=value`` arguments (containing ``=``) are
@@ -47,10 +47,18 @@ def main() -> None:
     """
     args = sys.argv[1:]
     baseline_only = "--baselines" in args
-    args = [argument for argument in args if argument != "--baselines"]
+    overwrite = "--overwrite" in args
+    args = [
+        argument for argument in args if argument not in {"--baselines", "--overwrite"}
+    ]
+    if baseline_only and overwrite:
+        raise SystemExit(
+            "--overwrite applies to model runs only; baseline artifacts are validated "
+            "and reused by --baselines."
+        )
     if not args:
         print(
-            "Usage: run_evaluate [--baselines] <config.yaml> [<override.yaml> ...] [key=value ...]",
+            "Usage: run_evaluate [--baselines | --overwrite] <config.yaml> [<override.yaml> ...] [key=value ...]",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -78,6 +86,8 @@ def main() -> None:
     logger.info("=== Starting Evaluation Pipeline ===")
 
     config = load_evaluation_config(path=config_paths, overrides=overrides or None)
+    if config.cross_validation.enabled and overwrite:
+        raise ValueError("--overwrite is not supported for CV; choose a new run_id.")
     torch.set_float32_matmul_precision("high" if config.tf32 else "highest")
     torch.backends.cuda.matmul.allow_tf32 = config.tf32
     torch.backends.cudnn.allow_tf32 = config.tf32
@@ -136,7 +146,7 @@ def main() -> None:
             workspace.dataset_name,
             config.variant,
         )
-        run_pipeline(config, workspace, accelerator)
+        run_pipeline(config, workspace, accelerator, overwrite=overwrite)
 
     logger.info("=== Evaluation Pipeline Completed Successfully ===")
 

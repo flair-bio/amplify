@@ -14,4 +14,4 @@ steps:
     metrics: [f1]
     metric_aggregation: macro # pool valid residues, then average classes; -100 positions are excluded
   predict:
-    controls: [random_trunk, majority_class]
+    controls: [random_trunk]

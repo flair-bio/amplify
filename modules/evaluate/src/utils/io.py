@@ -10,10 +10,31 @@ reproduce that step's output) alongside its main artifact, using the same
 from __future__ import annotations
 
 import json
+import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import polars as pl
+
+
+@contextmanager
+def log_to_file(path: Path) -> Iterator[None]:
+    """Record application logs while keeping terminal logging unchanged."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(path)
+    handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        yield
+    except Exception:
+        root.exception("Evaluation failed")
+        raise
+    finally:
+        root.removeHandler(handler)
+        handler.close()
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> Path:

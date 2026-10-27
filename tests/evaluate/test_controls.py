@@ -10,7 +10,6 @@ from accelerate import Accelerator
 from torch import nn
 from torch.utils.data import DataLoader
 
-from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.model.heads import EmbeddingProbeHead, HeadConfig
 from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
 from modules.evaluate.src.steps.predict import PredictConfig, PredictStep
@@ -234,15 +233,13 @@ def test_cached_random_trunk_selects_and_refits_its_own_probe(
     else:
         assert len(searches) == 2
         assert searches[0][1] == searches[1][1]
-        assert searches[1][0].endswith("-random_trunk")
+        assert searches[1][0] == workspace.variant
         torch.testing.assert_close(
             prepared.random_trunk_model.feature_mean.cpu(),
             fitted_features.float().mean(0),
         )
         filename = "probe_head_config.json"
-    baseline_path = get_evaluation_workspace(
-        workspace.config, variant=f"{workspace.variant or 'probe'}-random_trunk"
-    ).model_path
+    baseline_path = workspace.control_workspace("random_trunk").model_path
     settings = json.loads((baseline_path / filename).read_text())
     assert settings["final_fit_split"] == ("train+validation" if refit else "train")
     if head_type != "sklearn_linear":

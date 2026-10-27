@@ -119,6 +119,7 @@ def test_score_and_bootstrap_keep_classes_missing_from_test_split(tmp_path, num_
     values = [0, 0] if num_labels == 2 else [[0, 0], [0]]
     workspace = get_evaluation_workspace(
         EvaluationWorkspaceConfig(
+            run_id="test",
             model_name="toy-model",
             dataset_name="toy",
             task_type=task_type,
@@ -200,6 +201,7 @@ def test_token_confusion_bootstrap_preserves_results(
     def run(name):
         workspace = get_evaluation_workspace(
             EvaluationWorkspaceConfig(
+                run_id="test",
                 model_name="toy-model",
                 dataset_name="toy_dataset",
                 task_type="token_classification",
@@ -254,11 +256,13 @@ def test_token_confusion_bootstrap_preserves_results(
     permutation_spy.assert_not_called()
     assert actual.output_path.exists()
     assert actual.long_path.exists()
+    for name in ["variant", "split"]:
+        assert actual_layers[name].to_list() == expected_layers[name].to_list()
     for name in ["p_value", "p_value_adjusted"]:
         assert actual_layers[name].to_list() == expected_layers[name].to_list()
     np.testing.assert_allclose(
-        actual_layers.drop("metric").to_numpy(),
-        expected_layers.drop("metric").to_numpy(),
+        actual_layers.drop("metric", "variant", "split").to_numpy(),
+        expected_layers.drop("metric", "variant", "split").to_numpy(),
         rtol=1e-14,
         atol=1e-14,
         equal_nan=True,
@@ -802,6 +806,7 @@ def _make_workspace(tmp_path, task_type, num_labels=2):
     label_format = "per_token" if task_type == "token_classification" else "scalar"
     dataset_num_labels = None if task_type == "sequence_regression" else num_labels
     config = EvaluationWorkspaceConfig(
+        run_id="test",
         dataset_name="toy_dataset",
         model_name="toy-model",
         task_type=task_type,
@@ -1433,6 +1438,7 @@ def test_contact_score_cache_preserves_outputs_and_avoids_recomputation(
     def run(name):
         workspace = get_evaluation_workspace(
             EvaluationWorkspaceConfig(
+                run_id="test",
                 model_name="toy-model",
                 dataset_name="toy_dataset",
                 task_type="contact_prediction",
@@ -1576,6 +1582,7 @@ def test_shared_control_labels_preserve_bootstrap_results(
     def run(name):
         workspace = get_evaluation_workspace(
             EvaluationWorkspaceConfig(
+                run_id="test",
                 model_name="toy-model",
                 dataset_name="toy_dataset",
                 task_type=task_name,

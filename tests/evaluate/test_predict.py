@@ -239,14 +239,14 @@ def test_online_layerwise_pipeline_scores_each_layer(
             pl.col("variant") == result.metadata.variant
         )
         assert persisted_scores["layer_index"].unique().to_list() == [layer]
-    assert (
-        len(
-            score.long_df.filter(
-                score.long_df["variant"].str.contains("layerwise-test")
-            )
-        )
-        == 2
-    )
+    score_paths = [
+        get_evaluation_workspace(
+            workspace.config, variant=f"layerwise-test-layer_{layer}"
+        ).comparison_path / "scores_long.parquet"
+        for layer in results
+    ]
+    assert len(set(score_paths)) == 2
+    assert all(pl.read_parquet(path).height == 1 for path in score_paths)
 
 
 @pytest.mark.parametrize(
@@ -995,6 +995,7 @@ def _make_workspace(tmp_path, task_type, num_labels=2):
     label_format = "per_token" if task_type == "token_classification" else "scalar"
     dataset_num_labels = None if task_type == "sequence_regression" else num_labels
     config = EvaluationWorkspaceConfig(
+        run_id="test",
         dataset_name="toy_dataset",
         model_name="toy-model",
         task_type=task_type,
