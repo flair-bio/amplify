@@ -702,6 +702,13 @@ custom metrics, and unsupported aggregation modes retain the existing path.
 | `long_filename` | `scores_long.parquet` | Tidy/long-format sidecar written on every run, with or without bootstrap — concatenable across (model, dataset) runs for plotting |
 
 **Input:** `<run>/predictions.parquet`
+**Exact scores:** `<run>/condition_scores.parquet` contains one row per
+condition/metric with full-test `score` and evaluation metadata. `trained`
+identifies the evaluated model (the frozen-trunk probe in `tune_probe` mode);
+other conditions use their control/baseline names. This table is written even
+without bootstrap, preserves undefined scores as NaN, and is replaced on
+rescoring. Unlike comparison-row bootstrap means, these are exact test scores.
+
 **Output:** `<run>/scores_long.parquet` (always), plus `<run>/bootstrap_results.parquet` when `bootstrap_enabled=true`; scores/confidence intervals are also recorded in `<run>/run_manifest.json` under the `score`/`bootstrap` sections. Concatenate run-local score tables when comparing models or repeated runs.
 `bootstrap.control_comparisons` records each control's bootstrap mean, the
 trained-minus-control mean difference and confidence interval, and raw/adjusted
@@ -736,6 +743,7 @@ groups outputs by **benchmark root -> task -> dataset -> baselines/models -> run
         │   └── predictions.parquet
         ├── bootstrap_results.parquet
         ├── scores_long.parquet
+        ├── condition_scores.parquet      ← exact scores for model, controls, baselines
         ├── layerwise_comparison.parquet  ← when layer comparisons apply
         ├── run_manifest.json
         └── log

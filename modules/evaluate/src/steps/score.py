@@ -189,19 +189,6 @@ class ScoreStep:
 
         task = get_task(workspace.task_type, workspace.num_labels)
         metric_names = self.config.metrics or task.default_metrics()
-        for name, reference in baseline_references.items():
-            baseline = predict_result.controls[name]
-            reference["scores"] = full_scores(
-                task,
-                baseline["prediction"].to_list(),
-                labels_col,
-                baseline["probability"].to_list()
-                if "probability" in baseline.columns
-                else None,
-                metric_names,
-                self.config.metric_aggregation,
-            )
-            logger.info("Shared baseline '%s' scores: %s", name, reference["scores"])
         logger.info("Computing metrics: %s", metric_names)
         trained_per_example_scores = task.compute_per_example_metrics(
             predictions_col,
@@ -233,6 +220,41 @@ class ScoreStep:
         wandb_prefix = "test" if layer_index is None else f"test/layer_{layer_index}"
         log_wandb({f"{wandb_prefix}/{name}": value for name, value in scores.items()})
         metadata_dict = predict_result.metadata.model_dump(mode="json")
+        condition_scores = {"trained": scores}
+        control_arrays = collect_control_arrays(
+            predict_result,
+            predictions_col,
+            labels_col,
+            probabilities_col,
+            np.random.default_rng(seed),
+            task,
+        )
+        for name, (predictions, labels, probabilities) in control_arrays.items():
+            condition_scores[name] = full_scores(
+                task,
+                predictions,
+                labels,
+                probabilities,
+                metric_names,
+                self.config.metric_aggregation,
+            )
+        for name, reference in baseline_references.items():
+            reference["scores"] = condition_scores[name]
+        condition_scores_path = write_parquet(
+            pl.DataFrame(
+                [
+                    {
+                        **metadata_dict,
+                        "condition": condition,
+                        "metric": metric,
+                        "score": value,
+                    }
+                    for condition, metrics in condition_scores.items()
+                    for metric, value in metrics.items()
+                ]
+            ),
+            workspace.run_root / "condition_scores.parquet",
+        )
         scores_path = update_run_manifest(
             workspace.run_manifest_path,
             "score",
@@ -241,6 +263,7 @@ class ScoreStep:
                 "config": config_dict,
                 "scores": scores,
                 "baselines": baseline_references,
+                "condition_scores_path": str(condition_scores_path),
             },
         )
 
