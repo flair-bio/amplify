@@ -7,14 +7,14 @@ from unittest.mock import patch
 import polars as pl
 import pytest
 
-from modules.evaluate.src.dataset_sourcing.config import DatasetSourcingConfig
-from modules.evaluate.src.dataset_sourcing.outputs import (
+from modules.evaluate.scripts.dataset_sourcing.shared.config import DatasetSourcingConfig
+from modules.evaluate.scripts.dataset_sourcing.shared.outputs import (
     build_seqkit_split_fastas,
     stats_json_is_complete,
     write_dataset_card,
     write_dataset_stats,
 )
-from modules.evaluate.src.dataset_sourcing.spec import DatasetSourceSpec
+from modules.evaluate.scripts.dataset_sourcing.shared.spec import DatasetSourceSpec
 from modules.evaluate.src.utils.stats import compute_seqkit_stats
 
 
@@ -85,7 +85,7 @@ def _write_stats(tmp_path, split_frames, **kwargs):
         }
     )
     with patch(
-        "modules.evaluate.src.dataset_sourcing.outputs.compute_seqkit_stats",
+        "modules.evaluate.scripts.dataset_sourcing.shared.outputs.compute_seqkit_stats",
         return_value=seqkit_stats,
     ) as compute:
         stats_path = write_dataset_stats(tmp_path, split_frames, threads=1, **kwargs)

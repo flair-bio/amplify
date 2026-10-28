@@ -64,24 +64,8 @@ class PreparedArtifacts:
     # Named benchmark condition used to construct train/validation/test.
     split: str = "default"
 
-    # Set when this run is one cross-validation fold.
-    cross_validation: CrossValidationIdentity | None = None
     baseline_context: dict[str, Any] | None = None
     contact_dataset: ContactDataset | None = None
-
-    def cv_metadata(self) -> dict[str, Any]:
-        """CV fields for :class:`EvaluationMetadata`, empty outside CV."""
-        return self.cross_validation.model_dump() if self.cross_validation else {}
-
-
-class CrossValidationIdentity(BaseModel):
-    """CV experiment, fold (``None`` for pooled out-of-fold), and split seed."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    cv_id: str
-    fold_id: int | None = None
-    split_seed: int
 
 
 class EvaluationMetadata(BaseModel):
@@ -137,11 +121,6 @@ class EvaluationMetadata(BaseModel):
     # (seed-dependent randomness includes control scrambling/reinitialization),
     # without needing to cross-reference a separate run log.
     seed: int | None = None
-
-    # Cross-validation identity (see CrossValidationIdentity); None otherwise.
-    cv_id: str | None = None
-    fold_id: int | None = None
-    split_seed: int | None = None
 
 
 class ContactEvaluationMetadata(EvaluationMetadata):

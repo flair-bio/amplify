@@ -58,41 +58,25 @@ class TestExternalTestSets:
 
 
 class TestEvaluationConfig:
-    def test_cross_validation_defaults_to_disabled_at_top_level(self):
-        config = EvaluationConfig.model_validate(_base_config_dict())
-        assert not config.cross_validation.enabled
-        assert config.cross_validation.pool_roles == ["train", "validation"]
-        assert "cross_validation" in config.model_dump()
-        assert "cross_validation" not in config.steps.model_dump()
-
-    def test_cross_validation_rejects_former_steps_location(self):
+    def test_generic_cross_validation_is_removed(self):
         payload = _base_config_dict()
-        payload["steps"] = {"cross_validation": {"enabled": True}}
-        with pytest.raises(ValueError, match=r"steps\.cross_validation"):
+        payload["cross_validation"] = {"enabled": True}
+        with pytest.raises(ValueError, match="cross_validation"):
             EvaluationConfig.model_validate(payload)
 
-    def test_cross_validation_top_level_yaml_and_overrides(self):
+    def test_generic_cross_validation_override_is_rejected(self):
         root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
-        config = load_and_parse(
-            path=[
-                root / "config.yaml",
-                root / "tasks/sequence_classification.yaml",
-                root / "datasets/localization_prediction.yaml",
-            ],
-            model_cls=EvaluationConfig,
-            overrides=[
-                "cross_validation.enabled=true",
-                "baselines.names=[]",
-                "cross_validation.n_splits=3",
-                "steps.score.bootstrap_enabled=false",
-            ],
-        )
-        assert config.cross_validation.enabled
-        assert config.cross_validation.n_splits == 3
-        assert config.cross_validation.pool_roles == ["train", "validation"]
-        assert "cross_validation" not in config.steps.model_dump()
+        with pytest.raises(ValueError, match="cross_validation"):
+            load_and_parse(
+                path=[
+                    root / "config.yaml",
+                    root / "tasks/sequence_classification.yaml",
+                    root / "datasets/localization_prediction.yaml",
+                ],
+                model_cls=EvaluationConfig,
+                overrides=["cross_validation.enabled=true", "baselines.names=[]"],
+            )
 
-    def test_feature_extraction_defaults_to_float32_dtype(self):
         assert LayerwiseConfig().autocast_dtype == "float32"
         assert EmbeddingCacheConfig().autocast_dtype == "float32"
         assert EmbeddingCacheConfig().dtype == "float32"

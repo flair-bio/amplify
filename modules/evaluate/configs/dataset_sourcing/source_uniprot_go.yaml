@@ -32,7 +32,7 @@ organism_id: 9606
 review_status: reviewed
 # Minimum source support (min_label_count) and per-split support floors
 # (min_{train,validation,test}_label_count) default to the values in
-# modules/evaluate/src/dataset_sourcing/config.py; set them here to override.
+# modules/evaluate/scripts/dataset_sourcing/shared/config.py; set them here to override.
 # Splits: default fractions are 80/10/10.
 split_fractions:
   train: 0.8

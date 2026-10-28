@@ -27,15 +27,6 @@ wandb:
   run_name: null
   tags: []
 
-cross_validation:
-  enabled: false # outer K-fold over the pool; tune_probe scalar sequence tasks only (see README)
-  n_splits: 5
-  strategy: stratified_kfold # kfold, stratified_kfold, group_kfold, or stratified_group_kfold
-  group_column: null # required for group strategies, e.g. sequence_cluster_id
-  pool_roles: [train, validation] # source development splits; the official test split is never pooled
-  split_seed: 710019 # fold randomness, independent of the training seed
-  inner_validation_fraction: 0.1 # per-fold inner validation holdout, in (0, 0.5]
-
 steps:
   mode: tune_probe # tune_probe, finetune, or evaluate_as_is
   layerwise:

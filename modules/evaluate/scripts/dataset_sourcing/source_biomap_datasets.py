@@ -5,9 +5,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from modules.evaluate.src.dataset_sourcing.config import DatasetSourcingConfig
-from modules.evaluate.src.dataset_sourcing.pipeline import run_cli
-from modules.evaluate.src.dataset_sourcing.spec import DatasetSourceSpec
+from modules.evaluate.scripts.dataset_sourcing.shared.config import DatasetSourcingConfig
+from modules.evaluate.scripts.dataset_sourcing.shared.pipeline import run_cli
+from modules.evaluate.scripts.dataset_sourcing.shared.spec import DatasetSourceSpec
 
 BIOMAP_DATASETS: list[str] = [
     "ssp_q3",

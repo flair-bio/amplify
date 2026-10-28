@@ -6,7 +6,6 @@ import torch
 from accelerate import Accelerator
 
 from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
-from modules.evaluate.src.runners import cross_validation
 from modules.evaluate.src.runners.pipeline import run_pipeline
 from modules.evaluate.src.utils.config_loader import load_evaluation_config
 from modules.evaluate.src.utils.seed import seed_everything
@@ -86,8 +85,6 @@ def main() -> None:
     logger.info("=== Starting Evaluation Pipeline ===")
 
     config = load_evaluation_config(path=config_paths, overrides=overrides or None)
-    if config.cross_validation.enabled and overwrite:
-        raise ValueError("--overwrite is not supported for CV; choose a new run_id.")
     torch.set_float32_matmul_precision("high" if config.tf32 else "highest")
     torch.backends.cuda.matmul.allow_tf32 = config.tf32
     torch.backends.cudnn.allow_tf32 = config.tf32
@@ -132,23 +129,19 @@ def main() -> None:
     logger.info("Seeding everything for reproducibility...")
     seed_everything(config.seed)
 
-    if config.cross_validation.enabled:
-        manifest_path = cross_validation.run_cross_validation(config, accelerator)
-        logger.info("Cross-validation manifest written to %s", manifest_path)
-    else:
-        # Nest outputs under this run's variant (head type + mode + non-default
-        # split) so sweeping probes for the same model+dataset doesn't
-        # overwrite a previous variant's checkpoint/predictions/scores.
-        workspace = get_evaluation_workspace(
-            config.workspace, variant=config.variant, seed=config.seed
-        )
-        logger.info(
-            "Initialized workspace: model %s dataset %s variant %s",
-            workspace.model_name,
-            workspace.dataset_name,
-            config.variant,
-        )
-        run_pipeline(config, workspace, accelerator, overwrite=overwrite)
+    # Nest outputs under this run's variant (head type + mode + non-default
+    # split) so sweeping probes for the same model+dataset doesn't
+    # overwrite a previous variant's checkpoint/predictions/scores.
+    workspace = get_evaluation_workspace(
+        config.workspace, variant=config.variant, seed=config.seed
+    )
+    logger.info(
+        "Initialized workspace: model %s dataset %s variant %s",
+        workspace.model_name,
+        workspace.dataset_name,
+        config.variant,
+    )
+    run_pipeline(config, workspace, accelerator, overwrite=overwrite)
 
     logger.info("=== Evaluation Pipeline Completed Successfully ===")
 

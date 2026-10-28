@@ -355,7 +355,6 @@ def test_baseline_cli_uses_data_subset_without_model_validation(tmp_path, monkey
     [
         (["baselines.names=[train_mean]"], "sequence_regression"),
         (["baselines.names=[majority_class,majority_class]"], "duplicates"),
-        (["cross_validation.enabled=true"], "non-CV"),
     ],
 )
 def test_baseline_route_rejects_unsupported_requests(overrides, match):

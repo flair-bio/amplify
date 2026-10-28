@@ -75,8 +75,6 @@ def load_baseline_config(
     raw: Any = OmegaConf.to_container(
         compose_evaluation_config(paths, overrides), resolve=True
     )
-    if raw.get("cross_validation", {}).get("enabled"):
-        raise ValueError("Standalone baselines currently support non-CV runs only.")
     # Model and tuning settings do not apply to the baseline route.
     workspace = {
         key: value

@@ -30,7 +30,7 @@ review_status: reviewed
 interpro_download_url: https://ftp.ebi.ac.uk/pub/databases/interpro/current_release
 # Minimum source support (min_label_count) and per-split support floors
 # (min_{train,validation,test}_label_count) default to the values in
-# modules/evaluate/src/dataset_sourcing/config.py; set them here to override.
+# modules/evaluate/scripts/dataset_sourcing/shared/config.py; set them here to override.
 
 # Splits.
 # Whole-cluster split targets; must sum to 1.

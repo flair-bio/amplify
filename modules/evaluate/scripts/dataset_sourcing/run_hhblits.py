@@ -19,8 +19,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from modules.evaluate.src.dataset_sourcing.downloads import download_url
-from modules.evaluate.src.dataset_sourcing.pipeline import run_script
+from modules.evaluate.scripts.dataset_sourcing.shared.downloads import download_url
+from modules.evaluate.scripts.dataset_sourcing.shared.pipeline import run_script
 
 logger = logging.getLogger(__name__)
 

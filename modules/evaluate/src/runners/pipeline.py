@@ -20,7 +20,6 @@ from modules.evaluate.src.dataset.workspace import (
 )
 from modules.evaluate.src.schemas.artifacts import (
     ContactScoreOutput,
-    CrossValidationIdentity,
     PredictOutput,
     PreparedArtifacts,
     ScoreOutput,
@@ -52,16 +51,12 @@ def run_pipeline(
     workspace: EvaluationWorkspace,
     accelerator: Any,
     dataset: DatasetDict | None = None,
-    cross_validation: CrossValidationIdentity | None = None,
     *,
     overwrite: bool = False,
 ) -> PipelineResult:
     """Run every step once for *workspace*, optionally on a supplied dataset."""
     if config.workspace.task_type == "contact_prediction":
-        if (
-            cross_validation is not None
-            or getattr(accelerator, "num_processes", 1) != 1
-        ):
+        if getattr(accelerator, "num_processes", 1) != 1:
             raise ValueError(
                 "Contact embeddings require a single-process fixed-split run"
             )
@@ -69,16 +64,8 @@ def run_pipeline(
             raise ValueError(
                 "Contact workspace must be created with the configured seed"
             )
-    if cross_validation is not None:
-        if overwrite:
-            raise ValueError(
-                "--overwrite is not supported for CV; choose a new run_id."
-            )
-        return _execute_steps(config, workspace, accelerator, dataset, cross_validation)
     with _reserve_outputs(config, workspace, accelerator, overwrite=overwrite):
-        result = _execute_steps(
-            config, workspace, accelerator, dataset, cross_validation
-        )
+        result = _execute_steps(config, workspace, accelerator, dataset)
         return result
 
 
@@ -152,7 +139,6 @@ def _execute_steps(
     workspace: EvaluationWorkspace,
     accelerator: Any,
     dataset: DatasetDict | None,
-    cross_validation: CrossValidationIdentity | None,
 ) -> PipelineResult:
     if workspace.task_type == "contact_prediction":
         return _execute_contacts(config, workspace, accelerator, dataset)
@@ -163,7 +149,6 @@ def _execute_steps(
         accelerator=accelerator,
         layerwise_config=config.steps.layerwise,
         dataset=dataset,
-        cross_validation=cross_validation,
         **(
             {"baseline_names": config.baselines.names} if config.baselines.names else {}
         ),

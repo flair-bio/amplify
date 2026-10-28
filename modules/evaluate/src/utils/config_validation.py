@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from modules.evaluate.src.dataset.folds import CV_TASK_TYPES
 from modules.evaluate.src.model.heads import (
     CLASSICAL_HEAD_TYPES,
     TORCH_EMBEDDING_HEAD_TYPES,
@@ -36,8 +35,6 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
             f"head_type='{steps.tune.head.head_type}' requires "
             "task_type='contact_prediction'"
         )
-    if config.cross_validation.enabled:
-        _validate_cross_validation(config)
     if steps.layerwise.enabled:
         # The dedicated trainer compares frozen representations with linear
         # heads; generic HPO and seed-variance paths do not manage head sets.
@@ -283,8 +280,7 @@ def _validate_contact_task(config: EvaluationConfig) -> None:
         config.workspace.dataset_name,
     )
     if (
-        config.cross_validation.enabled
-        or config.external_test_sets
+        config.external_test_sets
         or steps.layerwise.enabled
         or config.baselines.names
     ):
@@ -412,36 +408,5 @@ def _validate_contact_jacobian(config: EvaluationConfig) -> None:
         )
     if config.workspace.model_kwargs:
         raise ValueError("Categorical Jacobian settings are fixed by the CASP protocol")
-
-
-def _validate_cross_validation(config: EvaluationConfig) -> None:
-    """Reject combinations outside the initial CV scope: frozen scalar
-    sequence probes with persisted, point-estimate fold/OOF scores."""
-    steps = config.steps
-    cv = config.cross_validation
-    if steps.mode != "tune_probe":
-        raise ValueError(
-            "cross-validation requires tune_probe: it retrains a probe per fold."
-        )
-    if steps.layerwise.enabled:
-        raise ValueError("cross-validation currently runs without layerwise probing.")
-    if config.workspace.task_type not in CV_TASK_TYPES:
-        raise ValueError(
-            f"cross-validation supports task_type in {sorted(CV_TASK_TYPES)}."
-        )
-    if cv.stratified and config.workspace.task_type != "sequence_classification":
-        raise ValueError(
-            f"cross_validation.strategy='{cv.strategy}' requires "
-            "sequence_classification."
-        )
-    if steps.score.bootstrap_enabled:
-        raise ValueError(
-            "cross-validation reports point estimates only; set "
-            "steps.score.bootstrap_enabled=false."
-        )
-    if not steps.predict.persist_to_disk:
-        raise ValueError(
-            "cross-validation requires steps.predict.persist_to_disk=true."
-        )
     if steps.tune.variance_seeds:
         raise ValueError("cross-validation does not support steps.tune.variance_seeds.")

@@ -40,7 +40,6 @@ from modules.evaluate.src.dataset.workspace import EvaluationWorkspace, TaskType
 from modules.evaluate.src.model.heads import EmbeddingProbeHead
 from modules.evaluate.src.model.layerwise import LayerwiseProbeModel, resolve_layers
 from modules.evaluate.src.schemas.artifacts import (
-    CrossValidationIdentity,
     PreparedArtifacts,
 )
 from modules.evaluate.src.tasks import get_task
@@ -189,7 +188,6 @@ class PrepareStep:
         accelerator: Accelerator | None = None,
         layerwise_config: LayerwiseConfig | None = None,
         dataset: DatasetDict | None = None,
-        cross_validation: CrossValidationIdentity | None = None,
         baseline_names: list[BaselineName] | None = None,
     ) -> PreparedArtifacts:
         """Load task data and models, optionally replacing tokens with features.
@@ -433,7 +431,6 @@ class PrepareStep:
                 for split in refit_token_dataloaders
             },
             split=self.config.split.name,
-            cross_validation=cross_validation,
             baseline_context=shared_context,
             **embedding_extras,
         )

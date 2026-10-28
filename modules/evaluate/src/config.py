@@ -16,7 +16,6 @@ from modules.evaluate.src.dataset.dataloader import (
     DEFAULT_SPLIT_NAME,
     ExternalTestSetConfig,
 )
-from modules.evaluate.src.dataset.folds import CrossValidationConfig
 from modules.evaluate.src.dataset.workspace import EvaluationWorkspaceConfig
 from modules.evaluate.src.steps.predict import PredictConfig
 from modules.evaluate.src.steps.prepare import PrepareConfig
@@ -95,9 +94,6 @@ class EvaluationConfig(BaseModel):
 
     workspace: EvaluationWorkspaceConfig
     wandb: WandbConfig = Field(default_factory=WandbConfig)
-    cross_validation: CrossValidationConfig = Field(
-        default_factory=CrossValidationConfig
-    )
     steps: StepsConfig = Field(default_factory=StepsConfig)
     # Test-only datasets scored with the model fitted on the workspace dataset.
     external_test_sets: list[ExternalTestSetConfig] = Field(default_factory=list)
@@ -133,11 +129,6 @@ class EvaluationConfig(BaseModel):
     @model_validator(mode="after")
     def _validate_cross_step_dependencies(self) -> EvaluationConfig:
         self.baselines.validate_task(self.workspace.task_type)
-        if self.baselines.names and self.cross_validation.enabled:
-            raise ValueError(
-                "Shared baselines currently support non-CV runs only; "
-                "set baselines.names=[] for CV."
-            )
         if self.workspace.task_type in {
             "sequence_classification",
             "sequence_regression",

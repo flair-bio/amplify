@@ -216,7 +216,6 @@ class PredictStep:
                 head_type="torch_linear",
                 layer_index=layer,
                 variant=layer_workspace.variant,
-                **prepared.cv_metadata(),
             )
             data: dict[str, list[Any]] = {
                 "layer_index": [layer] * len(ids),
@@ -314,7 +313,6 @@ class PredictStep:
             seed=seed,
             head_type=head_type,
             variant=variant,
-            **prepared.cv_metadata(),
         )
         if prepared.contact_dataset is not None:
             unsupported_controls = set(self.config.controls) - {"random_trunk"}
