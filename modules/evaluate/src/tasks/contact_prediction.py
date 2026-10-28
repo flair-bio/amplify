@@ -507,8 +507,10 @@ class ContactPredictionTask(TaskHandler):
             raise ValueError(
                 "Contact scoring requires schema-6.0 CASP prediction metadata"
             )
-        if predictions.controls or predictions.requested_controls:
-            raise ValueError("CASP control comparisons are not implemented yet")
+        if set(predictions.requested_controls) != set(predictions.controls):
+            raise ValueError("Every requested CASP control requires prediction rows")
+        if set(predictions.controls) - {"random_trunk"}:
+            raise ValueError("CASP contact prediction only supports random_trunk")
         if predictions.predictions.is_empty():
             raise ValueError("Contact scoring requires prediction rows")
         payload_columns = {
@@ -524,15 +526,18 @@ class ContactPredictionTask(TaskHandler):
             for key, value in metadata.model_dump().items()
             if key not in {"split", "dataset_name", "dataset_repo_id"}
         }
-        rows = []
-        seen = set()
-        for row in predictions.predictions.to_dicts():
-            if row["id"] in seen:
-                raise ValueError(f"Duplicate scoring id: {row['id']}")
-            seen.add(row["id"])
-            for minsep in contact_metrics.CASP_SEPARATIONS:
-                rows.append(
-                    dict(
+
+        def score_rows(
+            frame: pl.DataFrame, control: str | None = None
+        ) -> tuple[pl.DataFrame, pl.DataFrame]:
+            rows = []
+            seen = set()
+            for row in frame.to_dicts():
+                if row["id"] in seen:
+                    raise ValueError(f"Duplicate scoring id: {row['id']}")
+                seen.add(row["id"])
+                for minsep in contact_metrics.CASP_SEPARATIONS:
+                    scored = dict(
                         {
                             key: value
                             for key, value in row.items()
@@ -542,13 +547,41 @@ class ContactPredictionTask(TaskHandler):
                         minsep=minsep,
                         **contact_metrics.score_contact_prediction(row, minsep),
                     )
+                    if control is not None:
+                        scored["control"] = control
+                    rows.append(scored)
+            summaries = contact_metrics.aggregate_contact_scores(rows)
+            if control is not None:
+                for summary in summaries:
+                    summary["control"] = control
+            return (
+                pl.DataFrame(rows, infer_schema_length=None),
+                pl.DataFrame(summaries, infer_schema_length=None),
+            )
+
+        unit_scores, summaries = score_rows(predictions.predictions)
+        control_scores = {}
+        control_summaries = {}
+        primary_by_id = {row["id"]: row for row in predictions.predictions.to_dicts()}
+        for name, frame in predictions.controls.items():
+            if set(frame["id"].to_list()) != set(primary_by_id):
+                raise ValueError(
+                    f"{name} control rows do not match primary prediction IDs"
                 )
+            for row in frame.to_dicts():
+                primary = primary_by_id[row["id"]]
+                for key in ("original_i", "original_j", "labels", "length", "status"):
+                    if row[key] != primary[key]:
+                        raise ValueError(
+                            f"{name} control candidates differ from primary predictions"
+                        )
+            control_scores[name], control_summaries[name] = score_rows(frame, name)
         return ContactScoreOutput(
             metadata,
-            pl.DataFrame(rows, infer_schema_length=None),
-            pl.DataFrame(
-                contact_metrics.aggregate_contact_scores(rows), infer_schema_length=None
-            ),
+            unit_scores,
+            summaries,
+            control_unit_scores=control_scores,
+            control_summaries=control_summaries,
         )
 
     def model_kwargs(self) -> dict[str, Any]:

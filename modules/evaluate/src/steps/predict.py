@@ -317,9 +317,11 @@ class PredictStep:
             **prepared.cv_metadata(),
         )
         if prepared.contact_dataset is not None:
-            if self.config.controls:
+            unsupported_controls = set(self.config.controls) - {"random_trunk"}
+            if unsupported_controls:
                 raise ValueError(
-                    "Contact controls require independently fitted predictors; use controls=[]"
+                    "CASP contact prediction only supports the independently "
+                    f"fitted random_trunk control; got {sorted(unsupported_controls)}"
                 )
             if self.config.collect_probabilities:
                 raise ValueError(
@@ -327,12 +329,29 @@ class PredictStep:
                 )
             if accelerator is not None and accelerator.num_processes != 1:
                 raise ValueError("Contact prediction requires a single process")
+            if (
+                "random_trunk" in self.config.controls
+                and prepared.random_trunk_model is None
+            ):
+                raise ValueError(
+                    "random_trunk was requested but no fitted contact control is available"
+                )
             predictor = cast(Any, prepared.model).predict
-            output = ContactPredictionTask().predict_units(
+            task = ContactPredictionTask()
+            output = task.predict_units(
                 prepared.contact_dataset,
                 lambda chain: predictor(chain, prepared.tokenizer),
                 metadata,
             )
+            if "random_trunk" in self.config.controls:
+                random_predictor = cast(Any, prepared.random_trunk_model).predict
+                control_output = task.predict_units(
+                    prepared.contact_dataset,
+                    lambda chain: random_predictor(chain, prepared.tokenizer),
+                    metadata,
+                )
+                output.controls["random_trunk"] = control_output.predictions
+                output.requested_controls = ["random_trunk"]
             output.config = self.config.model_dump(mode="json")
             if self.config.persist_to_disk:
                 persist_predictions(workspace, output, seed)

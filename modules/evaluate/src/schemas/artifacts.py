@@ -255,6 +255,10 @@ class ContactScoreOutput:
     summaries: pl.DataFrame
     unit_scores_path: Path | None = None
     summaries_path: Path | None = None
+    control_unit_scores: dict[str, pl.DataFrame] = field(default_factory=dict)
+    control_summaries: dict[str, pl.DataFrame] = field(default_factory=dict)
+    control_unit_scores_paths: dict[str, Path] = field(default_factory=dict)
+    control_summaries_paths: dict[str, Path] = field(default_factory=dict)
 
 
 class ConfidenceInterval(TypedDict):

@@ -13,6 +13,7 @@ varies *by* task type (e.g. its ``scramble_labels``).
 from __future__ import annotations
 
 import copy
+import hashlib
 import logging
 from pathlib import Path
 from time import monotonic
@@ -90,6 +91,12 @@ def build_random_trunk(trunk: torch.nn.Module, seed: int) -> torch.nn.Module:
         torch.manual_seed(seed)
         random_trunk = type(trunk)(copy.deepcopy(trunk.config))
     return random_trunk.to(next(trunk.parameters()).device).eval()
+
+
+def contact_random_trunk_seed(seed: int, stream: str) -> int:
+    """Derive stable, independent RNG streams for contact-trunk controls."""
+    digest = hashlib.sha256(f"contact:random_trunk:{seed}:{stream}".encode()).digest()
+    return int.from_bytes(digest[:4], "big")
 
 
 class ControlBuilder:

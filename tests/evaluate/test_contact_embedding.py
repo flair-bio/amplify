@@ -102,6 +102,7 @@ def config_for(tmp_path, model_path, seed=13):
             f"workspace.dataset_repo_id={tmp_path / 'dataset'}",
             f"seed={seed}",
             "steps.tune.max_epochs=12",
+            "steps.predict.controls=[random_trunk]",
         ],
     )
 
@@ -333,13 +334,26 @@ def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
     result = results[0]
     assert workspace.run_root.name == "seed_13"
     assert result.predictions[None].predictions.height == 3
+    assert set(result.predictions[None].controls) == {"random_trunk"}
+    assert result.scores[None].control_summaries["random_trunk"].height == 4
+    assert (
+        workspace.control_workspace("random_trunk").stats_path / "contact_training.json"
+    ).is_file()
+    assert (
+        workspace.control_workspace("random_trunk").model_path / "contact_head.pt"
+    ).is_file()
+    assert (
+        workspace.run_root / "controls" / "random_trunk" / "scores.parquet"
+    ).is_file()
     assert workspace.task_type == "contact_prediction"
     assert workspace.variant == "bilinear512-frozen_trunk"
     manifest = json.loads(workspace.run_manifest_path.read_text())
     assert manifest["predict"]["metadata"]["head_type"] == "bilinear512"
     from modules.evaluate.src.steps.score import ScoreStep
 
-    assert ScoreStep.load_predict_output(workspace).metadata.head_type == "bilinear512"
+    restored_predictions = ScoreStep.load_predict_output(workspace)
+    assert restored_predictions.metadata.head_type == "bilinear512"
+    assert set(restored_predictions.controls) == {"random_trunk"}
     assert (
         json.loads(workspace.run_manifest_path.read_text())["evaluation"]["status"]
         == "complete"
@@ -362,7 +376,7 @@ def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
         run_pipeline(config, workspace, Accelerator(cpu=True))
     run_pipeline(config, workspace, Accelerator(cpu=True), overwrite=True)
     assert sibling.run_manifest_path.read_bytes() == sibling_content
-    assert len(list(workspace.embeddings_path.glob("*.safetensors"))) == 1
+    assert len(list(workspace.embeddings_path.glob("*.safetensors"))) == 3
     # Changing input weights cannot silently share an experiment across seeds.
     different = family_trunk(model_family)
     different.save_pretrained(model_path)
@@ -379,7 +393,7 @@ def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
         "steps.tune.learning_rate=0.1",
         "steps.tune.head.head_type=mlp",
         "steps.prepare.packed=true",
-        "steps.predict.controls=[random_trunk]",
+        "steps.predict.controls=[random_head]",
         "steps.score.bootstrap_enabled=true",
     ],
 )

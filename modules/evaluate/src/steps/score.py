@@ -155,6 +155,15 @@ class ScoreStep:
             result.summaries_path = write_parquet(
                 result.summaries, output_dir / "scores.parquet"
             )
+            for name, frame in result.control_unit_scores.items():
+                control_dir = output_dir / "controls" / name
+                result.control_unit_scores_paths[name] = write_parquet(
+                    frame, control_dir / "unit_scores.parquet"
+                )
+                result.control_summaries_paths[name] = write_parquet(
+                    result.control_summaries[name],
+                    control_dir / "scores.parquet",
+                )
             write_settings_json(
                 output_dir / "contact_score.json",
                 seed,

@@ -301,8 +301,14 @@ def _validate_contact_task(config: EvaluationConfig) -> None:
         raise ValueError(
             "Contact prediction requires unchanged fixed splits and unpadded full chains"
         )
-    if steps.predict.controls or steps.predict.collect_probabilities:
-        raise ValueError("Contact controls are a subsequent stage; set controls=[]")
+    unsupported_controls = set(steps.predict.controls) - {"random_trunk"}
+    if unsupported_controls:
+        raise ValueError(
+            "Contact prediction supports only the random_trunk control; "
+            f"got {sorted(unsupported_controls)}"
+        )
+    if steps.predict.collect_probabilities:
+        raise ValueError("CASP contact prediction does not collect probabilities")
     if steps.score.bootstrap_enabled:
         raise ValueError("Contact bootstrap requires complex-level resampling")
     if steps.score.metrics is not None and set(steps.score.metrics) != set(

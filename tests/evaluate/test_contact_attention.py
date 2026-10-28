@@ -8,7 +8,10 @@ from modules.evaluate.src.model.contact_attention import (
     ContactAttentionModel,
     fit_contact_attention_head,
 )
-from modules.evaluate.src.model.contact_model import load_contact_model
+from modules.evaluate.src.model.contact_model import (
+    fit_random_trunk_contact_control,
+    load_contact_model,
+)
 from modules.evaluate.src.tasks.contact_prediction import (
     ContactAlignment,
     ContactChain,
@@ -142,3 +145,34 @@ def test_attention_head_fits_all_training_pairs_and_round_trips(
     restored_prediction = restored.predict(training[0], esm2_tokenizer)
     torch.testing.assert_close(prediction, restored_prediction)
     assert (tmp_path / "attention_head.joblib").is_file()
+
+
+def test_random_trunk_attention_control_is_independently_fitted(esm2_tokenizer):
+    training = tuple(contact_chain(f"train-{i}", "train") for i in range(20))
+    dataset = ContactDataset(
+        {"train": training, "validation": (), "test": ()},
+        "random-trunk-attention",
+        "in-memory",
+        None,
+    )
+    pretrained = ContactAttentionModel(small_trunk())
+
+    random_model, settings = fit_random_trunk_contact_control(
+        pretrained,
+        dataset,
+        esm2_tokenizer,
+        seed=17,
+        max_epochs=12,
+        device=torch.device("cpu"),
+    )
+
+    assert isinstance(random_model, ContactAttentionModel)
+    assert settings["trunk_seed"] != settings["head_seed"]
+    assert settings["fit"]["training_structures"] == 20
+    assert random_model.classifier is not None
+    assert any(
+        not torch.equal(original, initialized)
+        for original, initialized in zip(
+            pretrained.trunk.parameters(), random_model.trunk.parameters()
+        )
+    )

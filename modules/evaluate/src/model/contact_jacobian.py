@@ -110,7 +110,7 @@ class ContactJacobianModel(nn.Module):
         super().__init__()
         if mutant_batch_size < 1:
             raise ValueError("mutant_batch_size must be greater than zero")
-        self.trunk = trunk.float().eval().requires_grad_(False)
+        self.trunk: Any = trunk.float().eval().requires_grad_(False)
         self.aa_token_ids: torch.Tensor
         self.register_buffer(
             "aa_token_ids",

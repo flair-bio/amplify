@@ -241,8 +241,15 @@ def _execute_contacts(
 ) -> PipelineResult:
     from transformers import AutoTokenizer
 
-    from modules.evaluate.src.model.contact_model import build_contact_model
+    from modules.evaluate.src.model.contact_attention import ContactAttentionModel
+    from modules.evaluate.src.model.contact_jacobian import ContactJacobianModel
+    from modules.evaluate.src.model.contact_model import (
+        ContactPredictionModel,
+        build_contact_model,
+        fit_random_trunk_contact_control,
+    )
     from modules.evaluate.src.tasks.contact_prediction import prepare_contact_dataset
+    from modules.evaluate.src.utils.io import write_json
 
     source = workspace.config.dataset_repo_id
     if source is None or workspace.config.model_repo_id is None:
@@ -281,6 +288,44 @@ def _execute_contacts(
             device=accelerator.device,
             cache_config=config.steps.prepare.embedding_cache,
         )
+    random_trunk_model = None
+    random_trunk_seed = None
+    if "random_trunk" in config.steps.predict.controls:
+        random_trunk_model, control_settings = fit_random_trunk_contact_control(
+            model,
+            contacts,
+            tokenizer,
+            seed=config.seed,
+            max_epochs=config.steps.tune.max_epochs,
+            device=accelerator.device,
+            cache_dir=(
+                workspace.embeddings_path
+                if config.steps.prepare.embedding_cache.cache_policy != "off"
+                else None
+            ),
+            refresh_cache=(
+                config.steps.prepare.embedding_cache.cache_policy == "refresh"
+            ),
+            max_cache_gb=config.steps.prepare.embedding_cache.max_cache_gb,
+        )
+        control_workspace = workspace.control_workspace("random_trunk")
+        control_workspace.setup_directories()
+        if isinstance(random_trunk_model, ContactJacobianModel):
+            random_trunk_model.trunk.save_pretrained(control_workspace.model_path)
+        elif isinstance(
+            random_trunk_model, (ContactPredictionModel, ContactAttentionModel)
+        ):
+            random_trunk_model.save_pretrained(control_workspace.model_path)
+        else:
+            raise TypeError(
+                f"Unsupported random-trunk model: {type(random_trunk_model).__name__}"
+            )
+        tokenizer.save_pretrained(control_workspace.model_path)
+        write_json(
+            control_workspace.stats_path / "contact_training.json",
+            control_settings,
+        )
+        random_trunk_seed = control_settings["trunk_seed"]
     prepared = PreparedArtifacts(
         model=model,
         tokenizer=tokenizer,
@@ -288,6 +333,8 @@ def _execute_contacts(
         train_dataloader=None,
         val_dataloader=None,
         test_dataloader=None,
+        random_trunk_model=random_trunk_model,
+        random_trunk_seed=random_trunk_seed,
     )
     predictions = PredictStep(config.steps.predict).run(
         workspace,

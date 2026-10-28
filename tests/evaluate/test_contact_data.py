@@ -344,7 +344,7 @@ def test_deleted_chains_are_unscorable_and_bad_predictions_fail(tmp_path):
     )
     with pytest.raises(MemoryError, match="too long"):
         step.run(workspace, prepared, seed=0)
-    with pytest.raises(ValueError, match="fitted predictors"):
+    with pytest.raises(ValueError, match="no fitted contact control"):
         PredictStep(PredictConfig()).run(workspace, prepared, seed=0)
     with pytest.raises(ValueError, match="complexes"):
         ScoreStep(ScoreConfig(bootstrap_enabled=True)).run_contacts(predictions)

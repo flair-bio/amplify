@@ -19,6 +19,8 @@ from torch import nn
 from transformers import AutoConfig, AutoModel, PreTrainedTokenizerBase
 
 if TYPE_CHECKING:
+    from modules.evaluate.src.model.contact_attention import ContactAttentionModel
+    from modules.evaluate.src.model.contact_jacobian import ContactJacobianModel
     from modules.evaluate.src.tasks.contact_prediction import (
         ContactChain,
         ContactDataset,
@@ -220,6 +222,91 @@ def build_contact_model(
     if predictor != "bilinear512":
         raise ValueError(f"Unknown CASP contact predictor: {predictor}")
     return ContactPredictionModel(load_contact_trunk(model_id))
+
+
+def fit_random_trunk_contact_control(
+    model: ContactPredictionModel | ContactAttentionModel | ContactJacobianModel,
+    dataset: ContactDataset,
+    tokenizer: PreTrainedTokenizerBase,
+    *,
+    seed: int,
+    max_epochs: int,
+    device: torch.device,
+    cache_dir: Path | None = None,
+    refresh_cache: bool = False,
+    max_cache_gb: float = 50,
+) -> tuple[
+    ContactPredictionModel | ContactAttentionModel | ContactJacobianModel,
+    dict[str, Any],
+]:
+    """Reinitialize the contact trunk and independently fit its predictor."""
+    from modules.evaluate.src.model.contact_attention import (
+        ContactAttentionModel,
+        fit_contact_attention_head,
+    )
+    from modules.evaluate.src.model.contact_jacobian import ContactJacobianModel
+    from modules.evaluate.src.utils.controls import (
+        build_random_trunk,
+        contact_random_trunk_seed,
+    )
+
+    trunk_seed = contact_random_trunk_seed(seed, "trunk")
+    head_seed = contact_random_trunk_seed(seed, "head")
+    random_trunk = build_random_trunk(model.trunk, trunk_seed)
+    feature_key = None
+    random_model: ContactPredictionModel | ContactAttentionModel | ContactJacobianModel
+
+    if isinstance(model, ContactPredictionModel):
+        from modules.evaluate.src.utils.embed import contact_development_features
+
+        devices = [device.index or 0] if device.type == "cuda" else []
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(head_seed)
+            random_model = ContactPredictionModel(random_trunk).to(device)
+        features, feature_key = contact_development_features(
+            random_model,
+            tokenizer,
+            dataset,
+            cache_dir,
+            refresh=refresh_cache,
+            max_cache_gb=max_cache_gb,
+        )
+        fit = fit_contact_head(
+            random_model,
+            dataset,
+            features,
+            seed=head_seed,
+            max_epochs=max_epochs,
+            device=device,
+        )
+    elif isinstance(model, ContactAttentionModel):
+        random_model = ContactAttentionModel(random_trunk).to(device)
+        fit = fit_contact_attention_head(
+            random_model, dataset, tokenizer, seed=head_seed
+        )
+    elif isinstance(model, ContactJacobianModel):
+        random_model = ContactJacobianModel(
+            random_trunk,
+            tokenizer,
+            mutant_batch_size=model.mutant_batch_size,
+        ).to(device)
+        fit = {"fitting": "zero_shot"}
+    else:
+        raise TypeError(
+            f"Unsupported contact model for random-trunk control: {type(model).__name__}"
+        )
+
+    return random_model, {
+        "control": "random_trunk",
+        "protocol": "contact-random-trunk-v1",
+        "trunk_initialization": "random_from_config",
+        "trunk_seed": trunk_seed,
+        "head_seed": head_seed if not isinstance(model, ContactJacobianModel) else None,
+        "development_features": feature_key
+        if isinstance(model, ContactPredictionModel)
+        else None,
+        "fit": fit,
+    }
 
 
 def load_contact_trunk(model_id: str) -> Any:
