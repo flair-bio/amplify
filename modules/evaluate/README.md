@@ -105,8 +105,8 @@ only. `tasks/contact_prediction.py` owns its data/prediction/scoring orchestrati
 the existing step classes delegate to that handler and persist its artifacts.
 The data contract/alignment also live in that task module, shared extraction in
 `utils/inference.py`, and ranking/aggregation in `metrics/contact_metrics.py`.
-The frozen-embedding predictor runs through the normal CLI and prediction
-entry point. Attention, categorical-Jacobian migration and CASP controls remain
+The frozen-embedding and attention predictors run through the normal CLI and
+prediction entry point. Categorical-Jacobian migration and CASP controls remain
 subsequent stages. The old Biomap contact overlay and embedding head are removed.
 The dataset selects the shared `contact_prediction` task; an explicit predictor
 overlay selects extraction, fitting and inference without changing that task.
@@ -122,6 +122,9 @@ uv run python modules/evaluate/src/run_evaluate.py \
     seed=0
 ```
 
+For the attention readout, replace `contact_embedding.yaml` with
+`contact_attention.yaml` and use a distinct `workspace.run_id`.
+
 The final residue embeddings are frozen, unpooled and unnormalized. Two
 independent bias-free 512-dimensional projections produce averaged directional
 logits plus a zero-initialized scalar bias. Fitting uses all known unordered
@@ -132,6 +135,14 @@ structures, strict improvement and patience 10; the best head is restored.
 There is no HPO, class weighting, negative subsampling, scheduler, clipping,
 feature standardization or train+validation refit. `max_epochs` is a safety
 limit: reaching it before patience is a failed fit.
+
+The attention preset uses all layer/head probability maps, sum-symmetrizes each
+map, applies APC, and fits one L1 logistic regression (`C=0.15`,
+`solver=liblinear`) on all known unordered training pairs at original separation
+>=6. It does not standardize features or select settings on validation data.
+Training attention maps are transient, and test maps are never persisted.
+Select it with `configs/predictors/contact_attention.yaml` instead of the
+embedding preset.
 
 `tokenize_contact_chain` supplies uncropped tokens and original-coordinate
 position IDs. Native AMPLIFY and ESM rotary computations preserve gaps and
@@ -148,9 +159,10 @@ and exact original sequences share predictions without merging their identities.
 Reference-free chains skip inference but retain unscored rows. Test features
 are transient; persisted predictions contain candidate scores, labels and
 original pair indices, not embeddings or attention maps.
-Only development embeddings are cached across seeds; content keys include the
-backbone weights/configuration, tokens, original positions and precision.
-Use `steps.prepare.embedding_cache.cache_policy=off` to disable this cache.
+Development embeddings are cached across seeds; attention maps are not cached.
+Embedding-cache keys include the backbone weights/configuration, tokens,
+original positions and precision. Use
+`steps.prepare.embedding_cache.cache_policy=off` to disable the embedding cache.
 Run one seed per invocation; final repetitions use seeds 0 through 4.
 
 Score writes `unit_scores.parquet` and `scores.parquet`, reporting both original

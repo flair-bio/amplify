@@ -1,4 +1,4 @@
-"""Frozen full-chain embeddings and the prescribed few-shot bilinear contact head."""
+"""Frozen-trunk models and fitting for CASP contact predictors."""
 
 from __future__ import annotations
 
@@ -173,6 +173,7 @@ class ContactPredictionModel(nn.Module):
             json.dumps(
                 {
                     "protocol": "casp-contact-v1",
+                    "predictor": "bilinear512",
                     "projection": 512,
                     "dimension": self.head.left.in_features,
                 },
@@ -187,6 +188,8 @@ class ContactPredictionModel(nn.Module):
         config = json.loads((directory / "contact_config.json").read_text())
         if config["protocol"] != "casp-contact-v1" or config["projection"] != 512:
             raise ValueError("Unsupported contact checkpoint protocol")
+        if config.get("predictor", "bilinear512") != "bilinear512":
+            raise ValueError("Unsupported bilinear contact checkpoint predictor")
         model = build_contact_model(str(directory))
         model.head.load_state_dict(
             torch.load(
@@ -196,15 +199,37 @@ class ContactPredictionModel(nn.Module):
         return model.eval()
 
 
-def build_contact_model(model_id: str) -> ContactPredictionModel:
+def build_contact_model(model_id: str, predictor: str = "bilinear512") -> Any:
+    if predictor == "attention_l1":
+        from modules.evaluate.src.model.contact_attention import ContactAttentionModel
+
+        return ContactAttentionModel(load_contact_trunk(model_id))
+    if predictor != "bilinear512":
+        raise ValueError(f"Unknown CASP contact predictor: {predictor}")
+    return ContactPredictionModel(load_contact_trunk(model_id))
+
+
+def load_contact_trunk(model_id: str) -> Any:
     config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
     # Masked-LM ESM checkpoints have no pooler; it is unused for residue features.
-    kwargs = {"add_pooling_layer": False} if config.model_type == "esm" else {}
-    return ContactPredictionModel(
-        AutoModel.from_pretrained(
-            model_id, config=config, trust_remote_code=True, **kwargs
-        )
+    kwargs: dict[str, Any] = (
+        {"add_pooling_layer": False} if config.model_type == "esm" else {}
     )
+    return AutoModel.from_pretrained(
+        model_id, config=config, trust_remote_code=True, **kwargs
+    )
+
+
+def load_contact_model(directory: str | Path) -> Any:
+    directory = Path(directory)
+    config = json.loads((directory / "contact_config.json").read_text())
+    if config.get("predictor", "bilinear512") == "attention_l1":
+        from modules.evaluate.src.model.contact_attention import ContactAttentionModel
+
+        return ContactAttentionModel.from_pretrained(directory)
+    if config.get("predictor", "bilinear512") != "bilinear512":
+        raise ValueError("Unsupported contact checkpoint predictor")
+    return ContactPredictionModel.from_pretrained(directory)
 
 
 def fit_contact_head(

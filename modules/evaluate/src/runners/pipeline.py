@@ -263,7 +263,10 @@ def _execute_contacts(
     tokenizer = AutoTokenizer.from_pretrained(
         workspace.config.model_repo_id, trust_remote_code=True
     )
-    model = build_contact_model(workspace.config.model_repo_id).to(accelerator.device)
+    head_type = config.steps.tune.head.head_type
+    model = build_contact_model(workspace.config.model_repo_id, predictor=head_type).to(
+        accelerator.device
+    )
     TuneStep(config.steps.tune).run_contacts(
         workspace,
         contacts,
@@ -285,7 +288,7 @@ def _execute_contacts(
         workspace,
         prepared,
         seed=config.seed,
-        head_type="bilinear512",
+        head_type=head_type,
         variant=workspace.variant,
         accelerator=accelerator,
     )

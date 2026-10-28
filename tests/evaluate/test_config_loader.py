@@ -56,9 +56,16 @@ def test_predictor_presets_compose_existing_steps_and_allow_overrides(
     assert customized.steps.tune.max_epochs == 25
 
 
-@pytest.mark.parametrize("head", ["mlp", "torch_linear", "sklearn_linear"])
-def test_contact_rejects_unsupported_heads(head):
-    with pytest.raises(ValueError, match="head_type='bilinear512'"):
+@pytest.mark.parametrize(
+    "head,error",
+    [
+        ("mlp", "head_type='bilinear512' or 'attention_l1'"),
+        ("torch_linear", "head_type='bilinear512' or 'attention_l1'"),
+        ("sklearn_linear", "head_type='bilinear512' or 'attention_l1'"),
+    ],
+)
+def test_contact_rejects_unsupported_heads(head, error):
+    with pytest.raises(ValueError, match=error):
         load_evaluation_config(
             [
                 CONFIGS / "config.yaml",
@@ -91,6 +98,31 @@ def test_contact_predictor_overlay_keeps_task_default_and_cli_precedence():
     assert config.workspace.task_type == "contact_prediction"
     assert config.steps.tune.head.head_type == "bilinear512"
     assert config.steps.tune.max_epochs == 25
+
+
+def test_contact_attention_preset_selects_fixed_predictor():
+    config = load_evaluation_config(
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "datasets/contact_prediction_casp.yaml",
+            CONFIGS / "predictors/contact_attention.yaml",
+        ]
+    )
+    assert config.workspace.task_type == "contact_prediction"
+    assert config.steps.tune.head.head_type == "attention_l1"
+    assert not config.steps.prepare.embedding_cache.enabled
+    assert not config.steps.tune.hyperparameter_search.enabled
+
+
+def test_contact_attention_predictor_cannot_be_used_for_other_tasks():
+    with pytest.raises(ValueError, match="requires task_type='contact_prediction'"):
+        load_evaluation_config(
+            [
+                CONFIGS / "config.yaml",
+                CONFIGS / "datasets/fold_prediction.yaml",
+                CONFIGS / "predictors/contact_attention.yaml",
+            ]
+        )
 
 
 def test_default_protocol_needs_only_base_model_and_dataset():

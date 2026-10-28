@@ -25,11 +25,12 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
     steps = config.steps
     if config.workspace.task_type == "contact_prediction":
         _validate_contact_task(config)
-        _validate_contact_embedding(config)
+        _validate_contact_predictor(config)
         return config
-    if steps.tune.head.head_type == "bilinear512":
+    if steps.tune.head.head_type in {"bilinear512", "attention_l1"}:
         raise ValueError(
-            "head_type='bilinear512' requires task_type='contact_prediction'"
+            f"head_type='{steps.tune.head.head_type}' requires "
+            "task_type='contact_prediction'"
         )
     if config.cross_validation.enabled:
         _validate_cross_validation(config)
@@ -312,13 +313,17 @@ def _validate_contact_task(config: EvaluationConfig) -> None:
         raise ValueError("Contact prediction reports fixed CASP metrics")
 
 
-def _validate_contact_embedding(config: EvaluationConfig) -> None:
-    """Fixed scientific settings; generic schedules/refits must not leak in."""
+def _validate_contact_predictor(config: EvaluationConfig) -> None:
+    """Keep contact predictors on their fixed task-specific protocols."""
     steps = config.steps
-    if steps.tune.head.head_type != "bilinear512":
+    head_type = steps.tune.head.head_type
+    if head_type == "attention_l1":
+        _validate_contact_attention(config)
+        return
+    if head_type != "bilinear512":
         raise ValueError(
-            "Contact prediction currently requires head_type='bilinear512'; "
-            "load configs/predictors/contact_embedding.yaml"
+            "Contact prediction requires head_type='bilinear512' or "
+            "'attention_l1'; load a contact predictor preset"
         )
     if steps.mode != "tune_probe":
         raise ValueError("Contact embeddings require steps.mode='tune_probe'")
@@ -351,6 +356,33 @@ def _validate_contact_embedding(config: EvaluationConfig) -> None:
     if config.workspace.model_kwargs:
         raise ValueError(
             "Contact embedding head settings cannot be overridden through model_kwargs"
+        )
+
+
+def _validate_contact_attention(config: EvaluationConfig) -> None:
+    steps = config.steps
+    tune = steps.tune
+    if steps.mode != "tune_probe":
+        raise ValueError("Contact attention requires steps.mode='tune_probe'")
+    if steps.prepare.embedding_cache.enabled:
+        raise ValueError(
+            "Contact attention uses uncached full-chain attention features"
+        )
+    if (
+        tune.hyperparameter_search.enabled
+        or tune.refit_on_train_validation
+        or tune.standardize_features
+        or tune.variance_seeds
+        or tune.head.hyperparameters
+        or tune.head.search_space
+    ):
+        raise ValueError(
+            "Contact attention uses fixed L1 logistic settings without HPO, "
+            "standardization, refit, or head overrides"
+        )
+    if config.workspace.model_kwargs:
+        raise ValueError(
+            "Contact attention head settings cannot be overridden through model_kwargs"
         )
 
 

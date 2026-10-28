@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     import optuna
     from transformers import PreTrainedTokenizerBase
 
+    from modules.evaluate.src.model.contact_attention import ContactAttentionModel
     from modules.evaluate.src.model.contact_model import ContactPredictionModel
     from modules.evaluate.src.tasks.contact_prediction import ContactDataset
 from modules.evaluate.src.utils.inference import run_inference
@@ -268,41 +269,62 @@ class TuneStep:
         self,
         workspace: EvaluationWorkspace,
         dataset: ContactDataset,
-        model: ContactPredictionModel,
+        model: ContactPredictionModel | ContactAttentionModel,
         tokenizer: PreTrainedTokenizerBase,
         *,
         seed: int,
         device: torch.device,
         cache_config: EmbeddingCacheConfig,
     ) -> dict[str, Any]:
+        from modules.evaluate.src.model.contact_attention import (
+            ContactAttentionModel,
+            contact_development_attention_fingerprint,
+            fit_contact_attention_head,
+        )
         from modules.evaluate.src.model.contact_model import fit_contact_head
         from modules.evaluate.src.utils.embed import contact_development_features
         from modules.evaluate.src.utils.io import write_json
 
-        features, key = contact_development_features(
-            model,
-            tokenizer,
-            dataset,
-            workspace.embeddings_path if cache_config.cache_policy != "off" else None,
-            refresh=cache_config.cache_policy == "refresh",
-            max_cache_gb=cache_config.max_cache_gb,
-        )
+        if isinstance(model, ContactAttentionModel):
+            features = None
+            key = contact_development_attention_fingerprint(model, tokenizer, dataset)
+        else:
+            features, key = contact_development_features(
+                model,
+                tokenizer,
+                dataset,
+                (
+                    workspace.embeddings_path
+                    if cache_config.cache_policy != "off"
+                    else None
+                ),
+                refresh=cache_config.cache_policy == "refresh",
+                max_cache_gb=cache_config.max_cache_gb,
+            )
         workspace.validate_experiment(
             "inputs",
             {
                 "dataset_fingerprint": dataset.fingerprint,
                 "development_features": key,
-                "protocol": "casp-contact-v1",
+                "protocol": (
+                    "casp-attention-l1-v1"
+                    if isinstance(model, ContactAttentionModel)
+                    else "casp-contact-v1"
+                ),
             },
         )
-        settings = fit_contact_head(
-            model,
-            dataset,
-            features,
-            seed=seed,
-            max_epochs=self.config.max_epochs,
-            device=device,
-        )
+        if isinstance(model, ContactAttentionModel):
+            settings = fit_contact_attention_head(model, dataset, tokenizer, seed=seed)
+        else:
+            assert features is not None
+            settings = fit_contact_head(
+                model,
+                dataset,
+                features,
+                seed=seed,
+                max_epochs=self.config.max_epochs,
+                device=device,
+            )
         write_json(workspace.stats_path / "contact_training.json", settings)
         if self.config.save_best_model:
             model.save_pretrained(workspace.model_path)

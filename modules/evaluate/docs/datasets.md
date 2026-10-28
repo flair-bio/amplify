@@ -330,10 +330,11 @@ tokens, so the supplied residues are not cropped.
   Metrics retain global/EU identities and aggregate EU -> chain -> complex ->
   edition, without pooling different settings or editions.
 - **Run:** [`contact_prediction_casp.yaml`](../configs/datasets/contact_prediction_casp.yaml)
-  with task `contact_prediction`, the explicit
-  [`contact_embedding` predictor](../configs/predictors/contact_embedding.yaml),
-  an immutable HF dataset revision and one
-  configured seed. Attention and categorical-Jacobian integration is pending.
+  with task `contact_prediction`, either the explicit
+  [`contact_embedding`](../configs/predictors/contact_embedding.yaml) or
+  [`contact_attention`](../configs/predictors/contact_attention.yaml) predictor,
+  an immutable HF dataset revision and one configured seed. Categorical-Jacobian
+  integration is pending.
   [Hub](https://huggingface.co/datasets/flair-bio/contact_prediction_casp)
 
 ### UniProt Gene Ontology

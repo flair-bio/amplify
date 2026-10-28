@@ -19,8 +19,8 @@ from transformers import PreTrainedTokenizerBase
 
 from modules.evaluate.src.metrics import contact_metrics
 from modules.evaluate.src.model.contact_model import (
-    ContactPredictionModel,
     build_contact_model,
+    load_contact_model,
 )
 from modules.evaluate.src.tasks.base import MetricFn, TaskHandler
 from modules.evaluate.src.tasks.registry import register_task
@@ -567,7 +567,7 @@ class ContactPredictionTask(TaskHandler):
         return build_contact_model(model_id)
 
     def load_finetuned_model(self, model_path: str) -> Any:
-        return ContactPredictionModel.from_pretrained(model_path)
+        return load_contact_model(model_path)
 
     def resolve_num_labels(self, num_labels: int | None, dataset_name: str) -> int:
         # Not a class count (binary per-pair score); nothing derives from it.
