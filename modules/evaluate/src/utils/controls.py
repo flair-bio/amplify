@@ -273,10 +273,10 @@ class ControlBuilder:
         their ``separation`` values (not their scores), so no forward pass
         is needed here, same as ``majority_class``/``train_mean``.
         """
-        if workspace.task_type != "categorical_jacobian":
+        if workspace.task_type != "contact_prediction":
             raise ValueError(
                 "control='separation_prior' is only defined for "
-                "task_type in {'contact_prediction', 'categorical_jacobian'}."
+                "task_type='contact_prediction'."
             )
         if prepared.train_dataloader is None:
             raise ValueError(

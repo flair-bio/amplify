@@ -199,11 +199,24 @@ class ContactPredictionModel(nn.Module):
         return model.eval()
 
 
-def build_contact_model(model_id: str, predictor: str = "bilinear512") -> Any:
+def build_contact_model(
+    model_id: str,
+    predictor: str = "bilinear512",
+    *,
+    tokenizer: PreTrainedTokenizerBase | None = None,
+) -> Any:
     if predictor == "attention_l1":
         from modules.evaluate.src.model.contact_attention import ContactAttentionModel
 
         return ContactAttentionModel(load_contact_trunk(model_id))
+    if predictor == "categorical_jacobian":
+        from modules.evaluate.src.model.contact_jacobian import (
+            build_contact_jacobian_model,
+        )
+
+        if tokenizer is None:
+            raise ValueError("The categorical Jacobian predictor requires a tokenizer")
+        return build_contact_jacobian_model(model_id, tokenizer)
     if predictor != "bilinear512":
         raise ValueError(f"Unknown CASP contact predictor: {predictor}")
     return ContactPredictionModel(load_contact_trunk(model_id))

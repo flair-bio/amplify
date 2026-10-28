@@ -59,9 +59,9 @@ def test_predictor_presets_compose_existing_steps_and_allow_overrides(
 @pytest.mark.parametrize(
     "head,error",
     [
-        ("mlp", "head_type='bilinear512' or 'attention_l1'"),
-        ("torch_linear", "head_type='bilinear512' or 'attention_l1'"),
-        ("sklearn_linear", "head_type='bilinear512' or 'attention_l1'"),
+        ("mlp", "supported contact predictor preset"),
+        ("torch_linear", "supported contact predictor preset"),
+        ("sklearn_linear", "supported contact predictor preset"),
     ],
 )
 def test_contact_rejects_unsupported_heads(head, error):
@@ -125,6 +125,33 @@ def test_contact_attention_predictor_cannot_be_used_for_other_tasks():
         )
 
 
+def test_contact_jacobian_preset_selects_zero_shot_predictor():
+    config = load_evaluation_config(
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "datasets/contact_prediction_casp.yaml",
+            CONFIGS / "predictors/contact_jacobian.yaml",
+        ]
+    )
+    assert config.workspace.task_type == "contact_prediction"
+    assert config.steps.tune.head.head_type == "categorical_jacobian"
+    assert config.steps.mode == "evaluate_as_is"
+    assert not config.steps.prepare.embedding_cache.enabled
+    assert not config.steps.tune.hyperparameter_search.enabled
+    assert config.steps.predict.controls == []
+
+
+def test_contact_jacobian_predictor_cannot_be_used_for_other_tasks():
+    with pytest.raises(ValueError, match="requires task_type='contact_prediction'"):
+        load_evaluation_config(
+            [
+                CONFIGS / "config.yaml",
+                CONFIGS / "datasets/fold_prediction.yaml",
+                CONFIGS / "predictors/contact_jacobian.yaml",
+            ]
+        )
+
+
 def test_default_protocol_needs_only_base_model_and_dataset():
     config = load_evaluation_config(
         [
@@ -169,7 +196,6 @@ def test_token_classification_uses_residue_scale_hpo():
     [
         ("calibration", "human_calibration"),
         ("pseudo_perplexity", "uniprot_protparams"),
-        ("categorical_jacobian", "contact_prediction_casp"),
     ],
 )
 def test_zero_shot_tasks_disable_default_training(task, dataset):
@@ -244,11 +270,6 @@ def test_dataset_default_matches_explicit_task_config(dataset):
             "contact_prediction_casp",
             [],
         ),
-        (
-            "categorical_jacobian",
-            "contact_prediction_casp",
-            ["random_trunk"],
-        ),
         ("pseudo_perplexity", "uniprot_protparams", ["random_trunk"]),
         ("calibration", "human_calibration", ["random_trunk"]),
     ],
@@ -294,7 +315,6 @@ def test_protparams_uses_sequence_regression_r2_defaults():
 @pytest.mark.parametrize(
     "dataset,task",
     [
-        ("contact_prediction_casp", "categorical_jacobian"),
         ("uniprot_protparams", "pseudo_perplexity"),
     ],
 )
@@ -337,17 +357,6 @@ def test_later_overlays_and_cli_can_customize_implicit_task(tmp_path):
     # The dataset itself also has higher priority than the implicit task.
     config = load_evaluation_config([CONFIGS / "config.yaml", dataset])
     assert config.steps.predict.controls == ["scrambled_labels"]
-
-
-def test_cli_task_selection_loads_method_behavior():
-    config = load_evaluation_config(
-        [CONFIGS / "config.yaml", CONFIGS / "datasets/contact_prediction_casp.yaml"],
-        overrides=["workspace.task_type=categorical_jacobian"],
-    )
-    assert config.workspace.task_type == "categorical_jacobian"
-    assert config.steps.mode == "evaluate_as_is"
-    assert not config.steps.prepare.embedding_cache.enabled
-    assert config.steps.predict.controls == ["random_trunk"]
 
 
 def test_unknown_default_fails_before_loading_task_file():

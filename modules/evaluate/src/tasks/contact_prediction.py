@@ -562,7 +562,7 @@ class ContactPredictionTask(TaskHandler):
     ) -> Any:
         if model_kwargs:
             raise ValueError(
-                "Contact embedding head settings are fixed by the CASP protocol"
+                "Contact predictor settings are fixed by the CASP protocol"
             )
         return build_contact_model(model_id)
 

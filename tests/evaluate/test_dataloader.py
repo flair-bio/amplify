@@ -307,7 +307,7 @@ def test_contact_tokenization_preserves_valid_positions_and_length(protein_token
     row = tokenize_dataset(
         raw,
         tokenizer=protein_tokenizer,
-        task_type="categorical_jacobian",
+        task_type="contact_prediction",
         sequence_column="sequence",
         label_column="targets",
         max_length=20,
@@ -324,7 +324,7 @@ def test_contact_tokenization_preserves_valid_positions_and_length(protein_token
     }
     collator = EvaluationCollator(
         tokenizer=protein_tokenizer,
-        task_type="categorical_jacobian",
+        task_type="contact_prediction",
         config=EvaluationCollatorConfig(label_column="targets"),
     )
     batch = collator([row])

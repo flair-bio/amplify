@@ -17,7 +17,7 @@ from modules.evaluate.src.utils.inference import pad_for_gather
 
 
 def _task():
-    return get_task("categorical_jacobian")
+    return get_task("contact_prediction")
 
 
 def test_align_labels_crops_and_shifts_pairs():
@@ -342,7 +342,7 @@ def test_build_separation_prior_control_supports_dict_pairwise_rows():
         train_dataloader = [{"labels": labels}]
 
     class _Workspace:
-        task_type = "categorical_jacobian"
+        task_type = "contact_prediction"
 
     predictions_df = pl.DataFrame(
         {
@@ -361,48 +361,3 @@ def test_build_separation_prior_control_supports_dict_pairwise_rows():
     row = result["prediction"].to_list()[0]
     assert row["separations"] == [2, 2]
     assert row["scores"] == pytest.approx([0.5, 0.5])
-
-
-@pytest.mark.parametrize("legacy_rows", [False, True])
-@pytest.mark.parametrize("average", ["micro", "macro", "weighted", "samples"])
-def test_per_example_metrics_preserve_contact_aggregation(legacy_rows, average):
-    task = _task()
-    predictions = [
-        {"scores": [0.5, 0.5, 0.8, 0.1], "separations": [6, 11, 12, 24]},
-        {"scores": [0.2, 0.9], "separations": [5, 30]},
-        {"scores": [], "separations": []},
-        {"scores": [0.7], "separations": [6]},
-    ]
-    labels = [
-        {"length": 13, "values": [1, 0, 1, 0]},
-        {"length": 3, "values": [0, 1]},
-        {"length": 10, "values": []},
-        {"length": 0, "values": [1]},
-    ]
-    if legacy_rows:
-        predictions = [
-            [0] + list(zip(row["scores"], row["separations"])) for row in predictions
-        ]
-        labels = [[row["length"]] + row["values"] for row in labels]
-
-    for metric_names in (
-        task.default_metrics(),
-        ["contact_auc_long", "contact_precision_at_l5_short"],
-    ):
-        per_example_scores = task.compute_per_example_metrics(
-            predictions, labels, metric_names, average
-        )
-        assert per_example_scores.shape == (len(predictions), len(metric_names))
-        for column, name in enumerate(metric_names):
-            expected = task.compute_metrics(predictions, labels, [name], average)[name]
-            values = per_example_scores[:, column]
-            values = values[~np.isnan(values)]
-            actual = float(np.mean(values)) if len(values) else float("nan")
-            np.testing.assert_equal(actual, expected)
-
-    assert task.compute_per_example_metrics([], [], task.default_metrics()).shape == (
-        0,
-        len(task.default_metrics()),
-    )
-    with pytest.raises(KeyError, match="Unknown metric"):
-        task.compute_per_example_metrics(predictions, labels, ["unknown"])

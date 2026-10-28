@@ -17,12 +17,12 @@ from modules.evaluate.scripts.dataset_sourcing.source_calibration import (
     read_a3m_profiles,
 )
 from modules.evaluate.src.dataset.dataloader import tokenize_dataset
-from modules.evaluate.src.model.categorical_jacobian import (
+from modules.evaluate.src.tasks import get_task
+from modules.evaluate.src.tasks.calibration import WINDOW_RESIDUES
+from modules.evaluate.src.utils.amino_acids import (
     CANONICAL_AMINO_ACIDS,
     resolve_aa_token_ids,
 )
-from modules.evaluate.src.tasks import get_task
-from modules.evaluate.src.tasks.calibration import WINDOW_RESIDUES
 from modules.evaluate.src.utils.bootstrap import id_groups
 from tests.evaluate.conftest import LONG_SEQUENCE
 

@@ -114,7 +114,13 @@ class EvaluationConfig(BaseModel):
     def variant(self) -> str:
         """Filesystem-safe label for this run's evaluation condition."""
         mode = self.steps.mode
-        if mode == "evaluate_as_is":
+        if (
+            mode == "evaluate_as_is"
+            and self.workspace.task_type == "contact_prediction"
+            and self.steps.tune.head.head_type == "categorical_jacobian"
+        ):
+            variant = "categorical_jacobian-frozen_trunk"
+        elif mode == "evaluate_as_is":
             variant = "pretrained"
         elif self.steps.layerwise.enabled:
             variant = "layerwise-torch_linear-frozen_trunk"

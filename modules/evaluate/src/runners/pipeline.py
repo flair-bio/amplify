@@ -246,7 +246,9 @@ def _execute_contacts(
 
     source = workspace.config.dataset_repo_id
     if source is None or workspace.config.model_repo_id is None:
-        raise ValueError("Contact embeddings require dataset_repo_id and model_repo_id")
+        raise ValueError(
+            "Contact prediction requires dataset_repo_id and model_repo_id"
+        )
     if dataset is None:
         contacts = PrepareStep(config.steps.prepare).run_contacts(
             source,
@@ -264,18 +266,21 @@ def _execute_contacts(
         workspace.config.model_repo_id, trust_remote_code=True
     )
     head_type = config.steps.tune.head.head_type
-    model = build_contact_model(workspace.config.model_repo_id, predictor=head_type).to(
-        accelerator.device
-    )
-    TuneStep(config.steps.tune).run_contacts(
-        workspace,
-        contacts,
-        model,
-        tokenizer,
-        seed=config.seed,
-        device=accelerator.device,
-        cache_config=config.steps.prepare.embedding_cache,
-    )
+    model = build_contact_model(
+        workspace.config.model_repo_id,
+        predictor=head_type,
+        tokenizer=tokenizer,
+    ).to(accelerator.device)
+    if head_type != "categorical_jacobian":
+        TuneStep(config.steps.tune).run_contacts(
+            workspace,
+            contacts,
+            model,
+            tokenizer,
+            seed=config.seed,
+            device=accelerator.device,
+            cache_config=config.steps.prepare.embedding_cache,
+        )
     prepared = PreparedArtifacts(
         model=model,
         tokenizer=tokenizer,

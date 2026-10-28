@@ -27,7 +27,11 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
         _validate_contact_task(config)
         _validate_contact_predictor(config)
         return config
-    if steps.tune.head.head_type in {"bilinear512", "attention_l1"}:
+    if steps.tune.head.head_type in {
+        "bilinear512",
+        "attention_l1",
+        "categorical_jacobian",
+    }:
         raise ValueError(
             f"head_type='{steps.tune.head.head_type}' requires "
             "task_type='contact_prediction'"
@@ -91,12 +95,6 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
         raise ValueError(
             f"task_type='{task.name}' requires steps.mode='evaluate_as_is'."
         )
-    if config.workspace.task_type == "categorical_jacobian" and steps.mode != (
-        "evaluate_as_is"
-    ):
-        raise ValueError(
-            "task_type='categorical_jacobian' requires steps.mode='evaluate_as_is'."
-        )
     metrics = steps.score.metrics
     if metrics is None:
         metrics = task.default_metrics()
@@ -144,11 +142,11 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
         )
     if (
         "separation_prior" in steps.predict.controls
-        and config.workspace.task_type != "categorical_jacobian"
+        and config.workspace.task_type != "contact_prediction"
     ):
         raise ValueError(
             "control='separation_prior' is only defined for "
-            "task_type in {'contact_prediction', 'categorical_jacobian'}."
+            "task_type='contact_prediction'."
         )
     if "metric_aggregation" not in steps.tune.model_fields_set:
         # Otherwise model selection would optimize a different averaging
@@ -320,10 +318,12 @@ def _validate_contact_predictor(config: EvaluationConfig) -> None:
     if head_type == "attention_l1":
         _validate_contact_attention(config)
         return
+    if head_type == "categorical_jacobian":
+        _validate_contact_jacobian(config)
+        return
     if head_type != "bilinear512":
         raise ValueError(
-            "Contact prediction requires head_type='bilinear512' or "
-            "'attention_l1'; load a contact predictor preset"
+            "Contact prediction requires a supported contact predictor preset"
         )
     if steps.mode != "tune_probe":
         raise ValueError("Contact embeddings require steps.mode='tune_probe'")
@@ -384,6 +384,28 @@ def _validate_contact_attention(config: EvaluationConfig) -> None:
         raise ValueError(
             "Contact attention head settings cannot be overridden through model_kwargs"
         )
+
+
+def _validate_contact_jacobian(config: EvaluationConfig) -> None:
+    steps = config.steps
+    if steps.mode != "evaluate_as_is":
+        raise ValueError(
+            "The categorical Jacobian predictor requires steps.mode='evaluate_as_is'"
+        )
+    if steps.prepare.embedding_cache.enabled:
+        raise ValueError("The categorical Jacobian predictor does not use embeddings")
+    if (
+        steps.tune.hyperparameter_search.enabled
+        or steps.tune.refit_on_train_validation
+        or steps.tune.variance_seeds
+        or steps.tune.head.hyperparameters
+        or steps.tune.head.search_space
+    ):
+        raise ValueError(
+            "The categorical Jacobian predictor is zero-shot and has no tuning settings"
+        )
+    if config.workspace.model_kwargs:
+        raise ValueError("Categorical Jacobian settings are fixed by the CASP protocol")
 
 
 def _validate_cross_validation(config: EvaluationConfig) -> None:

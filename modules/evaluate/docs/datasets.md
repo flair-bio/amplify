@@ -10,7 +10,7 @@ and task configs is covered in the evaluation README's
 artifacts are built (sources, filters, splits, rationale) is covered in the
 [dataset-sourcing guide](dataset-sourcing.md).
 
-**New here?** Read [Evaluation Tasks](#evaluation-tasks) for the eight kinds
+**New here?** Read [Evaluation Tasks](#evaluation-tasks) for the seven kinds
 of prediction, then skim the cartoon at the top of each source in
 [Datasets in Detail](#datasets-in-detail) and read the entries that
 interest you.
@@ -32,7 +32,7 @@ interest you.
 
 ## Evaluation Tasks
 
-Each dataset is evaluated with one of eight tasks; the names are the
+Each dataset is evaluated with one of seven tasks; the names are the
 `workspace.task_type` values. A task fixes what the model predicts (one value
 per protein, per residue, or per residue pair) and therefore the shape of the
 dataset's `targets`.
@@ -46,7 +46,6 @@ dataset's `targets`.
 | `sequence_multilabel_classification` | A set of labels per protein | `[0, 1, 1, 0, …]` | One bit per vocabulary entry (GO term, InterPro entry); several can be on |
 | `token_classification` | One class per residue | `[0, 0, 2, 2, 2, 1, -100, …]` | One class index per residue (same length as the sequence); `-100` is ignored |
 | `contact_prediction` | Which residue pairs touch | `[[3, 17], [5, 40], …]` | Positive pairs only; other valid pairs at separation ≥ 6 are negatives |
-| `categorical_jacobian` | Contacts, zero-shot | same as `contact_prediction` | No training: contacts are read from how masked-LM logits react to mutations |
 | `pseudo_perplexity` | Nothing (zero-shot) | none | Each residue is masked in turn and the model scores the original amino acid |
 | `calibration` | Homolog profile (zero-shot) | `[[12, f_A, …, f_Y], …]` | One `[position, 20 homolog frequencies]` entry per conserved column; `label_format: consensus_profile` |
 
@@ -69,10 +68,6 @@ protein language model should pick up from sequence alone:
   Residues far apart in sequence but touching in the fold reveal the fold
   itself, so good contacts suggest the model has learned structure without
   seeing any.
-- **Categorical Jacobian** asks the same question with no training at all.
-  It checks whether the masked language model has learned, on its own, that
-  residues in contact change together. This mirrors the co-evolution signal
-  that structure predictors use.
 - **Pseudo-perplexity** measures how well the model predicts each real
   residue when it is hidden; lower means the model finds natural proteins
   less surprising. It needs no labels, so it is a quick check of
@@ -85,19 +80,20 @@ protein language model should pick up from sequence alone:
   predictions and `memorization_nt` counts predictions of the human residue,
   which signals memorization rather than learned evolutionary constraint.
 
-`categorical_jacobian` is a zero-shot contact-ranking method scored against
-contact-pair labels, not a trainable contact head. `pseudo_perplexity` works
-on any sequence dataset, as long as the model is a masked language model whose
+CASP contact prediction offers a zero-shot categorical-Jacobian predictor
+alongside its fitted readouts; both use the same contact-pair labels.
+`pseudo_perplexity` works on any sequence dataset, as long as the model is a
+masked language model whose
 tokenizer has a mask token.
 
 ---
 
 ## Datasets by Task
 
-Each dataset is built for one task, except the contact datasets, which serve
-both contact tasks. Default metrics are each task's `default_metric_names`;
-the task handlers in [`src/tasks/`](../src/tasks/) define a few more that can
-be selected.
+Each dataset is built for one task, except the contact datasets, which support
+multiple predictor overlays on the shared contact task. Default metrics are
+each task's `default_metric_names`; the task handlers in
+[`src/tasks/`](../src/tasks/) define a few more that can be selected.
 
 | Source | Datasets | Task | Default metrics |
 |---|---|---|---|
@@ -332,9 +328,10 @@ tokens, so the supplied residues are not cropped.
 - **Run:** [`contact_prediction_casp.yaml`](../configs/datasets/contact_prediction_casp.yaml)
   with task `contact_prediction`, either the explicit
   [`contact_embedding`](../configs/predictors/contact_embedding.yaml) or
-  [`contact_attention`](../configs/predictors/contact_attention.yaml) predictor,
-  an immutable HF dataset revision and one configured seed. Categorical-Jacobian
-  integration is pending.
+  [`contact_attention`](../configs/predictors/contact_attention.yaml) readout,
+  or the zero-shot
+  [`contact_jacobian`](../configs/predictors/contact_jacobian.yaml) predictor,
+  an immutable HF dataset revision and one configured seed.
   [Hub](https://huggingface.co/datasets/flair-bio/contact_prediction_casp)
 
 ### UniProt Gene Ontology

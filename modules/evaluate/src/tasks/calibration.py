@@ -12,9 +12,9 @@ import torch
 from transformers import AutoModelForMaskedLM
 
 from modules.evaluate.src.metrics import metrics
-from modules.evaluate.src.model.categorical_jacobian import resolve_aa_token_ids
 from modules.evaluate.src.tasks.base import MetricFn, TaskHandler
 from modules.evaluate.src.tasks.registry import register_task
+from modules.evaluate.src.utils.amino_acids import resolve_aa_token_ids
 
 NUM_AA = 20
 WINDOW_RESIDUES = 512

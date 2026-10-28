@@ -841,7 +841,7 @@ def test_contact_inference_preserves_true_cropped_length():
         def gather_for_metrics(values, **kwargs):
             return values
 
-    task = get_task("categorical_jacobian")
+    task = get_task("contact_prediction")
     aligned = task.align_labels(
         {"pairs": [[2, 9]], "valid_positions": [2, 9, 12]},
         num_residues=15,
@@ -861,7 +861,7 @@ def test_contact_inference_preserves_true_cropped_length():
     }
 
     ids, predictions, labels, _, _ = run_inference(
-        Model(), [batch], "categorical_jacobian", Accelerator()
+        Model(), [batch], "contact_prediction", Accelerator()
     )
 
     assert ids == ["protein"]

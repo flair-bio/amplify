@@ -138,12 +138,9 @@ class TestEvaluationConfig:
         with pytest.raises(ValueError, match="max_tokens_per_batch requires"):
             EvaluationConfig.model_validate(payload)
 
-    @pytest.mark.parametrize(
-        "task_type", ["categorical_jacobian", "calibration"]
-    )
-    def test_pairwise_tasks_reject_packing(self, task_type):
+    def test_calibration_rejects_packing(self):
         payload = _base_config_dict()
-        payload["workspace"]["task_type"] = task_type
+        payload["workspace"]["task_type"] = "calibration"
         payload["steps"] = {"mode": "evaluate_as_is", "prepare": {"packed": True}}
         with pytest.raises(ValueError, match="Packed evaluation does not support"):
             EvaluationConfig.model_validate(payload)
@@ -244,7 +241,6 @@ class TestEvaluationConfig:
             ("sequence_classification", "categorical", "scalar", 2),
             ("sequence_regression", "continuous", "scalar", None),
             ("token_classification", "categorical", "per_token", 3),
-            ("categorical_jacobian", "categorical", "contact_pairs", None),
             ("pseudo_perplexity", "categorical", "scalar", 2),
             ("calibration", "categorical", "consensus_profile", None),
         ],
@@ -259,7 +255,7 @@ class TestEvaluationConfig:
             label_format=label_format,
             num_labels=num_labels,
         )
-        if task_type in {"categorical_jacobian", "pseudo_perplexity", "calibration"}:
+        if task_type in {"pseudo_perplexity", "calibration"}:
             payload["steps"] = {"mode": "evaluate_as_is"}
 
         EvaluationConfig.model_validate(payload)
@@ -405,7 +401,6 @@ class TestShippedConfigOverlays:
             ("sequence_regression", "stability_prediction"),
             ("token_classification", "ssp_q3"),
             ("contact_prediction", "contact_prediction_casp"),
-            ("categorical_jacobian", "contact_prediction_casp"),
             ("pseudo_perplexity", "localization_prediction"),
             ("pseudo_perplexity", "ssp_q3"),
             ("pseudo_perplexity", "contact_prediction_casp"),

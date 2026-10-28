@@ -56,7 +56,7 @@ Deeper guides on controls, datasets, dataset sourcing, and ProteinGym are in
   - [Predictor overlays (`configs/predictors/`)](#predictor-overlays-configspredictors)
   - [Layerwise linear probes](#layerwise-linear-probes)
   - [Cross-validation](#cross-validation)
-  - [Categorical-Jacobian contact prediction](#categorical-jacobian-contact-prediction)
+  - [Zero-shot contact prediction](#categorical-jacobian-contact-prediction)
 - [Developer Guide](#developer-guide)
   - [Code Layout](#code-layout)
   - [Pipeline Architecture \& Distributed Execution](#pipeline-architecture--distributed-execution)
@@ -105,9 +105,9 @@ only. `tasks/contact_prediction.py` owns its data/prediction/scoring orchestrati
 the existing step classes delegate to that handler and persist its artifacts.
 The data contract/alignment also live in that task module, shared extraction in
 `utils/inference.py`, and ranking/aggregation in `metrics/contact_metrics.py`.
-The frozen-embedding and attention predictors run through the normal CLI and
-prediction entry point. Categorical-Jacobian migration and CASP controls remain
-subsequent stages. The old Biomap contact overlay and embedding head are removed.
+The frozen-embedding, attention, and zero-shot categorical-Jacobian predictors
+run through the normal CLI and prediction entry point. CASP controls remain a
+subsequent stage. The old Biomap contact overlay and embedding head are removed.
 The dataset selects the shared `contact_prediction` task; an explicit predictor
 overlay selects extraction, fitting and inference without changing that task.
 
@@ -143,6 +143,17 @@ map, applies APC, and fits one L1 logistic regression (`C=0.15`,
 Training attention maps are transient, and test maps are never persisted.
 Select it with `configs/predictors/contact_attention.yaml` instead of the
 embedding preset.
+
+### Categorical-Jacobian contact prediction
+
+The zero-shot categorical Jacobian shares the CASP dataset, alignment, unit
+scoring, and full-chain inference path. Select it with
+`configs/predictors/contact_jacobian.yaml`. It computes canonical-amino-acid
+mutant-minus-wild-type log-softmax deltas, keeps the Jacobian in FP32, centers
+all four categorical/residue axes, symmetrizes directional effects, applies
+the Frobenius reduction and APC, and removes self-pairs. It does not fit a
+head or persist test Jacobians. This preset requires a masked-LM checkpoint
+with one tokenizer token per canonical amino acid.
 
 `tokenize_contact_chain` supplies uncropped tokens and original-coordinate
 position IDs. Native AMPLIFY and ESM rotary computations preserve gaps and
@@ -201,11 +212,10 @@ until their CASP-specific integration is implemented.
 | `sequence_multilabel_classification` | A set of labels per protein |
 | `token_classification` | One class per residue |
 | `contact_prediction` | Which residue pairs touch (fixed CASP protocol) |
-| `categorical_jacobian` | Contacts, zero-shot |
 | `pseudo_perplexity` | Nothing; scores masked residues, zero-shot |
 | `calibration` | Homolog amino-acid profiles at conserved positions, zero-shot |
 
-`categorical_jacobian`, `pseudo_perplexity` and `calibration` run only with
+`pseudo_perplexity` and `calibration` run only with
 `steps.mode=evaluate_as_is`. Target formats, why each task matters, and default
 metrics per dataset are in the [dataset catalog](docs/datasets.md#evaluation-tasks).
 
@@ -267,9 +277,9 @@ To use fixed training settings instead, set
 `steps.tune.learning_rate`, `weight_decay`, `max_epochs`, and `batch_size` then
 apply. During HPO, searched values replace their fixed counterparts, not cap them.
 Classical-estimator overlays retain their estimator-specific spaces.
-Calibration, pseudo-perplexity, and categorical Jacobian task overlays disable
-caching, HPO, and refitting. The CASP embedding overlay selects a fixed bilinear
-head and rejects generic HPO, refitting, standardization and incompatible controls.
+Calibration and pseudo-perplexity task overlays disable caching, HPO, and
+refitting. CASP predictor overlays fix their feature extraction or fitting
+protocols and reject generic HPO and controls.
 
 `datasets/` selects the source, label contract and default scientific task.
 `tasks/` owns task data handling and scoring. `predictors/` selects how predictions
@@ -303,8 +313,8 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
 
 An explicit task YAML takes precedence over the dataset default, in either
 order. The CASP dataset defaults to `contact_prediction` and requires
-`configs/predictors/contact_embedding.yaml`; attention and Jacobian presets are
-not provided until their implementations are integrated. Ordinary tasks retain
+an explicit predictor overlay such as `contact_embedding.yaml`,
+`contact_attention.yaml`, or `contact_jacobian.yaml`. Ordinary tasks retain
 their default MLP behavior without a predictor overlay. `pseudo_perplexity` works with any compatible sequence
 dataset; `uniprot_ur100p_test` selects the AMPLIFY paper's UniProt test set.
 Without an explicit task YAML, a CLI `workspace.task_type=...` selects a
@@ -1101,11 +1111,13 @@ not automatically resumed.
 interval (folds share training data). Pooled OOF scores generally differ from
 the mean of fold scores, especially for rank or threshold metrics.
 
-### Remaining contact predictors
+### Contact predictor presets
 
-Attention and categorical-Jacobian predictors have not yet been integrated
-with the HF-only CASP pipeline. The existing categorical-Jacobian handler is
-not the replacement scientific protocol and must not be used for CASP results.
+The CASP contact predictors are composable overlays on the shared
+`contact_prediction` task. Use `contact_embedding.yaml` for the fitted
+bilinear512 head, `contact_attention.yaml` for the fitted attention readout,
+or `contact_jacobian.yaml` for zero-shot masked-LM mutation effects. The
+obsolete standalone `categorical_jacobian` task has been removed.
 
 ---
 
@@ -1199,8 +1211,8 @@ features. See
 [`contact_prediction.py`](src/tasks/contact_prediction.py) and
 [`contact_model.py`](src/model/contact_model.py).
 
-`categorical_jacobian` reuses the contact label and metric contract but swaps
-the trainable head for the frozen MLM; see
+The `categorical_jacobian` predictor reuses the contact label and metric
+contract but replaces a fitted head with the frozen MLM; see
 [Categorical-Jacobian contact prediction](#categorical-jacobian-contact-prediction).
 
 No changes to `prepare.py`/`collator.py`/`dataloader.py`/`predict.py`/`score.py`

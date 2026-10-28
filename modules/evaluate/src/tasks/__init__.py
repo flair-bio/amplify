@@ -15,7 +15,6 @@ from modules.evaluate.src.tasks.registry import (
 # Imported for their @register_task side effect.
 from modules.evaluate.src.tasks import (  # noqa: F401  (isort: skip)
     calibration,
-    categorical_jacobian,
     contact_prediction,
     pseudo_perplexity,
     sequence_classification,

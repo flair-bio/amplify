@@ -210,7 +210,7 @@ def test_generic_loader_preserves_fixed_splits_but_generic_tokenization_rejects_
         )
     with pytest.raises(ValueError, match="contact step methods"):
         dataloader.tokenize_dataset(
-            hf, protein_tokenizer, "categorical_jacobian", "sequence", "targets", 512
+            hf, protein_tokenizer, "contact_prediction", "sequence", "targets", 512
         )
 
 

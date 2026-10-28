@@ -33,7 +33,7 @@ from modules.evaluate.src.dataset_sourcing.pipeline import (
     prepare_output_dir,
     run_script,
 )
-from modules.evaluate.src.model.categorical_jacobian import CANONICAL_AMINO_ACIDS
+from modules.evaluate.src.utils.amino_acids import CANONICAL_AMINO_ACIDS
 
 logger = logging.getLogger(__name__)
 

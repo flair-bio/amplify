@@ -66,6 +66,7 @@ class _HeadOutput:
 HeadType = Literal[
     "bilinear512",
     "attention_l1",
+    "categorical_jacobian",
     "mlp",
     "torch_linear",
     "sklearn_linear",

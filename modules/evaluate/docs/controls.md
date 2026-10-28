@@ -24,8 +24,8 @@ steps.predict.controls → Predict: build each control's predictions
   `scrambled_labels` needs no inference and has no file.
 - Sequence `majority_class` and `train_mean` run separately with
   `run_evaluate.py --baselines`. Score loads their shared artifacts; model
-  evaluations never generate them. Token majority and contact separation
-  priors still run inside Predict.
+  evaluations never generate them.   Token majority still runs inside Predict. CASP contact controls are not yet
+  integrated with the contact-specific inference and scoring path.
 - Model-control predictions are rebuilt from the current head; only
   frozen-trunk embeddings are reused through the embedding cache.
 - Comparisons only exist when `steps.score.bootstrap_enabled=true`. The
@@ -86,7 +86,6 @@ Other model controls replace weights or inputs without retraining.
 | `scrambled_labels` | Trained predictions scored against permuted labels | — | Is performance above chance for this label distribution? |
 | `majority_class` | Most frequent train class, with the train class prior as probabilities | — | Classification floor; ROC-AUC is 0.5 by construction |
 | `train_mean` | Train label mean for every example | — | Regression floor |
-| `separation_prior` | Train contact rate for each residue separation | — | Contact floor: "nearby residues touch" |
 
 Details that change the interpretation:
 
@@ -116,8 +115,7 @@ Details that change the interpretation:
 - **`scrambled_labels` permutes at the task's natural unit:**
   - sequence tasks: across examples;
   - `token_classification`: within each sequence;
-  - contact tasks: across scored pairs within each protein. This also destroys
-    separation structure, so `separation_prior` is the tighter contact floor.
+  - contact tasks: across scored pairs within each protein.
 - **Randomness:** each control re-seeds from the run seed, so its result
   doesn't depend on the order in which controls are built.
 
@@ -135,14 +133,14 @@ Each task config ships a preset; override it with `steps.predict.controls`
 | `sequence_multilabel_classification` | `random_trunk` |
 | `sequence_regression` | `random_trunk`; shared `train_mean` |
 | `token_classification` | `random_trunk`, `majority_class` |
-| `contact_prediction` | `random_trunk`, `separation_prior` |
-| `categorical_jacobian` | `random_trunk`, `separation_prior` |
+| `contact_prediction` | None (CASP controls are not yet integrated) |
 | `pseudo_perplexity` | `random_trunk` |
 | `calibration` | `random_trunk` |
 
 `random_trunk` is the per-model default. Other controls remain available by
-explicit override. Shared sequence baselines run once per dataset/split/protocol
-with `--baselines`; token/contact priors still compute per run. Composition, MMseqs k-NN,
+explicit override where supported. Shared sequence baselines run once per
+dataset/split/protocol with `--baselines`; token majority computes per run.
+Composition, MMseqs k-NN,
 multilabel priors, and amino-acid-frequency baselines are not configured
 because they are not implemented.
 
@@ -152,7 +150,7 @@ rejects these combinations before any work starts:
 - `scrambled_sequences` on ragged tasks (`token_classification`, contact
   tasks): position-aligned labels would not move with the shuffled tokens.
 - `majority_class` on regression or multilabel tasks; `train_mean` outside
-  `sequence_regression`; `separation_prior` outside contact tasks.
+  `sequence_regression`; generic controls on the CASP contact path.
 - `untrained`, `random_head`, `random_both` with classical heads (`knn`,
   `sklearn_linear`, `random_forest`, `xgboost`): a fitted estimator has no
   random re-initialization.
