@@ -61,6 +61,7 @@ def jacobian_to_contacts(jacobian: torch.Tensor) -> torch.Tensor:
         torch.zeros_like(scores),
     )
     scores = scores - correction
+    scores = 0.5 * (scores + scores.T)
     scores.fill_diagonal_(0)
     return scores
 
@@ -126,20 +127,22 @@ class ContactJacobianModel(nn.Module):
         tokens = tokenize_contact_chain(chain, tokenizer)
         device = next(self.trunk.parameters()).device
         input_ids = torch.tensor([tokens.input_ids], dtype=torch.long, device=device)
-        attention_mask = torch.tensor(
-            [tokens.attention_mask], dtype=torch.long, device=device
-        )
         position_ids = torch.tensor(
             [tokens.position_ids], dtype=torch.long, device=device
         )
         residue_ids = torch.tensor(
             tokens.residue_token_indices, dtype=torch.long, device=device
         )
-        inputs: dict[str, torch.Tensor] = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-        }
-        if "position_ids" in inspect.signature(self.trunk.forward).parameters:
+        forward_parameters = inspect.signature(self.trunk.forward).parameters
+        # Full-chain mutation batches are unpadded; provide a mask only when required.
+        inputs: dict[str, torch.Tensor] = {"input_ids": input_ids}
+        attention_parameter = forward_parameters.get("attention_mask")
+        if (
+            attention_parameter is not None
+            and attention_parameter.default is inspect.Parameter.empty
+        ):
+            inputs["attention_mask"] = torch.ones_like(input_ids)
+        if "position_ids" in forward_parameters:
             inputs["position_ids"] = position_ids
 
         length = len(residue_ids)
