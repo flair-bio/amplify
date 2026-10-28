@@ -1,0 +1,7 @@
+# Production suite: contact prediction. Each predictor is an explicit job;
+# selecting one with --predictor never converts other tasks to contacts.
+suite: contact_prediction
+task: contact_prediction
+predictors: [contact_embedding, contact_attention, contact_jacobian]
+evaluations:
+  - dataset: contact_prediction_casp

@@ -1,4 +1,4 @@
-"""Tests for modules.evaluate.src.utils.embed (frozen-trunk embedding cache).
+"""Tests for modules.evaluate.src.predictors.embeddings and artifacts.feature_cache (frozen-trunk embedding cache).
 
 Unit tests cover the storage/key primitives in isolation; the integration
 tests reuse ``PrepareStep`` via ``tests.evaluate.test_prepare._run_prepare``
@@ -25,14 +25,16 @@ from modules.evaluate.src.dataset.workspace import (
 from modules.evaluate.src.model.heads import EmbeddingProbeHead
 from modules.evaluate.src.model.layerwise import LayerwiseProbeModel, resolve_layers
 from modules.evaluate.src.utils.layerwise import run_layerwise_conditions
-from modules.evaluate.src.utils.embed import (
+from modules.evaluate.src.artifacts.feature_cache import (
     EmbeddingCache,
     EmbeddingCacheConfig,
+    embedding_cache_key,
+)
+from modules.evaluate.src.predictors.embeddings import (
     EmbeddingDataset,
     build_embedding_dataloaders,
     embedding_collate_fn,
     extract_embeddings,
-    embedding_cache_key,
     pool_hidden_state_layers,
     pool_hidden_states,
     residue_attention_mask,
@@ -686,7 +688,7 @@ class TestExtractEmbeddings:
     def test_extraction_progress_bar_is_scoped_to_main_process(
         self, monkeypatch, label, main
     ):
-        from modules.evaluate.src.utils import embed
+        from modules.evaluate.src.predictors import embeddings as embed
 
         progress_options = []
 
@@ -890,16 +892,16 @@ class TestPrepareStepWithEmbeddingCache:
     def test_layerwise_reuses_multilayer_sequence_cache(
         self, monkeypatch, tmp_path, model_family
     ):
-        from modules.evaluate.src import utils
+        from modules.evaluate.src.predictors import embeddings
 
         calls = []
-        original_extract = utils.embed.extract_embeddings
+        original_extract = embeddings.extract_embeddings
 
         def count_extract(*args, **kwargs):
             calls.append(kwargs["layers"])
             return original_extract(*args, **kwargs)
 
-        monkeypatch.setattr(utils.embed, "extract_embeddings", count_extract)
+        monkeypatch.setattr(embeddings, "extract_embeddings", count_extract)
         config = LayerwiseConfig(enabled=True, layers=[0, -1], autocast_dtype="float32")
         cache = EmbeddingCacheConfig(enabled=True, dtype="float32")
         torch.manual_seed(123)

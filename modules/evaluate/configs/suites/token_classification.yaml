@@ -1,0 +1,18 @@
+# Production suite: residue-level token classification.
+suite: token_classification
+task: token_classification
+evaluations:
+  - dataset: ssp_q3
+  - dataset: ssp_q8
+  - dataset: uniprot_domains
+  - dataset: uniprot_functional_sites
+  - dataset: uniprot_glycosylation
+  - dataset: uniprot_lipidation
+  - dataset: uniprot_membrane_pass
+  - dataset: uniprot_peptide
+  - dataset: uniprot_phosphorylation
+  - dataset: uniprot_post_translational_modification
+  - dataset: uniprot_regions
+  - dataset: uniprot_secondary_structure
+  - dataset: uniprot_structures
+  - dataset: uniprot_topology

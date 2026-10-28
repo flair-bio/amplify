@@ -9,7 +9,7 @@ import pytest
 from modules.core.utils.config_loader import load_and_parse
 from modules.evaluate.src.config import EvaluationConfig, LayerwiseConfig
 from modules.evaluate.src.steps.prepare import PrepareConfig
-from modules.evaluate.src.utils.embed import EmbeddingCacheConfig
+from modules.evaluate.src.artifacts.feature_cache import EmbeddingCacheConfig
 
 
 def _base_config_dict() -> dict:

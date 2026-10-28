@@ -1,0 +1,6 @@
+# Model collection: the four existing production model configs, in order.
+models:
+  - amplify_120m
+  - amplify_350m
+  - esm_150m
+  - esm2_35m

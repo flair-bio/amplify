@@ -1,0 +1,8 @@
+# Production suite: sequence classification (frozen cached MLP by default).
+suite: sequence_classification
+task: sequence_classification
+evaluations:
+  - dataset: fold_prediction
+  - dataset: localization_prediction
+  - dataset: solubility_prediction
+  - dataset: antibiotic_resistance

@@ -49,7 +49,7 @@ steps:
     hyperparameter_search:
       enabled: false
       n_trials: 2
-      search_pattern: bohb
+      search_pattern: tpe
       search_space:
         hidden_size: null
         hidden_depth: null

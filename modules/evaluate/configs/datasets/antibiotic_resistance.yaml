@@ -1,5 +1,4 @@
 workspace:
-  default_task_type: sequence_classification
   dataset_name: antibiotic_resistance
   dataset_repo_id: flair-bio/amr_hmd_arg
   target_type: categorical

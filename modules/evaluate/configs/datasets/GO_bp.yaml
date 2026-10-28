@@ -1,5 +1,4 @@
 workspace:
-  default_task_type: sequence_multilabel_classification
   dataset_name: GO_bp
   dataset_repo_id: flair-bio/uniprot-GO_bp
   target_type: categorical

@@ -1,0 +1,14 @@
+# Production suite: sequence multilabel classification.
+suite: sequence_multilabel_classification
+task: sequence_multilabel_classification
+evaluations:
+  - dataset: GO_bp
+  - dataset: GO_cc
+  - dataset: GO_mf
+  - dataset: interpro_active_site
+  - dataset: interpro_binding_site
+  - dataset: interpro_conserved_site
+  - dataset: interpro_domain
+  - dataset: interpro_family
+  - dataset: interpro_homologous_superfamily
+  - dataset: interpro_repeat

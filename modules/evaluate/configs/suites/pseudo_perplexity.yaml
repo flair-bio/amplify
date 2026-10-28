@@ -1,0 +1,6 @@
+# Production suite: pseudo-perplexity on the test-only UR100P split. Do not
+# substitute a training corpus or human calibration implicitly.
+suite: pseudo_perplexity
+task: pseudo_perplexity
+evaluations:
+  - dataset: uniprot_ur100p_test

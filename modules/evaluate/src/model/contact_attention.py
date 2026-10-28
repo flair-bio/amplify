@@ -363,7 +363,7 @@ def contact_development_attention_fingerprint(
     from modules.evaluate.src.tasks.contact_prediction import (
         tokenize_contact_chain,
     )
-    from modules.evaluate.src.utils.embed import weights_fingerprint
+    from modules.evaluate.src.artifacts.feature_cache import weights_fingerprint
 
     training = dataset.splits["train"]
     token_rows = [tokenize_contact_chain(chain, tokenizer) for chain in training]

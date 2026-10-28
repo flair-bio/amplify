@@ -11,7 +11,6 @@ workspace:
   model_name: base_model
   model_repo_id: null
   task_type: null # explicit task overlays override the dataset default
-  default_task_type: null # dataset default; run_evaluate loads its task overlay
   target_type: null # categorical or continuous
   label_format: null # scalar, per_token, multilabel, or contact_pairs
   num_labels: null # number of classes for *_classification tasks; unused (forced to 1) for sequence_regression
@@ -100,7 +99,7 @@ steps:
       n_trials: 100
       metric: null # task overlays set the selection metric explicitly
       direction: null # task overlays set the optimization direction explicitly
-      search_pattern: bohb # one of bohb (Optuna TPE + median pruning), random, grid
+      search_pattern: tpe # one of tpe (Optuna TPE + median pruning), random, grid; legacy bohb is accepted as tpe
       search_space:
         hidden_size: [128, 256, 512]
         hidden_depth: [1, 2]

@@ -11,7 +11,7 @@ from torch import nn
 from modules.evaluate.src.dataset.collator import unpack_packed
 from modules.evaluate.src.model.heads import EmbeddingProbeHead
 from modules.evaluate.src.tasks.token_classification import IGNORE_INDEX
-from modules.evaluate.src.utils.embed import (
+from modules.evaluate.src.predictors.embeddings import (
     AUTOCAST_DTYPES,
     autocast_context,
     pool_hidden_states,

@@ -14,7 +14,7 @@ steps:
     hyperparameter_search:
       enabled: true
       n_trials: 100
-      search_pattern: bohb
+      search_pattern: tpe
       search_space:
         hidden_size: null
         hidden_depth: null # native head architecture is fixed

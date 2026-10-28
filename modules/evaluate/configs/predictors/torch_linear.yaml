@@ -14,7 +14,7 @@ steps:
     hyperparameter_search:
       enabled: true
       n_trials: 100
-      search_pattern: bohb
+      search_pattern: tpe
       search_space:
         hidden_size: null # linear heads have no hidden layer
         hidden_depth: null

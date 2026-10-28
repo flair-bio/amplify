@@ -1,5 +1,8 @@
+import argparse
 import logging
 import sys
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, cast
 
 import torch
@@ -7,6 +10,15 @@ from accelerate import Accelerator
 
 from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.runners.pipeline import run_pipeline
+from modules.evaluate.src.suites import (
+    EvaluationJob,
+    SuiteError,
+    expand_suite,
+    model_label,
+    resolve_model_collection,
+    resolve_model_paths,
+    select_jobs,
+)
 from modules.evaluate.src.utils.config_loader import load_evaluation_config
 from modules.evaluate.src.utils.seed import seed_everything
 
@@ -25,63 +37,164 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 
 
-def main() -> None:
-    """Entry point for the evaluation pipeline.
+LEGACY_HINT = (
+    "Positional YAML configs are no longer accepted. Select a suite and model, e.g.\n"
+    "  run_evaluate --suite calibration --model amplify_120m [--config FILE] [key=value ...]\n"
+    "Use --config FILE for extra YAML overlays."
+)
 
-    Usage::
 
-        uv run run_evaluate.py [--baselines | --overwrite] <config.yaml> [<override.yaml> ...] [key=value ...]
+@dataclass(frozen=True)
+class PlannedRun:
+    """One concrete run: a suite job bound to a model (or to baselines only)."""
 
-    One or more YAML files may be supplied; later files override earlier ones
-    for shared keys.  Any ``key=value`` arguments (containing ``=``) are
-    treated as OmegaConf dotlist overrides applied after YAML merging.
-    Without an explicit task overlay, workspace.default_task_type in the
-    dataset selects its task overlay; workspace.task_type can override it.
+    job: EvaluationJob
+    model_label: str | None
+    config_paths: tuple[Path, ...]
+    overrides: tuple[str, ...]
 
-    Examples::
 
-        uv run modules/evaluate/src/run_evaluate.py modules/evaluate/configs/config.yaml
-        uv run modules/evaluate/src/run_evaluate.py modules/evaluate/configs/config.yaml configs/experiment.yaml
-        uv run modules/evaluate/src/run_evaluate.py modules/evaluate/configs/config.yaml dataset.base_path=/data
-    """
-    args = sys.argv[1:]
-    baseline_only = "--baselines" in args
-    overwrite = "--overwrite" in args
-    args = [
-        argument for argument in args if argument not in {"--baselines", "--overwrite"}
-    ]
-    if baseline_only and overwrite:
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="run_evaluate",
+        description="Run evaluation suites for one model, a model collection, or baselines.",
+    )
+    parser.add_argument("--suite", required=True, help="Suite name or YAML path.")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--model", help="Model config name or YAML path.")
+    mode.add_argument("--model-collection", help="Model collection name or YAML path.")
+    mode.add_argument(
+        "--baselines", action="store_true", help="Run shared baselines (no model)."
+    )
+    parser.add_argument("--model-name", help="Label override for a single model.")
+    parser.add_argument("--predictor", help="Run only jobs with this predictor.")
+    parser.add_argument("--data-root", help="Not implemented yet; rejected.")
+    parser.add_argument("--output-root", help="Output directory (workspace.output_dir).")
+    parser.add_argument("--seed", type=int, help="Evaluation seed.")
+    parser.add_argument(
+        "--config",
+        action="append",
+        default=[],
+        dest="config_files",
+        metavar="OVERRIDE_YAML",
+        help="Extra YAML overlay; repeatable.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Compose and validate jobs without loading models or data.",
+    )
+    parser.add_argument(
+        "--overwrite", action="store_true", help="Replace compatible model outputs."
+    )
+    parser.add_argument("overrides", nargs="*", metavar="key=value")
+    return parser
+
+
+def _validate_args(args: argparse.Namespace) -> None:
+    if any("=" not in token for token in args.overrides):
+        raise SystemExit(LEGACY_HINT)
+    if args.data_root is not None:
+        raise SystemExit(
+            "--data-root is not implemented yet; use dataset configs or --config."
+        )
+    if args.baselines and args.overwrite:
         raise SystemExit(
             "--overwrite applies to model runs only; baseline artifacts are validated "
             "and reused by --baselines."
         )
-    if not args:
-        print(
-            "Usage: run_evaluate [--baselines | --overwrite] <config.yaml> [<override.yaml> ...] [key=value ...]",
-            file=sys.stderr,
+    if args.model_name is not None and args.model is None:
+        raise SystemExit("--model-name is only valid with --model (single model).")
+
+
+def plan_runs(args: argparse.Namespace) -> list[PlannedRun]:
+    """Expand suite, selectors and model inputs into concrete runs (offline)."""
+    jobs = expand_suite(args.suite)
+    if args.predictor is not None:
+        jobs = select_jobs(jobs, predictor=args.predictor)
+    extra_files = [Path(path) for path in args.config_files]
+    for path in extra_files:
+        if not path.is_file():
+            raise SystemExit(f"--config file not found: {path}")
+    shared: list[str] = []
+    if args.seed is not None:
+        shared.append(f"seed={args.seed}")
+    if args.output_root is not None:
+        shared.append(f"workspace.output_dir={args.output_root}")
+    if args.model_name is not None:
+        shared.append(f"workspace.model_name={args.model_name}")
+
+    models: list[Path | None]
+    if args.baselines:
+        models = [None]
+        # Baselines are shared per task/dataset; predictors do not apply.
+        seen: set[tuple[str, str]] = set()
+        unique: list[EvaluationJob] = []
+        for job in jobs:
+            key = (job.task, job.dataset)
+            if key not in seen:
+                seen.add(key)
+                unique.append(replace(job, predictor=None))
+        jobs = unique
+    elif args.model_collection is not None:
+        models = list(resolve_model_collection(args.model_collection))
+    else:
+        models = list(resolve_model_paths(args.model))
+
+    runs: list[PlannedRun] = []
+    for model in models:
+        for job in jobs:
+            runs.append(
+                PlannedRun(
+                    job=job,
+                    model_label=model_label(model) if model is not None else None,
+                    config_paths=tuple(job.config_paths(model)) + tuple(extra_files),
+                    overrides=tuple(job.overrides)
+                    + tuple(shared)
+                    + tuple(args.overrides),
+                )
+            )
+    return runs
+
+
+def _compose_for_dry_run(run: PlannedRun, baselines: bool) -> str:
+    paths = [str(path) for path in run.config_paths]
+    overrides = list(run.overrides)
+    if baselines:
+        from modules.evaluate.src.runners.baselines import load_baseline_config
+
+        config = load_baseline_config(paths, overrides or None)
+        workspace = config.workspace
+        return (
+            f"task={run.job.task} dataset={workspace.dataset_name} "
+            f"predictor={run.job.predictor or '-'} model=- seed={config.seed}"
         )
-        sys.exit(1)
+    composed = load_evaluation_config(path=paths, overrides=overrides or None)
+    return (
+        f"task={composed.workspace.task_type} dataset={composed.workspace.dataset_name} "
+        f"predictor={run.job.predictor or '-'} model={run.model_label or '-'} "
+        f"seed={composed.seed} output_dir={composed.workspace.output_dir}"
+    )
 
-    # Separate yaml paths (no ``=``) from dotlist overrides (contain ``=``).
-    config_paths = [a for a in args if "=" not in a]
-    overrides = [a for a in args if "=" in a]
 
-    if not config_paths:
-        print("Error: at least one YAML config file must be provided.", file=sys.stderr)
-        sys.exit(1)
+def _run_baselines(run: PlannedRun) -> None:
+    from modules.evaluate.src.runners.baselines import (
+        load_baseline_config,
+        run_baselines,
+    )
 
-    if baseline_only:
-        from modules.evaluate.src.runners.baselines import (
-            load_baseline_config,
-            run_baselines,
-        )
+    baseline_config = load_baseline_config(
+        [str(path) for path in run.config_paths], list(run.overrides) or None
+    )
+    for test, artifacts in run_baselines(baseline_config).items():
+        for name, path in artifacts.items():
+            logger.info("Baseline %s / %s: %s", test, name, path)
 
-        baseline_config = load_baseline_config(config_paths, overrides or None)
-        for test, artifacts in run_baselines(baseline_config).items():
-            for name, path in artifacts.items():
-                logger.info("Baseline %s / %s: %s", test, name, path)
-        return
 
+def _run_model_evaluation(
+    config_paths: list[str], overrides: list[str], overwrite: bool, task: str
+) -> None:
+    """Run one model/dataset/predictor job end to end (legacy single-run body)."""
     logger.info("=== Starting Evaluation Pipeline ===")
 
     config = load_evaluation_config(path=config_paths, overrides=overrides or None)

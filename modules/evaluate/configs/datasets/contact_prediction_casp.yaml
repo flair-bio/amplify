@@ -2,7 +2,6 @@ workspace:
   dataset_name: contact_prediction_casp
   dataset_repo_id: flair-bio/contact_prediction_casp
   dataset_revision: null # set an immutable HF commit SHA (or use a local Parquet artifact)
-  default_task_type: contact_prediction
   target_type: categorical
   label_format: contact_pairs
   num_labels: null

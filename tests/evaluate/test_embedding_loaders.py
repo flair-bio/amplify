@@ -19,9 +19,11 @@ from modules.evaluate.src.dataset.dataloader import DataLoaderConfig, build_data
 from modules.evaluate.src.model.heads import HeadConfig
 from modules.evaluate.src.steps.predict import PredictConfig, PredictStep
 from modules.evaluate.src.steps.tune import TuneConfig, TuneStep
-from modules.evaluate.src.utils.embed import (
+from modules.evaluate.src.artifacts.feature_cache import (
     EmbeddingCache,
     EmbeddingCacheConfig,
+)
+from modules.evaluate.src.predictors.embeddings import (
     build_embedding_dataloaders,
     extract_embeddings,
     find_embedding_dataset,

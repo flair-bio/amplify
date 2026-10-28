@@ -32,7 +32,7 @@ from modules.evaluate.src.model.heads import (
 )
 from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
 from modules.evaluate.src.tasks import get_task
-from modules.evaluate.src.utils.embed import (
+from modules.evaluate.src.predictors.embeddings import (
     EmbeddingDataset,
     embedding_collate_fn,
     extract_embeddings,

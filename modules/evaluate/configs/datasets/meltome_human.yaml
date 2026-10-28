@@ -1,5 +1,4 @@
 workspace:
-  default_task_type: sequence_regression
   dataset_name: meltome_human
   dataset_repo_id: flair-bio/meltome_human
   target_type: continuous

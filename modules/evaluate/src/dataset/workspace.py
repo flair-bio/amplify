@@ -37,7 +37,6 @@ class DatasetWorkspaceConfig(BaseModel):
     dataset_revision: str | None = None
     edition: Literal[14, 15, 16] | None = None
     task_type: TaskType
-    default_task_type: TaskType | None = None  # dataset default evaluation method
     target_type: Literal["categorical", "continuous"]
     label_format: Literal[
         "scalar", "per_token", "multilabel", "contact_pairs", "consensus_profile"
@@ -68,13 +67,6 @@ class DatasetWorkspaceConfig(BaseModel):
             raise ValueError(
                 f"Unknown task_type '{value}'. Available: {available_tasks()}."
             )
-        return value
-
-    @field_validator("default_task_type")
-    @classmethod
-    def _validate_default_task_type(cls, value: str | None) -> str | None:
-        if value is not None:
-            cls._validate_task_type(value)
         return value
 
     @model_validator(mode="after")

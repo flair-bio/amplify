@@ -328,7 +328,11 @@ def test_invalid_training_targets_rejected(tmp_path, targets):
 def test_baseline_cli_uses_data_subset_without_model_validation(tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
     config = runner.load_baseline_config(
-        [root / "config.yaml", root / "datasets/solubility_prediction.yaml"],
+        [
+            root / "config.yaml",
+            root / "tasks/sequence_classification.yaml",
+            root / "datasets/solubility_prediction.yaml",
+        ],
         ["steps.mode=not_a_model_mode", "workspace.model_name=null"],
     )
     assert config.baselines.names == ["majority_class"]
@@ -361,7 +365,11 @@ def test_baseline_route_rejects_unsupported_requests(overrides, match):
     root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
     with pytest.raises(ValueError, match=match):
         runner.load_baseline_config(
-            [root / "config.yaml", root / "datasets/solubility_prediction.yaml"],
+            [
+                root / "config.yaml",
+                root / "tasks/sequence_classification.yaml",
+                root / "datasets/solubility_prediction.yaml",
+            ],
             overrides,
         )
 

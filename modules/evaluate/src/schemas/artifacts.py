@@ -19,7 +19,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizerBase
 
-from modules.evaluate.src.utils.embed import EmbeddingBackend
+from modules.evaluate.src.predictors.embeddings import EmbeddingBackend
 
 if TYPE_CHECKING:
     from modules.evaluate.src.tasks.contact_prediction import ContactDataset
@@ -48,7 +48,7 @@ class PreparedArtifacts:
     # of tokens. Every embedding-cache-specific detail PredictStep's control
     # building needs (a re-embeddable trunk, the original tokenized test
     # data, pooling/layers/dtype/hidden size) lives behind this one field --
-    # see :class:`~modules.evaluate.src.utils.embed.EmbeddingBackend`.
+    # see :class:`~modules.evaluate.src.predictors.embeddings.EmbeddingBackend`.
     # TuneStep also uses it to extract random-trunk development features.
     embedding_backend: EmbeddingBackend | None = None
     # Independently selected/refitted ordinary cached probe on random features.

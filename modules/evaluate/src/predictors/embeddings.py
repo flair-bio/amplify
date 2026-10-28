@@ -36,13 +36,23 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Sequence
 
 import torch
 from accelerate import Accelerator
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+from modules.evaluate.src.artifacts.feature_cache import (
+    BYTES_PER_GB,
+    CACHEABLE_SPLITS,
+    EmbeddingAutocastDtype,
+    EmbeddingCache,
+    EmbeddingCacheConfig,
+    EmbeddingDtype,
+    EmbeddingPooling,
+    embedding_cache_key,
+    estimate_embedding_bytes,
+    weights_fingerprint,
+)
 from modules.evaluate.src.dataset.collator import input_id_rows, unpack_packed
 from modules.evaluate.src.dataset.dataloader import LengthGroupedSampler, token_lengths
 from modules.evaluate.src.utils.inference import pad_for_gather
@@ -262,7 +272,7 @@ def select_token_hidden_state_layers(
     return torch.cat(selected, dim=-1)
 
 
-def _select_layers(
+def autocast_context(
     device: torch.device | None, autocast_dtype: torch.dtype | None
 ) -> Any:
     """Return a safe autocast context for *device*."""
@@ -276,66 +286,6 @@ def _select_layers(
     ):
         return nullcontext()
     return torch.autocast(device_type=device_type, dtype=autocast_dtype)
-
-
-class EmbeddingCache:
-    """Reads/writes one split's pooled embeddings as a single safetensors file."""
-
-    def __init__(self, cache_dir: Path, max_cache_gb: float) -> None:
-        self.cache_dir = cache_dir
-        self.max_cache_bytes = int(max_cache_gb * BYTES_PER_GB)
-
-    def _path(self, split: str, key: str) -> Path:
-        return self.cache_dir / f"{split}_{key}.safetensors"
-
-    def exists(self, split: str, key: str) -> bool:
-        return self._path(split, key).exists()
-
-    def fits_budget(
-        self, num_examples: int, hidden_size: int, dtype: EmbeddingDtype
-    ) -> bool:
-        return (
-            estimate_embedding_bytes(num_examples, hidden_size, dtype)
-            <= self.max_cache_bytes
-        )
-
-    def write(
-        self,
-        split: str,
-        key: str,
-        embeddings: torch.Tensor,
-        ids: list[Any],
-        labels: torch.Tensor,
-    ) -> Path:
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        path = self._path(split, key)
-        # Write to a temp path first so a crash mid-write can never leave a
-        # cache file that `exists()` treats as valid but is truncated/corrupt.
-        tmp_path = path.with_suffix(".tmp")
-        save_file(
-            {"embeddings": embeddings.contiguous(), "labels": labels.contiguous()},
-            str(tmp_path),
-            metadata={"ids": json.dumps(ids)},
-        )
-        tmp_path.replace(path)
-        return path
-
-    def read(
-        self, split: str, key: str
-    ) -> tuple[torch.Tensor, list[Any], torch.Tensor]:
-        # safetensors memory-maps the file rather than loading it eagerly, so
-        # reading a cached split doesn't spike host RAM the way a plain
-        # torch.load of a large tensor would.
-        with safe_open(str(self._path(split, key)), framework="pt", device="cpu") as f:
-            embeddings = f.get_tensor("embeddings")
-            labels = f.get_tensor("labels")
-            metadata = f.metadata() or {}
-        if "ids" not in metadata:
-            raise ValueError(
-                f"Embedding cache entry {self._path(split, key)} has no IDs."
-            )
-        ids = json.loads(metadata["ids"])
-        return embeddings, ids, labels
 
 
 @torch.inference_mode()

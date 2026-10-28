@@ -40,7 +40,7 @@ from modules.evaluate.src.utils.controls import (
     ControlBuilder,
     ControlCondition,
 )
-from modules.evaluate.src.utils.embed import find_embedding_dataset
+from modules.evaluate.src.predictors.embeddings import find_embedding_dataset
 from modules.evaluate.src.utils.inference import (
     run_inference,
     run_local_embedding_inference,

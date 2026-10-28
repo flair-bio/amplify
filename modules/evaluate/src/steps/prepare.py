@@ -52,14 +52,16 @@ from modules.evaluate.src.utils.baselines import (
     baseline_context,
     external_baseline_context,
 )
-from modules.evaluate.src.utils.embed import (
-    EmbeddingBackend,
+from modules.evaluate.src.artifacts.feature_cache import (
     EmbeddingCache,
     EmbeddingCacheConfig,
-    build_embedding_dataloaders,
     embedding_cache_key,
-    validate_embedding_cache_compat,
     weights_fingerprint,
+)
+from modules.evaluate.src.predictors.embeddings import (
+    EmbeddingBackend,
+    build_embedding_dataloaders,
+    validate_embedding_cache_compat,
 )
 
 if TYPE_CHECKING:

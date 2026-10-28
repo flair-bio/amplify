@@ -257,7 +257,9 @@ def fit_random_trunk_contact_control(
     random_model: ContactPredictionModel | ContactAttentionModel | ContactJacobianModel
 
     if isinstance(model, ContactPredictionModel):
-        from modules.evaluate.src.utils.embed import contact_development_features
+        from modules.evaluate.src.predictors.embeddings import (
+            contact_development_features,
+        )
 
         devices = [device.index or 0] if device.type == "cuda" else []
         with torch.random.fork_rng(devices=devices):

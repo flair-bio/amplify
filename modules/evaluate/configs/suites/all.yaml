@@ -1,0 +1,10 @@
+# Aggregate suite: every production task suite, in a fixed order.
+suite: all
+includes:
+  - sequence_regression
+  - sequence_classification
+  - sequence_multilabel_classification
+  - token_classification
+  - contact_prediction
+  - pseudo_perplexity
+  - calibration

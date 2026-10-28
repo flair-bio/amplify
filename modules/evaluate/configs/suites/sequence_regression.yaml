@@ -1,0 +1,8 @@
+# Production suite: sequence regression (frozen cached MLP by default).
+suite: sequence_regression
+task: sequence_regression
+evaluations:
+  - dataset: stability_prediction
+  - dataset: meltome_human
+  - dataset: meltome_mixed
+  - dataset: uniprot_protparams # label_column gravy is set in the dataset config

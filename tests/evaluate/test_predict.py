@@ -37,10 +37,8 @@ from modules.evaluate.src.steps.score import ScoreConfig, ScoreStep
 from modules.evaluate.src.steps.tune import TuneConfig, TuneStep
 from modules.evaluate.src.model.heads import HeadConfig
 from modules.evaluate.src.utils.controls import ControlBuilder
-from modules.evaluate.src.utils.embed import (
-    EmbeddingCacheConfig,
-    find_embedding_dataset,
-)
+from modules.evaluate.src.artifacts.feature_cache import EmbeddingCacheConfig
+from modules.evaluate.src.predictors.embeddings import find_embedding_dataset
 from unittest.mock import MagicMock
 from modules.evaluate.src.utils.inference import run_inference
 

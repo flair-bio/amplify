@@ -1,5 +1,4 @@
 workspace:
-  default_task_type: calibration
   dataset_name: human_calibration
   dataset_repo_id: flair-bio/human_calibration
   target_type: categorical

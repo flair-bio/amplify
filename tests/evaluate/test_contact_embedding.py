@@ -30,7 +30,7 @@ from modules.evaluate.src.tasks.contact_prediction import (
     tokenize_contact_chain,
 )
 from modules.evaluate.src.utils.config_loader import load_evaluation_config
-from modules.evaluate.src.utils.embed import contact_development_features
+from modules.evaluate.src.predictors.embeddings import contact_development_features
 from modules.pretrain.src.model.modeling_amplify import register_amplify_auto_classes
 
 from .conftest import build_tiny_model
@@ -91,6 +91,7 @@ def config_for(tmp_path, model_path, seed=13):
     return load_evaluation_config(
         [
             CONFIGS / "config.yaml",
+            CONFIGS / "tasks/contact_prediction.yaml",
             CONFIGS / "datasets/contact_prediction_casp.yaml",
             CONFIGS / "predictors/contact_embedding.yaml",
         ],

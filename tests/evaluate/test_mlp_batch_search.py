@@ -22,7 +22,7 @@ from modules.evaluate.src.steps.tune import (
     TuneConfig,
     TuneStep,
 )
-from modules.evaluate.src.utils.embed import EmbeddingDataset
+from modules.evaluate.src.predictors.embeddings import EmbeddingDataset
 from modules.evaluate.src.utils.hpo import build_optimizer, build_scheduler
 
 from .test_prepare import _make_workspace

@@ -34,7 +34,7 @@ from modules.evaluate.src.steps import prepare as prepare_module
 from modules.evaluate.src.dataset import resolution as resolution_module
 from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
 from modules.evaluate.src.steps.prepare import PrepareConfig, PrepareStep
-from modules.evaluate.src.utils.embed import find_embedding_dataset
+from modules.evaluate.src.predictors.embeddings import find_embedding_dataset
 
 from .conftest import ModelFamily, build_raw_dataset_dict, build_tiny_model
 

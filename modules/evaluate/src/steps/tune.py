@@ -21,7 +21,14 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 from accelerate.utils import broadcast, broadcast_object_list
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PositiveInt,
+    field_validator,
+    model_validator,
+)
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -46,8 +53,8 @@ from modules.evaluate.src.utils.controls import (
     RANDOMIZED_TRUNK_CONTROLS,
     build_random_trunk,
 )
-from modules.evaluate.src.utils.embed import (
-    EmbeddingCacheConfig,
+from modules.evaluate.src.artifacts.feature_cache import EmbeddingCacheConfig
+from modules.evaluate.src.predictors.embeddings import (
     EmbeddingDataset,
     build_embedding_dataloaders,
     find_embedding_dataset,
@@ -149,10 +156,27 @@ class HyperparameterSearchConfig(BaseModel):
     n_trials: int = 5
     direction: Literal["maximize", "minimize"] | None = None
     metric: str | None = None
-    search_pattern: Literal["bohb", "random", "grid"] = "bohb"
+    search_pattern: Literal["tpe", "bohb", "random", "grid"] = "tpe"
     search_space: HyperparameterSearchSpaceConfig = Field(
         default_factory=HyperparameterSearchSpaceConfig
     )
+
+    @field_validator("search_pattern", mode="after")
+    @classmethod
+    def _normalize_search_pattern(cls, value: str) -> str:
+        """Store the accurate ``tpe`` name; accept legacy ``bohb`` with a warning."""
+        if value == "bohb":
+            logger.warning(
+                "hyperparameter_search.search_pattern='bohb' is deprecated; use "
+                "'tpe' (Optuna TPE + median pruning). Treating it as 'tpe'."
+            )
+            return "tpe"
+        return value
+
+    @property
+    def engine_pattern(self) -> str:
+        """Pattern name understood by the shared head-search engine (``bohb``)."""
+        return "bohb" if self.search_pattern == "tpe" else self.search_pattern
 
 
 class TuneConfig(BaseModel):
@@ -282,7 +306,9 @@ class TuneStep:
             fit_contact_attention_head,
         )
         from modules.evaluate.src.model.contact_model import fit_contact_head
-        from modules.evaluate.src.utils.embed import contact_development_features
+        from modules.evaluate.src.predictors.embeddings import (
+            contact_development_features,
+        )
         from modules.evaluate.src.utils.io import write_json
 
         if isinstance(model, ContactAttentionModel):
@@ -1172,7 +1198,7 @@ class TuneStep:
                 metric_name,
                 direction,
                 search_pattern=(
-                    search_config.search_pattern if search_config.enabled else "grid"
+                    search_config.engine_pattern if search_config.enabled else "grid"
                 ),
                 n_trials=search_config.n_trials if search_config.enabled else None,
                 seed=seed,

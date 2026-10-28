@@ -1,5 +1,4 @@
 workspace:
-  default_task_type: token_classification
   dataset_name: uniprot_domains
   dataset_repo_id: flair-bio/uniprot_domains
   target_type: categorical

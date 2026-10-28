@@ -1,5 +1,4 @@
 workspace:
-  default_task_type: sequence_classification
   dataset_name: solubility_prediction
   dataset_repo_id: flair-bio/solubility_uesolds_original
   target_type: categorical

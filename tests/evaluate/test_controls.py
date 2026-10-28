@@ -20,11 +20,13 @@ from modules.evaluate.src.steps.tune import (
     TuneStep,
 )
 from modules.evaluate.src.utils.controls import ControlBuilder, build_random_trunk
-from modules.evaluate.src.utils.embed import (
+from modules.evaluate.src.artifacts.feature_cache import (
     EmbeddingCacheConfig,
+    weights_fingerprint,
+)
+from modules.evaluate.src.predictors.embeddings import (
     EmbeddingDataset,
     find_embedding_dataset,
-    weights_fingerprint,
 )
 
 from .test_prepare import _make_workspace, _run_prepare

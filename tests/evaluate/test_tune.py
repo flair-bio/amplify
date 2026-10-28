@@ -20,7 +20,10 @@ from modules.evaluate.src.steps.tune import (
     TuneStep,
     _improves,
 )
-from modules.evaluate.src.utils.embed import EmbeddingCache, EmbeddingCacheConfig
+from modules.evaluate.src.artifacts.feature_cache import (
+    EmbeddingCache,
+    EmbeddingCacheConfig,
+)
 from modules.evaluate.src.model.heads import EmbeddingProbeHead, HeadConfig
 from modules.evaluate.src.utils.hpo import (
     build_optimizer,
@@ -30,7 +33,7 @@ from modules.evaluate.src.utils.hpo import (
     sample_candidates,
     split_decay_parameters,
 )
-from modules.evaluate.src.utils.embed import EmbeddingDataset
+from modules.evaluate.src.predictors.embeddings import EmbeddingDataset
 
 from .test_prepare import _make_workspace, _run_prepare
 
