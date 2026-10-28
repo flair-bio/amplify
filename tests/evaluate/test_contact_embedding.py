@@ -185,7 +185,7 @@ def test_extraction_native_parity_gaps_growth_and_freezing(model_family):
     assert model.extract(longest, tokenizer).shape == (3364, 16)
 
 
-def test_fixed_fit_determinism_decay_patience_restoration_and_cap(monkeypatch):
+def test_fixed_fit_determinism_decay_patience_restoration_and_cap(monkeypatch, caplog):
     dataset = prepare_contact_dataset(development_dataset())
     model = ContactPredictionModel(small_trunk())
     generator = torch.Generator().manual_seed(7)
@@ -209,6 +209,9 @@ def test_fixed_fit_determinism_decay_patience_restoration_and_cap(monkeypatch):
         model, dataset, features, seed=88, max_epochs=12, device=torch.device("cpu")
     )
     assert settings["best_epoch"] == 1 and len(settings["history"]) == 11
+    assert "Contact fit epoch 1/12 | train BCE=" in caplog.text
+    assert "Contact fit early stopping at epoch 11/12" in caplog.text
+    assert "restored_best_head=true" in caplog.text
     assert [group["weight_decay"] for group in optimizers[0].param_groups] == [10, 0]
     assert optimizers[0].param_groups[1]["params"] == [model.head.bias]
     first_state = deepcopy(model.head.state_dict())

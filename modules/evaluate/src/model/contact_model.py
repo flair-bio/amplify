@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -21,6 +23,8 @@ if TYPE_CHECKING:
         ContactChain,
         ContactDataset,
     )
+
+logger = logging.getLogger(__name__)
 
 
 class BilinearHead(nn.Module):
@@ -244,9 +248,21 @@ def fit_contact_head(
         lr=0.001,
     )
     total = sum(len(pair.i) for pair in pairs)
+    logger.info(
+        "Starting contact-head fit | seed=%d | train_structures=%d | "
+        "validation_structures=%d | training_pairs=%d | max_epochs=%d | "
+        "patience=10 | lr=0.001 | matrix_weight_decay=10",
+        seed,
+        len(training),
+        len(validation),
+        total,
+        max_epochs,
+    )
     best_score, best_state, best_epoch, stale = -np.inf, None, 0, 0
     history = []
+    fit_started = monotonic()
     for epoch in range(1, max_epochs + 1):
+        epoch_started = monotonic()
         model.head.train()
         optimizer.zero_grad(set_to_none=True)
         loss_sum = 0.0
@@ -284,9 +300,33 @@ def fit_contact_head(
         if value > best_score:
             best_score, best_epoch, stale = value, epoch, 0
             best_state = deepcopy(model.head.state_dict())
+            improved = True
         else:
             stale += 1
+            improved = False
+        logger.info(
+            "Contact fit epoch %d/%d | train BCE=%.6f | validation mean P@L=%.6f | "
+            "best=%s (epoch %d, %.6f) | patience=%d/10 | elapsed=%.1fs",
+            epoch,
+            max_epochs,
+            loss_sum,
+            value,
+            "improved" if improved else "unchanged",
+            best_epoch,
+            best_score,
+            stale,
+            monotonic() - epoch_started,
+        )
         if stale == 10:
+            logger.info(
+                "Contact fit early stopping at epoch %d/%d; restoring best head "
+                "from epoch %d (validation mean P@L=%.6f, total fit time=%.1fs)",
+                epoch,
+                max_epochs,
+                best_epoch,
+                best_score,
+                monotonic() - fit_started,
+            )
             break
     if stale != 10 or best_state is None:
         raise RuntimeError(
@@ -294,6 +334,13 @@ def fit_contact_head(
         )
     model.head.load_state_dict(best_state)
     model.head.eval()
+    logger.info(
+        "Contact fit complete | best_epoch=%d | validation mean P@L=%.6f | "
+        "epochs=%d | restored_best_head=true",
+        best_epoch,
+        best_score,
+        len(history),
+    )
     return {
         "seed": seed,
         "best_epoch": best_epoch,
