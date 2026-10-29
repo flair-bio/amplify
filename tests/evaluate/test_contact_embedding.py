@@ -342,6 +342,41 @@ def test_legacy_amplify_rotary_growth_and_restoration(initialized):
         assert rotary.rope_cos is old_cos and rotary.rope_sin is old_sin
 
 
+def test_legacy_amplify_rotary_growth_tolerates_device_rounding():
+    trunk = AMPLIFYModel(
+        AMPLIFYConfig(
+            hidden_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            max_position_embeddings=8,
+        )
+    ).eval()
+    rotary = trunk.rotary_emb
+    rotary.reset_tables = None
+    old_cos, old_sin = rotary.rope_cos.clone(), rotary.rope_sin.clone()
+    build = rotary._build_tables
+
+    def rounded_build(device, error=1e-6):
+        build(device)
+        rotary.rope_cos = rotary.rope_cos + error
+        rotary.rope_sin = rotary.rope_sin - error
+
+    positions = torch.tensor([[0, 1, 3, 12, 21]])
+    rotary._build_tables = rounded_build
+    with contact_positions(trunk, positions):
+        assert torch.equal(rotary.rope_cos[:8], old_cos)
+        assert torch.equal(rotary.rope_sin[:8], old_sin)
+    assert torch.equal(rotary.rope_cos, old_cos)
+
+    rotary._build_tables = lambda device: rounded_build(device, error=1e-2)
+    with pytest.raises(ValueError, match="changed existing positions"):
+        with contact_positions(trunk, positions):
+            pass
+    assert rotary.max_position_embeddings == 8
+    assert torch.equal(rotary.rope_cos, old_cos)
+
+
 def test_fixed_fit_determinism_decay_patience_restoration_and_cap(monkeypatch, caplog):
     dataset = prepare_contact_dataset(development_dataset())
     model = ContactPredictionModel(small_trunk())
