@@ -1,7 +1,8 @@
 workspace:
   default_task_type: sequence_classification
   dataset_name: localization_prediction
-  dataset_repo_id: flair-bio/biomap-research-localization_prediction
+  dataset_repo_id: flair-bio/evaluation-suite
+  dataset_config_name: localization_prediction
   target_type: categorical
   label_format: scalar
   num_labels: 10
@@ -11,5 +12,7 @@ workspace:
 # Verify class-index compatibility before interpreting the setHARD score.
 external_test_sets:
   - name: sethard
-    dataset_repo_id: flair-bio/sethard
+    dataset_repo_id: ${workspace.dataset_repo_id}
+    dataset_config_name: sethard
+    dataset_revision: ${workspace.dataset_revision}
     split: test

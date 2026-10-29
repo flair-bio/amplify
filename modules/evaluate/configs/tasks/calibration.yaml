@@ -10,6 +10,8 @@ steps:
   score:
     metrics: [calibration] # 100 x mean per-position exp(-KL)
   prepare:
+    batch_size: 8 # masked 512-residue windows, not full source proteins
+    tokenize_num_proc: 1 # expanded profile rows; bound host-memory concurrency
     # The handler cuts its own 512-residue window centred on each scored
     # position, so the dataloader must keep full sequences (longest ~7k).
     max_length: 100000

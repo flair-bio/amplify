@@ -9,11 +9,14 @@ import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
-from modules.evaluate.src.tasks import TaskType, available_tasks
+from modules.evaluate.src.contracts.config import (
+    DatasetWorkspaceConfig,
+    EvaluationWorkspaceConfig,
+    validate_directory_label,
+)
+from modules.evaluate.src.tasks import TaskType
 from modules.evaluate.src.utils.io import update_run_manifest, write_json
 
 __all__ = [
@@ -25,95 +28,6 @@ __all__ = [
 ]
 
 
-class DatasetWorkspaceConfig(BaseModel):
-    """Dataset/task settings shared by model and baseline runs."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    dataset_name: str  # dataset name that serves as a mnemonic for the dataset being evaluated, e.g. "stability_prediction"
-    dataset_repo_id: str | None = (
-        None  # path to HuggingFace dataset repo e.g. biomap-research/stability_prediction
-    )
-    task_type: TaskType
-    default_task_type: TaskType | None = None  # dataset default evaluation method
-    target_type: Literal["categorical", "continuous"]
-    label_format: Literal[
-        "scalar", "per_token", "multilabel", "contact_pairs", "consensus_profile"
-    ]
-    num_labels: int | None = (
-        None  # number of classes for *_classification tasks; unused (forced to 1) for sequence_regression
-    )
-    base_path: str = "./eval"  # base path where the EvaluationWorkspace is stored
-    output_dir: Path | None = None
-
-    @field_validator("dataset_name")
-    @classmethod
-    def _validate_dataset_label(cls, value: str) -> str:
-        return validate_directory_label(value)
-
-    @property
-    def benchmark_root(self) -> Path:
-        return self.output_dir if self.output_dir is not None else Path(self.base_path)
-
-    @property
-    def dataset_root(self) -> Path:
-        return self.benchmark_root / self.task_type / self.dataset_name
-
-    @field_validator("task_type")
-    @classmethod
-    def _validate_task_type(cls, value: str) -> str:
-        if value not in available_tasks():
-            raise ValueError(
-                f"Unknown task_type '{value}'. Available: {available_tasks()}."
-            )
-        return value
-
-    @field_validator("default_task_type")
-    @classmethod
-    def _validate_default_task_type(cls, value: str | None) -> str | None:
-        if value is not None:
-            cls._validate_task_type(value)
-        return value
-
-    @model_validator(mode="after")
-    def _validate_target_metadata(self) -> DatasetWorkspaceConfig:
-        if self.target_type == "continuous":
-            if self.label_format != "scalar" or self.num_labels is not None:
-                raise ValueError(
-                    "target_type='continuous' requires label_format='scalar' and "
-                    "num_labels=null."
-                )
-        elif self.label_format in {"scalar", "per_token", "multilabel"} and (
-            self.num_labels is None or self.num_labels <= 1
-        ):
-            raise ValueError("Categorical targets require num_labels > 1.")
-        return self
-
-
-class EvaluationWorkspaceConfig(DatasetWorkspaceConfig):
-    """Paths and model settings for one model/dataset evaluation."""
-
-    model_name: str
-    run_id: str
-    model_repo_id: str | None = None
-    model_kwargs: dict[str, Any] = Field(default_factory=dict)
-    tmp_path: str | None = None
-
-    @field_validator("run_id", "model_name")
-    @classmethod
-    def _validate_directory_label(cls, value: str) -> str:
-        return validate_directory_label(value)
-
-
-def validate_directory_label(value: str) -> str:
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
-        raise ValueError(
-            "Output labels must start with a letter or digit and contain "
-            "only letters, digits, '.', '_', or '-'."
-        )
-    return value
-
-
 class EvaluationWorkspace:
     """Resolve paths for one (model, dataset) pair.
 
@@ -122,11 +36,15 @@ class EvaluationWorkspace:
     """
 
     def __init__(
-        self, config: EvaluationWorkspaceConfig, variant: str | None = None
+        self,
+        config: EvaluationWorkspaceConfig,
+        variant: str | None = None,
+        seed: int | None = None,
     ) -> None:
 
         self.config = config
         self.variant = variant
+        self.seed = seed
 
         self.dataset_name = config.dataset_name
         self.dataset_repo_id = config.dataset_repo_id
@@ -153,6 +71,11 @@ class EvaluationWorkspace:
 
         self.run_name = f"{variant}-{config.run_id}" if variant else config.run_id
         run_root = workspace_root / self.run_name
+        self.experiment_root = run_root
+        if seed is not None:
+            if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+                raise ValueError("Run seed must be a nonnegative integer")
+            run_root = run_root / f"seed_{seed}"
         self.model_path = run_root / "model"
         self.run_root = run_root
         self.preds_path = run_root
@@ -174,7 +97,7 @@ class EvaluationWorkspace:
     def control_workspace(self, name: str) -> EvaluationWorkspace:
         """Keep a fitted control and its predictions inside the owning run."""
         validate_directory_label(name)
-        workspace = EvaluationWorkspace(self.config, self.variant)
+        workspace = EvaluationWorkspace(self.config, self.variant, self.seed)
         workspace.run_root = self.run_root / "controls" / name
         workspace.model_path = workspace.run_root / "model"
         workspace.preds_path = workspace.run_root
@@ -196,7 +119,8 @@ class EvaluationWorkspace:
         if self.variant is None:
             raise ValueError("Pipeline output protection requires a run variant.")
         self.workspace_root.mkdir(parents=True, exist_ok=True)
-        lock_path = self.workspace_root / f".{self.run_name}.lock"
+        suffix = "" if self.seed is None else f"-seed_{self.seed}"
+        lock_path = self.workspace_root / f".{self.run_name}{suffix}.lock"
         with lock_path.open("a") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -212,6 +136,10 @@ class EvaluationWorkspace:
                 "model_name": self.model_name,
                 "model_repo_id": self.model_repo_id,
             }
+            if self.config.dataset_config_name is not None:
+                provenance["dataset_config_name"] = self.config.dataset_config_name
+            if self.config.dataset_revision is not None:
+                provenance["dataset_revision"] = self.config.dataset_revision
             with (self.workspace_root / ".workspace.lock").open("a") as workspace_lock:
                 fcntl.flock(workspace_lock, fcntl.LOCK_EX)
                 if provenance_path.exists():
@@ -231,14 +159,28 @@ class EvaluationWorkspace:
                 rf"{re.escape(self.variant)}-layer_\d+-{re.escape(self.config.run_id)}"
             )
             targets = [self.run_root]
+            if (
+                self.seed is None
+                and (self.experiment_root / "experiment_config.json").exists()
+            ):
+                raise ValueError(
+                    "Seeded outputs already use this run_id; select a seed or a new run_id"
+                )
+            if (
+                self.seed is not None
+                and (self.experiment_root / "run_manifest.json").exists()
+            ):
+                raise ValueError(
+                    "Unseeded outputs already use this run_id; choose a new run_id"
+                )
             if runs_path.exists():
                 targets.extend(
-                    path
+                    path if self.seed is None else path / f"seed_{self.seed}"
                     for path in runs_path.iterdir()
                     if dependent_pattern.fullmatch(path.name)
                 )
             for target in targets:
-                if target.is_symlink():
+                if target.is_symlink() or target.parent.is_symlink():
                     raise ValueError(f"Refusing to modify symlinked outputs: {target}")
                 for source in (
                     self.tmp_path,
@@ -263,6 +205,9 @@ class EvaluationWorkspace:
         self, targets: list[Path], *, overwrite: bool, config: dict[str, Any]
     ) -> None:
         """Clean only reserved variant outputs, preserving caches and siblings."""
+        if self.seed is not None:
+            identity = {key: value for key, value in config.items() if key != "seed"}
+            self.validate_experiment("config", identity)
         if overwrite:
             runs_path = self.workspace_root
             pattern = re.compile(
@@ -270,8 +215,17 @@ class EvaluationWorkspace:
             )
             for target in targets:
                 if (
-                    target.parent != runs_path
-                    or not pattern.fullmatch(target.name)
+                    (
+                        target.parent != runs_path
+                        if self.seed is None
+                        else (
+                            target.parent.parent != runs_path
+                            or target.name != f"seed_{self.seed}"
+                        )
+                    )
+                    or not pattern.fullmatch(
+                        target.name if self.seed is None else target.parent.name
+                    )
                     or target.is_symlink()
                 ):
                     raise ValueError(
@@ -286,9 +240,31 @@ class EvaluationWorkspace:
             {"status": "running", "config": config},
         )
 
+    def validate_experiment(self, kind: str, identity: dict[str, Any]) -> None:
+        """Bind sibling seed runs to identical settings and immutable inputs."""
+        if self.experiment_root.is_symlink() or self.workspace_root.is_symlink():
+            raise ValueError("Refusing to modify symlinked experiment outputs")
+        validate_directory_label(kind)
+        path = self.experiment_root / f"experiment_{kind}.json"
+        lock_path = self.workspace_root / f".{self.run_name}-experiment.lock"
+        with lock_path.open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if path.is_symlink():
+                raise ValueError("Refusing to modify symlinked experiment identity")
+            if path.exists():
+                if json.loads(path.read_text()) != identity:
+                    raise ValueError(
+                        f"Experiment {kind} differs across seeds; choose a new run_id"
+                    )
+            else:
+                self.experiment_root.mkdir(parents=True, exist_ok=True)
+                write_json(path, identity)
+
 
 def get_evaluation_workspace(
-    config: EvaluationWorkspaceConfig, variant: str | None = None
+    config: EvaluationWorkspaceConfig,
+    variant: str | None = None,
+    seed: int | None = None,
 ) -> EvaluationWorkspace:
     """Build a workspace, optionally identifying the probe/mode variant."""
-    return EvaluationWorkspace(config, variant=variant)
+    return EvaluationWorkspace(config, variant=variant, seed=seed)

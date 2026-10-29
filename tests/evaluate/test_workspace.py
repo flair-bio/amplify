@@ -9,11 +9,9 @@ import polars as pl
 import pytest
 
 from modules.core.utils.config_loader import load_and_parse
-from modules.evaluate.src.config import EvaluationConfig
-from modules.evaluate.src.dataset.workspace import (
-    EvaluationWorkspace,
-    EvaluationWorkspaceConfig,
-)
+from modules.evaluate.src.contracts.config import EvaluationConfig
+from modules.evaluate.src.dataset.workspace import EvaluationWorkspace
+from modules.evaluate.src.contracts.config import EvaluationWorkspaceConfig
 
 
 def workspace_config(base_dir, **overrides):
@@ -136,6 +134,24 @@ def test_run_id_is_required(tmp_path):
     del payload["run_id"]
     with pytest.raises(ValueError, match="run_id"):
         EvaluationWorkspaceConfig.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "change", [{"dataset_config_name": "other"}, {"dataset_revision": "b" * 40}]
+)
+def test_suite_configs_and_revisions_cannot_reuse_output_labels(tmp_path, change):
+    config = workspace_config(
+        tmp_path, dataset_config_name="main", dataset_revision="a" * 40
+    )
+    workspace = EvaluationWorkspace(config, variant="mlp-frozen_trunk")
+    with workspace.reserve_run():
+        pass
+    changed = EvaluationWorkspace(
+        config.model_copy(update=change), variant="mlp-frozen_trunk"
+    )
+    with pytest.raises(ValueError, match="different inputs"):
+        with changed.reserve_run():
+            pass
 
 
 def test_checkpoint_versions_and_tasks_have_separate_roots(tmp_path):

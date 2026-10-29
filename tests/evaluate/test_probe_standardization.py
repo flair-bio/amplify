@@ -9,15 +9,13 @@ from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
 from modules.evaluate.src.model import heads
-from modules.evaluate.src.model.heads import EmbeddingProbeHead, HeadConfig
-from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
-from modules.evaluate.src.steps.tune import (
-    HyperparameterSearchConfig,
-    HyperparameterSearchSpaceConfig,
-    TuneConfig,
-    TuneStep,
-)
-from modules.evaluate.src.utils.embed import EmbeddingDataset
+from modules.evaluate.src.model.heads import EmbeddingProbeHead
+from modules.evaluate.src.contracts.config import HeadConfig
+from modules.evaluate.src.contracts.artifacts import PreparedArtifacts
+from modules.evaluate.src.contracts.config import HyperparameterSearchConfig, HyperparameterSearchSpaceConfig, TuneConfig
+from modules.evaluate.src.steps.tune import TuneStep
+from modules.evaluate.src.dataset.embeddings import EmbeddingDataset
+from modules.evaluate.src.trainers.torch import TorchProbeTrainer
 
 from .test_prepare import _make_workspace
 
@@ -36,7 +34,7 @@ def test_cached_probe_batches_transfer_only_each_requested_batch():
     features = torch.arange(20, dtype=torch.float32).reshape(5, 4)
     labels = torch.arange(5)
     loader = _loader(features, labels)
-    step = TuneStep(TuneConfig())
+    step = TorchProbeTrainer(TuneConfig(), train_trunk=False)
 
     split = step._cached_embedding_split(loader)
 

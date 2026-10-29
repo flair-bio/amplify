@@ -22,19 +22,15 @@ from datasets import Dataset, DatasetDict
 from accelerate import Accelerator as HFAccelerator
 from accelerate.state import AcceleratorState
 
-from modules.evaluate.src.dataset.dataloader import (
-    DatasetSplitConfig,
-    ExternalTestSetConfig,
-)
-from modules.evaluate.src.dataset.workspace import (
-    EvaluationWorkspaceConfig,
-    get_evaluation_workspace,
-)
+from modules.evaluate.src.contracts.config import DatasetSplitConfig, ExternalTestSetConfig
+from modules.evaluate.src.contracts.config import EvaluationWorkspaceConfig
+from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.steps import prepare as prepare_module
-from modules.evaluate.src.dataset import resolution as resolution_module
-from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
-from modules.evaluate.src.steps.prepare import PrepareConfig, PrepareStep
-from modules.evaluate.src.utils.embed import find_embedding_dataset
+from modules.evaluate.src.dataset import dataloader as resolution_module
+from modules.evaluate.src.contracts.artifacts import PreparedArtifacts
+from modules.evaluate.src.contracts.config import PrepareConfig
+from modules.evaluate.src.steps.prepare import PrepareStep
+from modules.evaluate.src.dataset.embeddings import find_embedding_dataset
 
 from .conftest import ModelFamily, build_raw_dataset_dict, build_tiny_model
 
@@ -193,11 +189,11 @@ def test_prepare_caches_configured_final_refit_split_separately(
 class TestPrepareConfig:
     def test_defaults(self):
         cfg = PrepareConfig()
-        assert cfg.batch_size == 16
+        assert cfg.batch_size == 8
         assert cfg.label_column == "targets"
         assert cfg.sequence_column == "sequence"
-        assert cfg.dataloader_num_workers == 8
-        assert cfg.tokenize_num_proc == 8
+        assert cfg.dataloader_num_workers == 0
+        assert cfg.tokenize_num_proc == 4
 
     def test_worker_counts_can_be_tuned_independently(self):
         cfg = PrepareConfig(dataloader_num_workers=0, tokenize_num_proc=2)
@@ -326,10 +322,10 @@ class TestPrepareStepRun:
             external=external,
             embedding_cache={"enabled": True, "cache_policy": "off"},
         )
-        backend = swapped.embedding_backend
-        assert backend.trunk is prepared.embedding_backend.trunk
+        backend = swapped.embedding.backend
+        assert backend.trunk is prepared.embedding.backend.trunk
         assert backend.dataset_id == "org/ext"
-        assert backend.test_cache_key != prepared.embedding_backend.test_cache_key
+        assert backend.test_cache_key != prepared.embedding.backend.test_cache_key
         assert len(backend.token_test_dataloader.dataset) == 2
         assert len(swapped.test_dataloader.dataset) == 2
         assert len(prepared.test_dataloader.dataset) == 4

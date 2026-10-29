@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 
 from modules.core.utils.config_loader import load_and_parse
-from modules.evaluate.src.config import EvaluationConfig, LayerwiseConfig
-from modules.evaluate.src.steps.prepare import PrepareConfig
-from modules.evaluate.src.utils.embed import EmbeddingCacheConfig
+from modules.evaluate.src.contracts.config import EvaluationConfig, LayerwiseConfig
+from modules.evaluate.src.contracts.config import PrepareConfig
+from modules.evaluate.src.contracts.config import EmbeddingCacheConfig
 
 
 def _base_config_dict() -> dict:
@@ -58,40 +58,6 @@ class TestExternalTestSets:
 
 
 class TestEvaluationConfig:
-    def test_cross_validation_defaults_to_disabled_at_top_level(self):
-        config = EvaluationConfig.model_validate(_base_config_dict())
-        assert not config.cross_validation.enabled
-        assert config.cross_validation.pool_roles == ["train", "validation"]
-        assert "cross_validation" in config.model_dump()
-        assert "cross_validation" not in config.steps.model_dump()
-
-    def test_cross_validation_rejects_former_steps_location(self):
-        payload = _base_config_dict()
-        payload["steps"] = {"cross_validation": {"enabled": True}}
-        with pytest.raises(ValueError, match=r"steps\.cross_validation"):
-            EvaluationConfig.model_validate(payload)
-
-    def test_cross_validation_top_level_yaml_and_overrides(self):
-        root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
-        config = load_and_parse(
-            path=[
-                root / "config.yaml",
-                root / "tasks/sequence_classification.yaml",
-                root / "datasets/localization_prediction.yaml",
-            ],
-            model_cls=EvaluationConfig,
-            overrides=[
-                "cross_validation.enabled=true",
-                "baselines.names=[]",
-                "cross_validation.n_splits=3",
-                "steps.score.bootstrap_enabled=false",
-            ],
-        )
-        assert config.cross_validation.enabled
-        assert config.cross_validation.n_splits == 3
-        assert config.cross_validation.pool_roles == ["train", "validation"]
-        assert "cross_validation" not in config.steps.model_dump()
-
     def test_feature_extraction_defaults_to_float32_dtype(self):
         assert LayerwiseConfig().autocast_dtype == "float32"
         assert EmbeddingCacheConfig().autocast_dtype == "float32"
@@ -138,12 +104,9 @@ class TestEvaluationConfig:
         with pytest.raises(ValueError, match="max_tokens_per_batch requires"):
             EvaluationConfig.model_validate(payload)
 
-    @pytest.mark.parametrize(
-        "task_type", ["contact_prediction", "categorical_jacobian", "calibration"]
-    )
-    def test_pairwise_tasks_reject_packing(self, task_type):
+    def test_calibration_rejects_packing(self):
         payload = _base_config_dict()
-        payload["workspace"]["task_type"] = task_type
+        payload["workspace"]["task_type"] = "calibration"
         payload["steps"] = {"mode": "evaluate_as_is", "prepare": {"packed": True}}
         with pytest.raises(ValueError, match="Packed evaluation does not support"):
             EvaluationConfig.model_validate(payload)
@@ -244,8 +207,6 @@ class TestEvaluationConfig:
             ("sequence_classification", "categorical", "scalar", 2),
             ("sequence_regression", "continuous", "scalar", None),
             ("token_classification", "categorical", "per_token", 3),
-            ("contact_prediction", "categorical", "contact_pairs", None),
-            ("categorical_jacobian", "categorical", "contact_pairs", None),
             ("pseudo_perplexity", "categorical", "scalar", 2),
             ("calibration", "categorical", "consensus_profile", None),
         ],
@@ -260,7 +221,7 @@ class TestEvaluationConfig:
             label_format=label_format,
             num_labels=num_labels,
         )
-        if task_type in {"categorical_jacobian", "pseudo_perplexity", "calibration"}:
+        if task_type in {"pseudo_perplexity", "calibration"}:
             payload["steps"] = {"mode": "evaluate_as_is"}
 
         EvaluationConfig.model_validate(payload)
@@ -339,7 +300,7 @@ class TestShippedConfigOverlays:
         assert config.steps.prepare.embedding_cache.autocast_dtype == "float32"
 
         finetune = load_and_parse(
-            [*paths, self._CONFIG_ROOT / "tuning" / "mlp_finetuning.yaml"],
+            [*paths, self._CONFIG_ROOT / "predictors" / "mlp_finetuning.yaml"],
             EvaluationConfig,
         )
         assert finetune.steps.mode == "finetune"
@@ -356,14 +317,16 @@ class TestShippedConfigOverlays:
             [
                 self._CONFIG_ROOT / "config.yaml",
                 self._CONFIG_ROOT / "tasks" / "pseudo_perplexity.yaml",
-                self._CONFIG_ROOT / "datasets" / "uniprot_protparams.yaml",
+                self._CONFIG_ROOT / "datasets" / "uniprot_ur100p_test.yaml",
             ],
             EvaluationConfig,
         )
         assert config.steps.mode == "evaluate_as_is"
         assert not config.steps.prepare.embedding_cache.enabled
         split = config.steps.prepare.split
-        assert (split.train, split.validation, split.test) == ("test",) * 3
+        assert (split.train, split.validation, split.test) == (
+            "train", "validation", "test"
+        )
         assert not any(config.steps.prepare.random_truncate_by_split.values())
 
     @pytest.mark.parametrize("dataset_name", ["meltome_mixed", "meltome_human"])
@@ -393,7 +356,8 @@ class TestShippedConfigOverlays:
             ],
             EvaluationConfig,
         )
-        assert config.workspace.dataset_repo_id == "flair-bio/solubility_uesolds_original"
+        assert config.workspace.dataset_repo_id == "flair-bio/evaluation-suite"
+        assert config.workspace.dataset_config_name == "solubility_prediction"
         assert config.workspace.num_labels == 2
         assert config.steps.tune.hyperparameter_search.metric == "f1"
         assert config.steps.score.metrics == ["f1"]
@@ -405,11 +369,10 @@ class TestShippedConfigOverlays:
             ("sequence_classification", "localization_prediction"),
             ("sequence_regression", "stability_prediction"),
             ("token_classification", "ssp_q3"),
-            ("contact_prediction", "contact_prediction_binary"),
-            ("categorical_jacobian", "contact_prediction_binary"),
+            ("contact_prediction", "contact_prediction_casp"),
             ("pseudo_perplexity", "localization_prediction"),
             ("pseudo_perplexity", "ssp_q3"),
-            ("pseudo_perplexity", "contact_prediction_binary"),
+            ("pseudo_perplexity", "contact_prediction_casp"),
             ("calibration", "human_calibration"),
         ],
     )
@@ -420,6 +383,7 @@ class TestShippedConfigOverlays:
                 self._CONFIG_ROOT / "models" / "esm2_35m.yaml",
                 self._CONFIG_ROOT / "tasks" / f"{task_name}.yaml",
                 self._CONFIG_ROOT / "datasets" / f"{dataset_name}.yaml",
+                *([self._CONFIG_ROOT / "predictors/contact_embedding.yaml"] if task_name == "contact_prediction" else []),
             ],
             model_cls=EvaluationConfig,
         )
@@ -539,7 +503,7 @@ class TestShippedConfigOverlays:
                 "scalar",
             ),
             (
-                "contact_prediction_binary",
+                "contact_prediction_casp",
                 "contact_prediction",
                 "categorical",
                 "contact_pairs",
@@ -555,6 +519,7 @@ class TestShippedConfigOverlays:
                 self._CONFIG_ROOT / "models" / "esm2_35m.yaml",
                 self._CONFIG_ROOT / "tasks" / f"{task_type}.yaml",
                 self._CONFIG_ROOT / "datasets" / f"{dataset_name}.yaml",
+                *([self._CONFIG_ROOT / "predictors/contact_embedding.yaml"] if task_type == "contact_prediction" else []),
             ],
             model_cls=EvaluationConfig,
         )

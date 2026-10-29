@@ -7,18 +7,22 @@ from typing import Any, ClassVar
 from transformers import AutoModelForSequenceClassification
 
 from modules.evaluate.src.metrics import metrics
-from modules.evaluate.src.tasks.base import MetricFn, TaskHandler
+from modules.evaluate.src.tasks.base import FlatMetricsTask, MetricFn
 from modules.evaluate.src.tasks.registry import register_task
 
 
 @register_task
-class SequenceClassificationTask(TaskHandler):
+class SequenceClassificationTask(FlatMetricsTask):
     """One class label per sequence.
 
     The default metric set is accuracy, F1, MCC, and ROC-AUC. Precision and
     recall are available through task-specific metric extensions when needed.
     MCC is included because it is informative for imbalanced classes.
     """
+
+    supports_layerwise = True
+    dataset_baselines = frozenset({"majority_class"})
+    prediction_baselines = frozenset({"majority_class"})
 
     name = "sequence_classification"
     auto_model_class = AutoModelForSequenceClassification

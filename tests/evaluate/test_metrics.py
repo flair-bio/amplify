@@ -8,14 +8,7 @@ import numpy as np
 import pytest
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-from modules.evaluate.src.metrics.metrics import (
-    UndefinedMetricError,
-    _binary_roc_auc,
-    _mcc_score,
-    average_precision,
-    multilabel_mcc,
-    roc_auc,
-)
+from modules.evaluate.src.metrics.metrics import UndefinedMetricError, _binary_roc_auc, _mcc_score, average_precision, multilabel_mcc, roc_auc
 from modules.evaluate.src.tasks import get_task
 
 

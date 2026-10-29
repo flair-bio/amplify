@@ -5,24 +5,30 @@ Importing this package registers every built-in task type. Always import
 handler modules are guaranteed to have been imported.
 """
 
-from modules.evaluate.src.tasks.base import TaskHandler
-from modules.evaluate.src.tasks.registry import (
-    available_tasks,
-    get_task,
-    register_task,
-)
-
 # Imported for their @register_task side effect.
-from modules.evaluate.src.tasks import (  # noqa: F401  (isort: skip)
-    calibration,
-    categorical_jacobian,
-    contact_prediction,
-    pseudo_perplexity,
-    sequence_classification,
-    sequence_multilabel_classification,
-    sequence_regression,
-    token_classification,
+from modules.evaluate.src.tasks import (
+    calibration as calibration,
 )
+from modules.evaluate.src.tasks import (
+    contact_prediction as contact_prediction,
+)
+from modules.evaluate.src.tasks import (
+    pseudo_perplexity as pseudo_perplexity,
+)
+from modules.evaluate.src.tasks import (
+    sequence_classification as sequence_classification,
+)
+from modules.evaluate.src.tasks import (
+    sequence_multilabel_classification as sequence_multilabel_classification,
+)
+from modules.evaluate.src.tasks import (
+    sequence_regression as sequence_regression,
+)
+from modules.evaluate.src.tasks import (
+    token_classification as token_classification,
+)
+from modules.evaluate.src.tasks.base import TaskHandler
+from modules.evaluate.src.tasks.registry import available_tasks, get_task, register_task
 
 __all__ = [
     "TaskHandler",

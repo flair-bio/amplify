@@ -1,6 +1,6 @@
 """Cartoons of the 13 Biomap-research datasets: what each one asks about a protein.
 
-Mirrors modules/evaluate/configs/dataset_sourcing/source_biomap_datasets.yaml (dataset list),
+Mirrors modules/evaluate/scripts/dataset_sourcing/configs/source_biomap_datasets.yaml (dataset list),
 configs/datasets/<name>.yaml (task per dataset) and the upstream biomap-research dataset cards
 (label meanings). Readout chips are illustrative example values; purple chips are classes,
 green chips are numbers. Fold icons, secondary-structure letters, GB1 variants and their bar heights,

@@ -12,23 +12,21 @@ import polars as pl
 import pytest
 from datasets import Dataset, DatasetDict
 
-from modules.evaluate.src.config import LayerwiseConfig
-from modules.evaluate.src.dataset import resolution
-from modules.evaluate.src.dataset.dataloader import ExternalTestSetConfig
-from modules.evaluate.src.dataset.workspace import (
-    DatasetWorkspaceConfig,
-    get_evaluation_workspace,
-)
+from modules.evaluate.src.contracts.config import LayerwiseConfig
+from modules.evaluate.src.dataset import dataloader
+from modules.evaluate.src.contracts.config import ExternalTestSetConfig
+from modules.evaluate.src.contracts.config import DatasetWorkspaceConfig
+from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.runners import baselines as runner
-from modules.evaluate.src.runners.baselines import BaselineRunConfig, run_baselines
-from modules.evaluate.src.schemas.artifacts import EvaluationMetadata, PredictOutput
-from modules.evaluate.src.steps.predict import (
-    PredictConfig,
-    PredictStep,
-    persist_predictions,
-)
-from modules.evaluate.src.steps.score import ScoreConfig, ScoreStep
-from modules.evaluate.src.utils.baselines import (
+from modules.evaluate.src.contracts.config_loader import load_baseline_config
+from modules.evaluate.src.contracts.config import BaselineRunConfig
+from modules.evaluate.src.runners.baselines import run_baselines
+from modules.evaluate.src.contracts.artifacts import EvaluationMetadata, PredictOutput
+from modules.evaluate.src.contracts.config import PredictConfig
+from modules.evaluate.src.steps.predict import PredictStep, persist_predictions
+from modules.evaluate.src.contracts.config import ScoreConfig
+from modules.evaluate.src.steps.score import ScoreStep
+from modules.evaluate.src.dataset.baseline_data import (
     align_baseline,
     artifact_directory,
     baseline_context,
@@ -37,6 +35,57 @@ from modules.evaluate.src.utils.baselines import (
 
 from .conftest import build_raw_dataset_dict
 from .test_prepare import _make_workspace, _run_prepare
+
+
+def test_legacy_baseline_configuration_is_normalized_once():
+    with pytest.warns(DeprecationWarning, match="predict.baselines"):
+        config = PredictConfig(controls=["scrambled_labels", "majority_class"])
+    assert config.controls == ["scrambled_labels"]
+    assert config.baselines == ["majority_class"]
+    assert config.conditions == ["scrambled_labels", "majority_class"]
+    restored = PredictConfig.model_validate(config.model_dump())
+    assert restored == config
+
+
+def test_duplicate_legacy_and_explicit_baseline_is_rejected():
+    with (
+        pytest.warns(DeprecationWarning),
+        pytest.raises(ValueError, match="duplicates"),
+    ):
+        PredictConfig(controls=["majority_class"], baselines=["majority_class"])
+
+
+@pytest.mark.parametrize(
+    "payload", [{"controls": None}, {"baselines": 1}, {"controls": [["random_trunk"]]}]
+)
+def test_invalid_condition_types_keep_schema_validation_errors(payload):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        PredictConfig.model_validate(payload)
+
+
+def test_inline_baseline_requests_survive_prediction_manifest_reload(tmp_path):
+    workspace = _make_workspace(tmp_path, "sequence_classification")
+    workspace.setup_directories()
+    config = PredictConfig(controls=[], baselines=["majority_class"])
+    baseline = pl.DataFrame({"id": ["protein"], "prediction": [1]})
+    output = PredictOutput(
+        metadata=EvaluationMetadata(
+            model_name=workspace.model_name,
+            dataset_name=workspace.dataset_name,
+            task_type=workspace.task_type,
+            seed=workspace.seed,
+        ),
+        predictions=baseline.with_columns(pl.lit(1).alias("label")),
+        controls={"majority_class": baseline},
+        requested_controls=config.conditions,
+        config=config.model_dump(mode="json"),
+    )
+    persist_predictions(workspace, output, workspace.seed)
+    restored = ScoreStep.load_predict_output(workspace)
+    assert restored.requested_controls == ["majority_class"]
+    assert restored.controls["majority_class"].to_dicts() == baseline.to_dicts()
 
 
 def _data(regression=False):
@@ -123,7 +172,7 @@ def test_standalone_baseline_reuses_predictions_and_never_fits_validation(
 def test_short_hash_collisions_reject_different_full_identities(
     tmp_path, monkeypatch, role
 ):
-    from modules.evaluate.src.utils import baselines
+    from modules.evaluate.src.dataset import baseline_data as baselines
 
     original_hash = baselines.identity_hash
     monkeypatch.setattr(
@@ -141,7 +190,9 @@ def test_short_hash_collisions_reject_different_full_identities(
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("change", ["train", "test", "split", "task_classes"])
+@pytest.mark.parametrize(
+    "change", ["train", "test", "split", "task_classes", "config", "revision"]
+)
 def test_identity_changes_with_data_and_protocol(tmp_path, change):
     config, data = _config(tmp_path), _data()
     context = _context(config, data)
@@ -152,6 +203,10 @@ def test_identity_changes_with_data_and_protocol(tmp_path, change):
         )
     elif change == "split":
         config.prepare.split.train = "another_source"
+    elif change == "config":
+        config.workspace.dataset_config_name = "another_dataset"
+    elif change == "revision":
+        config.workspace.dataset_revision = "a" * 40
     else:
         config.workspace.num_labels = 4
     changed = _context(config, data)
@@ -178,7 +233,7 @@ def test_external_baseline_keeps_source_training_prior(tmp_path, monkeypatch):
         }
     )
     config.external_test_sets[0].split = "holdout"
-    monkeypatch.setattr(resolution, "load_raw_evaluation_dataset", lambda _: external)
+    monkeypatch.setattr(dataloader, "load_raw_evaluation_dataset", lambda _: external)
     paths = run_baselines(config, dataset=data)
     frame = pl.read_parquet(paths["external/heldout"]["majority_class"])
     assert frame["prediction"].to_list() == [1]
@@ -190,6 +245,38 @@ def test_external_baseline_keeps_source_training_prior(tmp_path, monkeypatch):
     )
     assert manifest["identity"]["test"]["dataset"] == "org/heldout"
     assert manifest["identity"]["fit"] == _context(config, data)["fit"]
+
+
+def test_suite_baseline_loads_main_and_external_configurations(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    config.workspace.dataset_repo_id = "org/suite"
+    config.workspace.dataset_config_name = "main"
+    config.workspace.dataset_revision = "a" * 40
+    config.external_test_sets = [
+        ExternalTestSetConfig(
+            name="heldout",
+            dataset_repo_id="org/suite",
+            dataset_config_name="heldout",
+            dataset_revision="a" * 40,
+        )
+    ]
+    loader = Mock(return_value=_data())
+    monkeypatch.setattr(dataloader, "load_dataset", loader)
+    outputs = run_baselines(config)
+    assert [call.kwargs for call in loader.call_args_list] == [
+        {"name": "main", "revision": "a" * 40},
+        {"name": "heldout", "revision": "a" * 40},
+    ]
+    assert "external/heldout" in outputs
+    main_manifest = json.loads(
+        outputs["test"]["majority_class"].with_name("manifest.json").read_text()
+    )
+    external_manifest = json.loads(
+        outputs["external/heldout"]["majority_class"]
+        .with_name("manifest.json").read_text()
+    )
+    assert main_manifest["identity"]["test"] != external_manifest["identity"]["test"]
+    assert main_manifest["identity"]["fit"] == external_manifest["identity"]["fit"]
 
 
 @pytest.mark.parametrize("regression", [False, True])
@@ -327,7 +414,7 @@ def test_invalid_training_targets_rejected(tmp_path, targets):
 
 def test_baseline_cli_uses_data_subset_without_model_validation(tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
-    config = runner.load_baseline_config(
+    config = load_baseline_config(
         [root / "config.yaml", root / "datasets/solubility_prediction.yaml"],
         ["steps.mode=not_a_model_mode", "workspace.model_name=null"],
     )
@@ -338,9 +425,9 @@ def test_baseline_cli_uses_data_subset_without_model_validation(tmp_path, monkey
     monkeypatch.setattr(
         "sys.argv", ["run_evaluate.py", "--baselines", str(root / "config.yaml")]
     )
-    monkeypatch.setattr(runner, "load_baseline_config", lambda *args: config)
+    monkeypatch.setattr(run_evaluate, "load_baseline_config", lambda *args: config)
     run = Mock(return_value={})
-    monkeypatch.setattr(runner, "run_baselines", run)
+    monkeypatch.setattr(run_evaluate, "run_baselines", run)
     monkeypatch.setattr(
         run_evaluate,
         "Accelerator",
@@ -355,13 +442,12 @@ def test_baseline_cli_uses_data_subset_without_model_validation(tmp_path, monkey
     [
         (["baselines.names=[train_mean]"], "sequence_regression"),
         (["baselines.names=[majority_class,majority_class]"], "duplicates"),
-        (["cross_validation.enabled=true"], "non-CV"),
     ],
 )
 def test_baseline_route_rejects_unsupported_requests(overrides, match):
     root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
     with pytest.raises(ValueError, match=match):
-        runner.load_baseline_config(
+        load_baseline_config(
             [root / "config.yaml", root / "datasets/solubility_prediction.yaml"],
             overrides,
         )

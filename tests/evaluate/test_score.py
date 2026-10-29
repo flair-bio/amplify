@@ -24,49 +24,99 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from modules.evaluate.src.dataset.collator import (
-    EvaluationCollator,
-    EvaluationCollatorConfig,
-)
-from modules.evaluate.src.dataset.dataloader import (
-    DataLoaderConfig,
-    build_dataloaders,
-    tokenize_dataset,
-)
-from modules.evaluate.src.dataset.workspace import (
-    EvaluationWorkspaceConfig,
-    get_evaluation_workspace,
-)
-from modules.evaluate.src.metrics.metrics import (
-    _mcc_score,
-    average_precision,
-    multilabel_mcc,
-    roc_auc,
-)
-from modules.evaluate.src.schemas.artifacts import (
-    EvaluationMetadata,
-    PredictOutput,
-    PreparedArtifacts,
-)
-from modules.evaluate.src.steps.predict import PredictConfig, PredictStep
-from modules.evaluate.src.steps.score import ScoreConfig, ScoreStep
+from modules.evaluate.src.dataset.collator import EvaluationCollator, EvaluationCollatorConfig
+from modules.evaluate.src.dataset.dataloader import DataLoaderConfig, build_dataloaders, tokenize_dataset
+from modules.evaluate.src.contracts.config import EvaluationWorkspaceConfig
+from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
+from modules.evaluate.src.metrics.metrics import _mcc_score, average_precision, multilabel_mcc, roc_auc
+from modules.evaluate.src.contracts.artifacts import EvaluationMetadata, PredictOutput, PreparedArtifacts, StructuredScoreOutput
+from modules.evaluate.src.contracts.config import PredictConfig
+from modules.evaluate.src.steps.predict import PredictStep
+from modules.evaluate.src.contracts.config import ScoreConfig
+from modules.evaluate.src.steps.score import ScoreStep
 from modules.evaluate.src.tasks import get_task
-from modules.evaluate.src.utils.bootstrap import (
-    as_indexable_array,
-    benjamini_hochberg,
-    bootstrap_indices,
-    ci_stats,
-    confusion_scores,
-    full_scores,
-    id_groups,
-    permutation_p_values,
-    summarize_controls,
-    token_confusion_matrices,
-)
+from modules.evaluate.src.metrics.bootstrap import as_indexable_array, bootstrap_indices, ci_stats, confusion_scores, full_scores, id_groups, token_confusion_matrices
+from modules.evaluate.src.metrics.comparisons import benjamini_hochberg, permutation_p_values, summarize_controls
 from modules.evaluate.src.utils.io import write_parquet
-from modules.evaluate.src.utils.long_format import build_long_df, upsert_long_df
+from modules.evaluate.src.metrics.tables import build_long_df, upsert_long_df
 
 from .conftest import ModelFamily, build_raw_dataset_dict, build_tiny_model
+
+
+def test_task_scoring_reuses_controls_without_publishing(monkeypatch):
+    from modules.evaluate.src.metrics import scoring
+
+    task = get_task("sequence_classification", 2)
+    labels = [0, 1, 1, 0, 1, 0]
+    predictions = [0, 0, 1, 1, 1, 0]
+    output = PredictOutput(
+        metadata=EvaluationMetadata(
+            model_name="toy", dataset_name="toy", task_type=task.name,
+        ),
+        predictions=pl.DataFrame(
+            {"id": list(range(len(labels))), "prediction": predictions, "label": labels}
+        ),
+        requested_controls=["scrambled_labels"],
+    )
+    collect = MagicMock(wraps=scoring.collect_control_arrays)
+    monkeypatch.setattr(scoring, "collect_control_arrays", collect)
+    config = ScoreConfig(
+        metrics=["accuracy"], bootstrap_enabled=True, n_samples=8, n_permutations=8,
+    )
+    result = task.score(output, config, seed=123)
+
+    assert collect.call_count == 1
+    assert set(result.condition_scores) == {"trained", "scrambled_labels"}
+    assert result.scores_path is None
+    assert result.output_path is None
+    assert result.summary_path is None
+    assert result.long_path is None
+    assert result.confidence_intervals is not None
+    assert result.control_comparisons["scrambled_labels"]
+
+    # Preserve the previous stream: label permutation precedes resampling.
+    rng = np.random.default_rng(123)
+    task.scramble_labels(labels, rng)
+    expected = []
+    for _ in range(config.n_samples):
+        indices = bootstrap_indices(len(labels), None, rng)
+        expected.append(
+            np.mean(np.asarray(predictions)[indices] == np.asarray(labels)[indices])
+        )
+    np.testing.assert_equal(result.resamples["accuracy"].to_numpy(), expected)
+
+
+def test_score_step_publishes_structured_results_without_task_specific_columns(
+    tmp_path, monkeypatch,
+):
+    from modules.evaluate.src.steps import score as score_module
+
+    metadata = EvaluationMetadata(
+        model_name="toy", dataset_name="toy", task_type="custom_structured", seed=123,
+    )
+    predictions = PredictOutput(
+        metadata=metadata,
+        predictions=pl.DataFrame({"observation": ["custom"]}),
+    )
+    result = StructuredScoreOutput(
+        metadata=metadata,
+        unit_scores=pl.DataFrame({"unit": ["a"], "custom_metric": [0.75]}),
+        summaries=pl.DataFrame({"group": ["all"], "custom_metric": [0.75]}),
+    )
+    task = MagicMock()
+    task.score.return_value = result
+    monkeypatch.setattr(score_module, "get_task", lambda *args: task)
+    workspace = _make_workspace(tmp_path, "sequence_classification")
+    config = ScoreConfig()
+
+    published = ScoreStep(config).run(workspace, seed=123, predict_result=predictions)
+
+    task.score.assert_called_once_with(predictions, config, seed=123)
+    assert published is result
+    assert pl.read_parquet(result.unit_scores_path).equals(result.unit_scores)
+    manifest = json.loads(workspace.run_manifest_path.read_text())
+    assert manifest["score"]["scores"] == result.summaries.to_dicts()
+    assert manifest["score"]["metadata"]["task_type"] == "custom_structured"
 
 
 @pytest.mark.parametrize("average", ["micro", "macro", "weighted"])
@@ -164,8 +214,8 @@ def test_score_and_bootstrap_keep_classes_missing_from_test_split(tmp_path, num_
 def test_token_confusion_bootstrap_preserves_results(
     tmp_path, monkeypatch, average, cached_rows
 ):
-    from modules.evaluate.src.steps import score as score_module
-    from modules.evaluate.src.utils import bootstrap as bootstrap_module
+    from modules.evaluate.src.metrics import scoring as score_module
+    from modules.evaluate.src.metrics import comparisons as bootstrap_module
 
     rng = np.random.default_rng(42)
     lengths = [2, 0, 7, 1, 3, 5, 2, 9]
@@ -1053,8 +1103,12 @@ class TestScoreStepBootstrap:
         assert 0.0 <= comparison["p_value_adjusted"] <= 1.0
 
         manifest = json.loads(workspace.run_manifest_path.read_text())
-        assert manifest["bootstrap"]["confidence_intervals"] == result.confidence_intervals
-        assert manifest["bootstrap"]["control_comparisons"] == result.control_comparisons
+        assert (
+            manifest["bootstrap"]["confidence_intervals"] == result.confidence_intervals
+        )
+        assert (
+            manifest["bootstrap"]["control_comparisons"] == result.control_comparisons
+        )
         assert "predict" in manifest
         assert "score" in manifest
 
@@ -1146,6 +1200,8 @@ class TestScoreStepLongDf:
     def test_written_without_bootstrap(self, tmp_path, model_family):
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
+        workspace.config.dataset_config_name = "selected"
+        workspace.config.dataset_revision = "a" * 40
         PredictStep(PredictConfig(controls=[])).run(workspace, prepared)
 
         result = ScoreStep(ScoreConfig(metrics=["accuracy", "f1"])).run(workspace)
@@ -1158,6 +1214,8 @@ class TestScoreStepLongDf:
         assert on_disk["control"].is_null().all()
         assert on_disk["model_name"].unique().to_list() == ["toy-model"]
         assert on_disk["dataset_name"].unique().to_list() == ["toy_dataset"]
+        assert on_disk["dataset_config_name"].unique().to_list() == ["selected"]
+        assert on_disk["dataset_revision"].unique().to_list() == ["a" * 40]
         assert set(on_disk.filter(pl.col("metric") == "accuracy")["value"]) == {
             result.scores["accuracy"]
         }
@@ -1200,15 +1258,14 @@ class TestScoreStepLongDf:
                 "model_repo_id": None,
                 "dataset_name": None,
                 "dataset_repo_id": None,
+                "dataset_config_name": None,
+                "dataset_revision": None,
                 "task_type": None,
                 "split": None,
                 "head_type": None,
                 "layer_index": None,
                 "variant": None,
                 "seed": None,
-                "cv_id": None,
-                "fold_id": None,
-                "split_seed": None,
                 "metric": "accuracy",
                 "control": None,
                 "value": 0.5,
@@ -1323,192 +1380,6 @@ class TestBenjaminiHochberg:
         assert benjamini_hochberg([]) == []
 
 
-@pytest.fixture
-def contact_predict_output():
-    predictions = [
-        {"scores": [0.5, 0.5, 0.8, 0.1], "separations": [6, 11, 12, 24]},
-        {"scores": [0.2, 0.9, 0.4], "separations": [6, 23, 30]},
-        {"scores": [], "separations": []},
-        {"scores": [0.7], "separations": [6]},
-    ]
-    labels = [
-        {"length": 13, "values": [1, 0, 1, 0]},
-        {"length": 3, "values": [0, 1, 1]},
-        {"length": 10, "values": []},
-        {"length": 0, "values": [1]},
-    ]
-    ids = ["a", "a", "b", "c"]
-    return PredictOutput(
-        metadata=EvaluationMetadata(
-            model_name="toy-model",
-            dataset_name="toy_dataset",
-            task_type="contact_prediction",
-        ),
-        predictions=pl.DataFrame(
-            {
-                "id": ids,
-                "prediction": predictions,
-                "label": labels,
-            }
-        ),
-        controls={
-            name: pl.DataFrame(
-                {
-                    "id": ids,
-                    "prediction": [
-                        {
-                            "scores": [value] * len(row["scores"]),
-                            "separations": row["separations"],
-                        }
-                        for row in predictions
-                    ],
-                }
-            )
-            for name, value in (("untrained", 0.25), ("separation_prior", 0.5))
-        },
-        requested_controls=["untrained", "separation_prior", "scrambled_labels"],
-    )
-
-
-@pytest.mark.parametrize("two_sided", [False, True])
-@pytest.mark.parametrize("grouped", [False, True])
-def test_cached_contact_permutations_match_predictions(
-    contact_predict_output, two_sided, grouped
-):
-    task = get_task("contact_prediction")
-    frame = contact_predict_output.predictions
-    predictions = as_indexable_array(frame["prediction"].to_list(), True)
-    labels = as_indexable_array(frame["label"].to_list(), True)
-    # Use different valid-bin masks and labels between conditions.
-    control_predictions = predictions[::-1]
-    control_labels = labels[::-1]
-    metric_names = task.default_metrics()
-    trained_scores = task.compute_per_example_metrics(predictions, labels, metric_names)
-    control_scores = task.compute_per_example_metrics(
-        control_predictions, control_labels, metric_names
-    )
-    observed = full_scores(task, predictions, labels, None, metric_names, "macro")
-    groups = id_groups(frame["id"].to_list()) if grouped else None
-
-    def compare(cached):
-        return permutation_p_values(
-            task,
-            observed,
-            predictions,
-            labels,
-            None,
-            control_predictions,
-            control_labels,
-            None,
-            metric_names,
-            32,
-            np.random.default_rng(123),
-            "macro",
-            groups=groups,
-            two_sided=two_sided,
-            trained_per_example_scores=trained_scores if cached else None,
-            control_per_example_scores=control_scores if cached else None,
-        )
-
-    assert compare(True) == compare(False)
-    with pytest.raises(ValueError, match="Both conditions"):
-        permutation_p_values(
-            task,
-            observed,
-            predictions,
-            labels,
-            None,
-            control_predictions,
-            control_labels,
-            None,
-            metric_names,
-            1,
-            np.random.default_rng(123),
-            "macro",
-            trained_per_example_scores=trained_scores,
-        )
-
-
-@pytest.mark.parametrize("bootstrap_enabled", [False, True])
-@pytest.mark.parametrize("degenerate", [False, True])
-def test_contact_score_cache_preserves_outputs_and_avoids_recomputation(
-    tmp_path, monkeypatch, contact_predict_output, bootstrap_enabled, degenerate
-):
-    task_type = type(get_task("contact_prediction"))
-    if degenerate:
-        # None of these metrics has an eligible pair in the chosen bin.
-        frame = contact_predict_output.predictions
-        contact_predict_output.predictions = frame.with_columns(
-            pl.Series(
-                "prediction",
-                [
-                    {"scores": row["scores"], "separations": [1] * len(row["scores"])}
-                    for row in frame["prediction"].to_list()
-                ],
-            )
-        )
-    config = ScoreConfig(
-        bootstrap_enabled=bootstrap_enabled,
-        n_samples=16,
-        n_permutations=16,
-    )
-
-    def run(name):
-        workspace = get_evaluation_workspace(
-            EvaluationWorkspaceConfig(
-                run_id="test",
-                model_name="toy-model",
-                dataset_name="toy_dataset",
-                task_type="contact_prediction",
-                target_type="categorical",
-                label_format="contact_pairs",
-                base_path=str(tmp_path / name),
-            )
-        )
-        workspace.setup_directories()
-        return ScoreStep(config).run(
-            workspace, seed=123, predict_result=contact_predict_output
-        )
-
-    with monkeypatch.context() as uncached:
-        uncached.setattr(
-            task_type, "compute_per_example_metrics", lambda *args, **kwargs: None
-        )
-        expected = run("uncached")
-
-    metric_spies = {
-        name: MagicMock(wraps=metric) for name, metric in task_type.metrics.items()
-    }
-    monkeypatch.setattr(task_type, "metrics", metric_spies)
-    actual = run("cached")
-
-    np.testing.assert_equal(actual.scores, expected.scores)
-    if bootstrap_enabled:
-        assert actual.resamples.equals(expected.resamples)
-        np.testing.assert_equal(
-            actual.confidence_intervals, expected.confidence_intervals
-        )
-        np.testing.assert_equal(
-            actual.control_comparisons, expected.control_comparisons
-        )
-    actual_long = pl.read_parquet(actual.long_path)
-    expected_long = pl.read_parquet(expected.long_path)
-    assert actual_long.equals(expected_long)
-    manifest = (
-        json.loads(actual.summary_path.read_text()) if bootstrap_enabled else None
-    )
-    if manifest is not None:
-        assert "bootstrap" in manifest
-    # Cached per-protein scores plus one full-test call per reported control.
-    conditions = 4 if bootstrap_enabled else 1
-    for metric in metric_spies.values():
-        assert (
-            metric.call_count
-            == contact_predict_output.predictions.height * conditions
-            + len(contact_predict_output.requested_controls)
-        )
-
-
 @pytest.mark.parametrize(
     "task_name",
     [
@@ -1562,7 +1433,7 @@ def test_classification_scoring_preserves_list_metrics(task_name, average):
 def test_shared_control_labels_preserve_bootstrap_results(
     tmp_path, monkeypatch, task_name
 ):
-    from modules.evaluate.src.steps import score as score_module
+    from modules.evaluate.src.metrics import scoring as score_module
 
     if task_name == "sequence_multilabel_classification":
         labels = [[1, 0, 1], [0, 1, 0], [0, 0, 1], [1, 1, 0], [1, 0, 0], [0, 1, 1]]

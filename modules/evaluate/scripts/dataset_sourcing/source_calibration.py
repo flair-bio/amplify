@@ -22,18 +22,22 @@ import polars as pl
 from pydantic import Field, model_validator
 
 from modules.core.utils.hf_download import resolve_hf_token
-from modules.evaluate.src.dataset_sourcing.config import DatasetSourcingConfig
-from modules.evaluate.src.dataset_sourcing.hf_io import upload_dataset_artifact
-from modules.evaluate.src.dataset_sourcing.outputs import (
+from modules.evaluate.scripts.dataset_sourcing.shared.config import (
+    DatasetSourcingConfig,
+)
+from modules.evaluate.scripts.dataset_sourcing.shared.hf_io import (
+    upload_dataset_artifact,
+)
+from modules.evaluate.scripts.dataset_sourcing.shared.outputs import (
     generated_utc_date,
     write_dataset_stats,
     write_hf_split_files,
 )
-from modules.evaluate.src.dataset_sourcing.pipeline import (
+from modules.evaluate.scripts.dataset_sourcing.shared.pipeline import (
     prepare_output_dir,
     run_script,
 )
-from modules.evaluate.src.model.categorical_jacobian import CANONICAL_AMINO_ACIDS
+from modules.evaluate.src.utils.amino_acids import CANONICAL_AMINO_ACIDS
 
 logger = logging.getLogger(__name__)
 

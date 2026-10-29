@@ -14,114 +14,36 @@ import json
 import logging
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
-import numpy as np
 import polars as pl
-from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from modules.evaluate.src.dataset.workspace import EvaluationWorkspace
-from modules.evaluate.src.schemas.artifacts import (
-    ConfidenceInterval,
-    EvaluationMetadata,
+from modules.evaluate.src.contracts.artifacts import (
     PredictOutput,
     ScoreOutput,
+    StructuredScoreOutput,
 )
-from modules.evaluate.src.tasks import get_task
-from modules.evaluate.src.utils.baselines import (
+from modules.evaluate.src.contracts.config import ScoreConfig
+from modules.evaluate.src.dataset.baseline_data import (
     align_baseline,
     artifact_identity,
     load_baseline_artifact,
 )
-from modules.evaluate.src.utils.bootstrap import (
-    as_indexable_array,
-    benjamini_hochberg,
-    bootstrap_confusion_scores,
-    bootstrap_indices,
-    ci_stats,
-    collect_control_arrays,
-    confusion_scores,
-    full_scores,
-    id_groups,
-    permutation_p_values,
-    summarize_controls,
-    token_confusion_matrices,
-)
+from modules.evaluate.src.dataset.workspace import EvaluationWorkspace
+from modules.evaluate.src.metrics.scoring import compare_layer_scores
+from modules.evaluate.src.metrics.tables import upsert_long_df
+from modules.evaluate.src.tasks import get_task
+from modules.evaluate.src.tasks.registry import get_flat_task
 from modules.evaluate.src.utils.io import (
     update_run_manifest,
     write_parquet,
+    write_settings_json,
 )
-from modules.evaluate.src.utils.long_format import build_long_df, upsert_long_df
 from modules.evaluate.src.utils.tracking import log_wandb
 
 logger = logging.getLogger(__name__)
 
-# Minimum n_samples below which bootstrap confidence intervals and
-# trained-vs-control p-values are too coarse/unstable to support a claim of
-# statistical significance: with n resamples, the smallest achievable
-# nonzero p-value is 1/n, and percentile-based CIs need enough resamples to
-# actually populate their tails rather than interpolating from a handful of
-# points. 1000 matches standard bootstrap guidance (Efron & Tibshirani).
-_MIN_RECOMMENDED_BOOTSTRAP_SAMPLES = 1000
-
-# Permutation p-value resolution is 1/(n+1) regardless of bootstrap n_samples,
-# and Benjamini-Hochberg across controls raises the smallest achievable
-# adjusted value further, so this needs the same order of magnitude as the CI.
-_DEFAULT_N_PERMUTATIONS = 1000
-
 LAYERWISE_COMPARISON_FILENAME = "layerwise_comparison.parquet"
-
-
-class ScoreConfig(BaseModel):
-    """Config. for the score step in evaluation."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    metrics: list[str] | None = None
-    metric_aggregation: Literal["micro", "macro", "weighted", "samples"] = "weighted"
-
-    # Bootstrap confidence intervals / control comparisons are optional
-    # on top of the (always-computed) point-estimate metrics above. Default
-    # n_samples matches _MIN_RECOMMENDED_BOOTSTRAP_SAMPLES rather than an
-    # arbitrarily small number, so enabling bootstrap without also setting
-    # n_samples doesn't silently produce CIs/p-values too coarse to trust.
-    bootstrap_enabled: bool = False
-    n_samples: int = Field(_MIN_RECOMMENDED_BOOTSTRAP_SAMPLES, gt=0)
-    n_permutations: int = Field(_DEFAULT_N_PERMUTATIONS, gt=0)
-    output_filename: str = "bootstrap_results.parquet"
-    confidence_interval: float = Field(0.95, gt=0.0, lt=1.0)
-
-    # Tidy/long-format sidecar (see ``build_long_df``), written on every run
-    # (with or without bootstrap) so downstream plotting/aggregation code has
-    # a single, concatenable artifact per (model, dataset) run regardless of
-    # which optional outputs above were enabled.
-    long_filename: str = "scores_long.parquet"
-
-    @model_validator(mode="after")
-    def _warn_if_resamples_too_low_for_significance(self) -> ScoreConfig:
-        if not self.bootstrap_enabled:
-            return self
-        if self.n_samples < _MIN_RECOMMENDED_BOOTSTRAP_SAMPLES:
-            logger.warning(
-                "ScoreConfig.n_samples=%d is well below the %d resamples "
-                "generally recommended for reliable bootstrap confidence "
-                "intervals (percentile intervals are estimated from only %d "
-                "points). Do not use these results to support a claim of "
-                "statistical significance without increasing n_samples.",
-                self.n_samples,
-                _MIN_RECOMMENDED_BOOTSTRAP_SAMPLES,
-                self.n_samples,
-            )
-        if self.n_permutations < _DEFAULT_N_PERMUTATIONS:
-            logger.warning(
-                "ScoreConfig.n_permutations=%d floors every trained-vs-control "
-                "p-value at 1/(n_permutations+1)=%.4f before Benjamini-Hochberg "
-                "correction across controls raises it further; the conventional "
-                "0.05/0.01 thresholds may be unreachable.",
-                self.n_permutations,
-                1.0 / (self.n_permutations + 1),
-            )
-        return self
 
 
 class ScoreStep:
@@ -133,26 +55,12 @@ class ScoreStep:
         workspace: EvaluationWorkspace,
         seed: int = 710019,
         predict_result: PredictOutput | None = None,
-    ) -> ScoreOutput:
-        """Score the trained model's predictions for *workspace*.
-
-        Runs as a plain, single (Rank 0) process. When *predict_result* is
-        provided, scoring uses that already-gathered in-memory result and
-        avoids reloading prediction/control Parquet files. Otherwise it
-        reconstructs the result from the run manifest for standalone or
-        restartable scoring.
-        """
+    ) -> ScoreOutput | StructuredScoreOutput:
+        """Load predictions, invoke the task's scoring protocol, and publish."""
         logger.info("Running Score step...")
-
         if predict_result is None:
             predict_result = self.load_predict_output(workspace)
-
-        if predict_result.predictions.is_empty():
-            raise ValueError(
-                "ScoreStep requires PredictOutput.predictions to be "
-                "populated (run the Predict step before scoring)."
-            )
-
+        task = get_task(predict_result.metadata.task_type, workspace.num_labels)
         predictions_df = predict_result.predictions
         baseline_references: dict[str, dict[str, Any]] = {}
         if predict_result.baseline_context:
@@ -167,7 +75,7 @@ class ScoreStep:
                 controls[name] = align_baseline(
                     frame,
                     predictions_df,
-                    regression=workspace.task_type == "sequence_regression",
+                    regression="continuous" in task.accepted_target_types,
                 )
                 requested_controls.append(name)
                 baseline_references[name] = {
@@ -179,67 +87,35 @@ class ScoreStep:
             predict_result = replace(
                 predict_result, controls=controls, requested_controls=requested_controls
             )
-        predictions_col = predictions_df["prediction"].to_list()
-        labels_col = predictions_df["label"].to_list()
-        probabilities_col = (
-            predictions_df["probability"].to_list()
-            if "probability" in predictions_df.columns
-            else None
-        )
-
-        task = get_task(workspace.task_type, workspace.num_labels)
-        metric_names = self.config.metrics or task.default_metrics()
-        logger.info("Computing metrics: %s", metric_names)
-        trained_per_example_scores = task.compute_per_example_metrics(
-            predictions_col,
-            labels_col,
-            metric_names,
-            self.config.metric_aggregation,
-            probabilities_col,
-        )
-        scores = full_scores(
-            task,
-            predictions_col,
-            labels_col,
-            probabilities_col,
-            metric_names,
-            self.config.metric_aggregation,
-            per_example_scores=trained_per_example_scores,
-        )
-        undefined = sorted(name for name, value in scores.items() if np.isnan(value))
-        if undefined:
-            logger.warning(
-                "Metric(s) %s are undefined on this test split (e.g. a class "
-                "absent from the labels) and are recorded as NaN.",
-                undefined,
+        result = task.score(predict_result, self.config, seed=seed)
+        if isinstance(result, StructuredScoreOutput):
+            return self._publish_structured_scores(
+                result=result,
+                output_dir=workspace.scores_path,
+                manifest_path=workspace.run_manifest_path,
             )
-        logger.info("Scores: %s", scores)
+        return self._publish_flat_scores(
+            workspace, result, baseline_references, seed=seed
+        )
 
-        config_dict = self.config.model_dump(mode="json")
-        layer_index = predict_result.metadata.layer_index
+    def _publish_flat_scores(
+        self,
+        workspace: EvaluationWorkspace,
+        result: ScoreOutput,
+        baseline_references: dict[str, dict[str, Any]],
+        *,
+        seed: int,
+    ) -> ScoreOutput:
+        metadata_dict = (
+            result.metadata.model_dump(mode="json") if result.metadata else {}
+        )
+        layer_index = result.metadata.layer_index if result.metadata else None
         wandb_prefix = "test" if layer_index is None else f"test/layer_{layer_index}"
-        log_wandb({f"{wandb_prefix}/{name}": value for name, value in scores.items()})
-        metadata_dict = predict_result.metadata.model_dump(mode="json")
-        condition_scores = {"trained": scores}
-        control_arrays = collect_control_arrays(
-            predict_result,
-            predictions_col,
-            labels_col,
-            probabilities_col,
-            np.random.default_rng(seed),
-            task,
+        log_wandb(
+            {f"{wandb_prefix}/{name}": value for name, value in result.scores.items()}
         )
-        for name, (predictions, labels, probabilities) in control_arrays.items():
-            condition_scores[name] = full_scores(
-                task,
-                predictions,
-                labels,
-                probabilities,
-                metric_names,
-                self.config.metric_aggregation,
-            )
         for name, reference in baseline_references.items():
-            reference["scores"] = condition_scores[name]
+            reference["scores"] = result.condition_scores[name]
         condition_scores_path = write_parquet(
             pl.DataFrame(
                 [
@@ -249,58 +125,45 @@ class ScoreStep:
                         "metric": metric,
                         "score": value,
                     }
-                    for condition, metrics in condition_scores.items()
+                    for condition, metrics in result.condition_scores.items()
                     for metric, value in metrics.items()
                 ]
             ),
             workspace.run_root / "condition_scores.parquet",
         )
-        scores_path = update_run_manifest(
+        result.scores_path = update_run_manifest(
             workspace.run_manifest_path,
             "score",
             {
                 "metadata": metadata_dict,
-                "config": config_dict,
-                "scores": scores,
+                "config": result.config,
+                "scores": result.scores,
                 "baselines": baseline_references,
                 "condition_scores_path": str(condition_scores_path),
             },
         )
-
-        result = ScoreOutput(
-            scores=scores,
-            metadata=predict_result.metadata,
-            scores_path=scores_path,
-            config=config_dict,
-        )
-
-        if self.config.bootstrap_enabled:
-            self._run_bootstrap(
-                workspace,
-                predict_result,
-                predictions_col,
-                labels_col,
-                probabilities_col,
-                metric_names,
-                seed,
-                result,
-                metadata_dict,
-                trained_per_example_scores=trained_per_example_scores,
+        if result.resamples is not None:
+            result.output_path = write_parquet(
+                result.resamples, workspace.stats_path / self.config.output_filename
             )
-
-        long_df = build_long_df(
-            result.metadata,
-            result.scores,
-            result.confidence_intervals,
-            result.control_comparisons,
-        )
+            result.summary_path = update_run_manifest(
+                workspace.run_manifest_path,
+                "bootstrap",
+                {
+                    "seed": seed,
+                    "config": result.config,
+                    "metadata": metadata_dict,
+                    "confidence_intervals": result.confidence_intervals,
+                    "control_comparisons": result.control_comparisons or {},
+                },
+            )
+            logger.info("Bootstrap summary written to %s", result.summary_path)
         long_path = workspace.comparison_path / self.config.long_filename
-        variant = result.metadata.variant if result.metadata is not None else None
-        split = result.metadata.split if result.metadata is not None else None
-        combined_long_df = upsert_long_df(long_path, long_df, variant, split)
-        result.long_df = combined_long_df
-        result.long_path = write_parquet(combined_long_df, long_path)
-
+        variant = result.metadata.variant if result.metadata else None
+        split = result.metadata.split if result.metadata else None
+        assert result.long_df is not None
+        result.long_df = upsert_long_df(long_path, result.long_df, variant, split)
+        result.long_path = write_parquet(result.long_df, long_path)
         return result
 
     def compare_layers(
@@ -309,152 +172,23 @@ class ScoreStep:
         layer_predictions: dict[int, PredictOutput],
         seed: int = 710019,
     ) -> Path | None:
-        """Compare each probed layer with the deepest one on the same test rows.
-
-        The reference is fixed in advance rather than picked on test scores.
-        Bootstrap resamples share row indices across layers, giving paired
-        difference intervals (``layer - reference``). Two-sided permutation
-        p-values are Benjamini-Hochberg adjusted across layers per metric.
-        Rows sharing a source ID (cached residues) are resampled together.
-        Returns None when fewer than two layers were probed.
-        """
-        if len(layer_predictions) < 2:
-            return None
-        task = get_task(workspace.task_type, workspace.num_labels)
-        metric_names = self.config.metrics or task.default_metrics()
-        average = self.config.metric_aggregation
-        reference = max(layer_predictions)
-        reference_ids = layer_predictions[reference].predictions["id"].to_list()
-        arrays: dict[int, tuple[Any, Any, Any | None]] = {}
-        for layer, output in layer_predictions.items():
-            frame = output.predictions
-            if frame["id"].to_list() != reference_ids:
-                raise ValueError(
-                    f"Layer {layer} predictions are not row-aligned with layer "
-                    f"{reference}."
-                )
-            arrays[layer] = (
-                as_indexable_array(frame["prediction"].to_list(), task.is_ragged),
-                as_indexable_array(frame["label"].to_list(), task.is_ragged),
-                as_indexable_array(frame["probability"].to_list(), ragged=False)
-                if "probability" in frame.columns
-                else None,
-            )
-        others = sorted(layer for layer in arrays if layer != reference)
-        rng = np.random.default_rng(seed)
-        n_examples = len(reference_ids)
-        groups = id_groups([task.bootstrap_group_id(i) for i in reference_ids])
-        confusions = token_confusion_matrices(
-            task,
-            {str(layer): values for layer, values in arrays.items()},
-            groups,
-            metric_names,
-            average,
+        """Publish paired comparisons with the preselected deepest layer."""
+        comparison = compare_layer_scores(
+            get_flat_task(workspace.task_type, workspace.num_labels),
+            self.config,
+            layer_predictions,
+            variant=workspace.variant,
+            seed=seed,
         )
-        differences: dict[int, dict[str, list[float]]] = {
-            layer: {name: [] for name in metric_names} for layer in others
-        }
-        for _ in range(self.config.n_samples):
-            if confusions is not None:
-                sampled = bootstrap_confusion_scores(
-                    confusions,
-                    metric_names,
-                    average,
-                    rng,
-                    include_absent=task.class_labels is not None,
-                )
-                resampled = {layer: sampled[str(layer)] for layer in arrays}
-            else:
-                idx = bootstrap_indices(n_examples, groups, rng)
-                resampled = {
-                    layer: full_scores(
-                        task,
-                        predictions[idx],
-                        labels[idx],
-                        None if probabilities is None else probabilities[idx],
-                        metric_names,
-                        average,
-                    )
-                    for layer, (predictions, labels, probabilities) in arrays.items()
-                }
-            for layer in others:
-                for name in metric_names:
-                    differences[layer][name].append(
-                        resampled[layer][name] - resampled[reference][name]
-                    )
-        observed = {
-            layer: (
-                confusion_scores(
-                    confusions[str(layer)].sum(axis=0),
-                    metric_names,
-                    average,
-                    include_absent=task.class_labels is not None,
-                )
-                if confusions is not None
-                else full_scores(task, *layer_arrays, metric_names, average)
-            )
-            for layer, layer_arrays in arrays.items()
-        }
-        alpha = 1.0 - self.config.confidence_interval
-        rows: list[dict[str, Any]] = []
-        for layer in others:
-            p_values = permutation_p_values(
-                task,
-                observed[layer],
-                *arrays[layer],
-                *arrays[reference],
-                metric_names,
-                self.config.n_permutations,
-                rng,
-                average,
-                groups=groups,
-                two_sided=True,
-                trained_confusions=confusions[str(layer)]
-                if confusions is not None
-                else None,
-                control_confusions=confusions[str(reference)]
-                if confusions is not None
-                else None,
-            )
-            for name in metric_names:
-                interval = ci_stats(
-                    np.asarray(differences[layer][name]), alpha / 2, 1 - alpha / 2
-                )
-                rows.append(
-                    {
-                        "variant": workspace.variant,
-                        "split": layer_predictions[reference].metadata.split,
-                        "layer_index": layer,
-                        "reference_layer": reference,
-                        "metric": name,
-                        "score": observed[layer][name],
-                        "reference_score": observed[reference][name],
-                        "diff_mean": interval["mean"],
-                        "diff_lower": interval["lower"],
-                        "diff_upper": interval["upper"],
-                        "p_value": p_values[name],
-                        "p_value_adjusted": None,
-                    }
-                )
-        for name in metric_names:
-            tested = [
-                row
-                for row in rows
-                if row["metric"] == name and row["p_value"] is not None
-            ]
-            if tested:
-                adjusted = benjamini_hochberg([row["p_value"] for row in tested])
-                for row, value in zip(tested, adjusted):
-                    row["p_value_adjusted"] = value
-        comparison = pl.DataFrame(rows)
-        logger.info("Cross-layer comparison vs layer %d:\n%s", reference, comparison)
+        if comparison is None:
+            return None
         path = workspace.comparison_path / LAYERWISE_COMPARISON_FILENAME
         return write_parquet(
             upsert_long_df(
                 path,
                 comparison,
                 workspace.variant,
-                layer_predictions[reference].metadata.split,
+                layer_predictions[max(layer_predictions)].metadata.split,
             ),
             path,
         )
@@ -493,7 +227,7 @@ class ScoreStep:
             for control, path in predict_section.get("control_paths", {}).items()
         }
         return PredictOutput(
-            metadata=EvaluationMetadata.model_validate(metadata_dict),
+            metadata=get_task(workspace.task_type).prediction_metadata(metadata_dict),
             predictions=pl.read_parquet(predictions_path),
             predictions_path=predictions_path,
             controls={
@@ -501,233 +235,63 @@ class ScoreStep:
                 for control, path in control_paths.items()
             },
             control_paths=control_paths,
-            requested_controls=list(config_dict.get("controls", [])),
+            requested_controls=[
+                *config_dict.get("controls", []),
+                *config_dict.get("baselines", []),
+            ],
             config=config_dict,
             baseline_context=predict_section.get("baseline_context"),
         )
 
-    # -- bootstrap resampling / control comparisons --------------------------
-
-    def _run_bootstrap(
+    def _publish_structured_scores(
         self,
-        workspace: EvaluationWorkspace,
-        predict_result: PredictOutput,
-        predictions_col: list[Any],
-        labels_col: list[Any],
-        probabilities_col: list[Any] | None,
-        metric_names: list[str],
-        seed: int,
-        result: ScoreOutput,
-        metadata_dict: dict[str, Any] | None,
         *,
-        trained_per_example_scores: np.ndarray | None,
-    ) -> None:
-        # Seeded from `seed` so resampling and label permutation are fully
-        # deterministic given the same config.
-        n_examples = len(predictions_col)
-        rng = np.random.default_rng(seed)
-        task = get_task(workspace.task_type, workspace.num_labels)
-        predictions_df = predict_result.predictions
-        groups = id_groups(
-            [task.bootstrap_group_id(i) for i in predictions_df["id"].to_list()]
-            if "id" in predictions_df.columns
-            else None
+        result: StructuredScoreOutput,
+        output_dir: Path,
+        manifest_path: Path,
+    ) -> StructuredScoreOutput:
+        logger.info("Scores: %s", result.summaries)
+        seed = result.metadata.seed
+        if seed is None:
+            raise ValueError("Scoring requires an explicit run seed")
+        result.unit_scores_path = write_parquet(
+            result.unit_scores, output_dir / "unit_scores.parquet"
         )
-
-        control_arrays = collect_control_arrays(
-            predict_result,
-            predictions_col,
-            labels_col,
-            probabilities_col,
-            rng,
-            task,
+        result.summaries_path = write_parquet(
+            result.summaries, output_dir / "scores.parquet"
         )
-
-        # Contact metrics are means of per-protein scores. Prepare each
-        # control once; bootstrap samples and permutations then only average.
-        control_per_example_scores = {
-            control: task.compute_per_example_metrics(
-                c_preds,
-                c_labels,
-                metric_names,
-                self.config.metric_aggregation,
-                c_probs,
+        for name, frame in result.control_unit_scores.items():
+            control_dir = output_dir / "controls" / name
+            result.control_unit_scores_paths[name] = write_parquet(
+                frame, control_dir / "unit_scores.parquet"
             )
-            if trained_per_example_scores is not None
-            else None
-            for control, (c_preds, c_labels, c_probs) in control_arrays.items()
-        }
-
-        # Convert predictions/labels/probabilities to 1D NumPy arrays once, up
-        # front, rather than re-deriving Python lists (via `[col[j] for j in
-        # idx]`) on every one of `n_samples` resamples below: array fancy
-        # indexing (`arr[idx]`) is done in C and avoids that per-resample,
-        # per-element Python-level list allocation.
-        ragged = task.is_ragged
-        predictions_arr = as_indexable_array(predictions_col, ragged)
-        labels_arr = as_indexable_array(labels_col, ragged)
-        probabilities_arr = (
-            as_indexable_array(probabilities_col, ragged=False)
-            if probabilities_col is not None
-            else None
-        )
-        control_arrays_np = {
-            control: (
-                as_indexable_array(c_preds, ragged),
-                (
-                    labels_arr
-                    if c_labels is labels_col
-                    else as_indexable_array(c_labels, ragged)
-                ),
-                as_indexable_array(c_probs, ragged=False)
-                if c_probs is not None
-                else None,
+            result.control_summaries_paths[name] = write_parquet(
+                result.control_summaries[name],
+                control_dir / "scores.parquet",
             )
-            for control, (c_preds, c_labels, c_probs) in control_arrays.items()
-        }
-        confusions = token_confusion_matrices(
-            task,
+        write_settings_json(
+            output_dir / result.settings_filename,
+            seed,
+            self.config.model_dump(),
+            metadata=result.metadata.model_dump(mode="json"),
+        )
+        update_run_manifest(
+            manifest_path,
+            "score",
             {
-                "trained": (predictions_arr, labels_arr, probabilities_arr),
-                **control_arrays_np,
-            },
-            groups,
-            metric_names,
-            self.config.metric_aggregation,
-        )
-        if confusions is not None:
-            logger.info(
-                "Using per-protein confusion matrices for token bootstrap and permutations."
-            )
-
-        resample_rows: list[dict[str, float]] = []
-        control_resample_rows: dict[str, list[dict[str, float]]] = {
-            control: [] for control in control_arrays_np
-        }
-
-        n_degenerate: dict[str, int] = {name: 0 for name in metric_names}
-        for i in range(self.config.n_samples):
-            if confusions is not None:
-                scores_by_condition = bootstrap_confusion_scores(
-                    confusions,
-                    metric_names,
-                    self.config.metric_aggregation,
-                    rng,
-                    include_absent=task.class_labels is not None,
-                )
-                trained_scores = scores_by_condition.pop("trained")
-                control_scores_by_name = scores_by_condition
-            else:
-                idx = bootstrap_indices(n_examples, groups, rng)
-                sampled_labels = labels_arr[idx]
-                trained_scores = full_scores(
-                    task,
-                    predictions_arr[idx],
-                    sampled_labels,
-                    probabilities_arr[idx] if probabilities_arr is not None else None,
-                    metric_names,
-                    self.config.metric_aggregation,
-                    per_example_scores=(
-                        trained_per_example_scores[idx]
-                        if trained_per_example_scores is not None
-                        else None
-                    ),
-                )
-                control_scores_by_name = {}
-                for control, (c_preds, c_labels, c_probs) in control_arrays_np.items():
-                    per_example_scores = control_per_example_scores[control]
-                    control_scores_by_name[control] = full_scores(
-                        task,
-                        c_preds[idx],
-                        sampled_labels if c_labels is labels_arr else c_labels[idx],
-                        c_probs[idx] if c_probs is not None else None,
-                        metric_names,
-                        self.config.metric_aggregation,
-                        per_example_scores=(
-                            per_example_scores[idx]
-                            if per_example_scores is not None
-                            else None
-                        ),
-                    )
-            for name in metric_names:
-                if np.isnan(trained_scores[name]):
-                    n_degenerate[name] += 1
-
-            trained_scores["resample"] = i
-            resample_rows.append(trained_scores)
-            for control, control_scores in control_scores_by_name.items():
-                control_scores["resample"] = i
-                control_resample_rows[control].append(control_scores)
-
-        for name, count in n_degenerate.items():
-            if count:
-                logger.warning(
-                    "Metric '%s' was degenerate (e.g. a class missing from "
-                    "the resample) in %d/%d bootstrap resamples; those "
-                    "resamples are excluded from '%s''s confidence interval "
-                    "only, other metrics are unaffected.",
-                    name,
-                    count,
-                    self.config.n_samples,
-                    name,
-                )
-
-        resamples_df = pl.DataFrame(resample_rows)
-
-        alpha = 1.0 - self.config.confidence_interval
-        lower_q, upper_q = alpha / 2, 1.0 - alpha / 2
-
-        confidence_intervals: dict[str, ConfidenceInterval] = {
-            name: ci_stats(resamples_df[name].to_numpy(), lower_q, upper_q)
-            for name in metric_names
-        }
-        logger.info("Bootstrap confidence intervals: %s", confidence_intervals)
-
-        output_path = write_parquet(
-            resamples_df, workspace.stats_path / self.config.output_filename
-        )
-
-        control_comparisons = summarize_controls(
-            resample_rows,
-            control_resample_rows,
-            metric_names,
-            lower_q,
-            upper_q,
-            task,
-            predictions_arr,
-            labels_arr,
-            probabilities_arr,
-            control_arrays_np,
-            self.config.n_permutations,
-            rng,
-            self.config.metric_aggregation,
-            groups=groups,
-            trained_per_example_scores=trained_per_example_scores,
-            control_per_example_scores=control_per_example_scores,
-            trained_confusions=confusions["trained"]
-            if confusions is not None
-            else None,
-            control_confusions=(
-                {name: confusions[name] for name in control_arrays_np}
-                if confusions is not None
-                else None
-            ),
-        )
-
-        summary_path = update_run_manifest(
-            workspace.run_manifest_path,
-            "bootstrap",
-            {
-                "seed": seed,
-                "config": result.config,
-                "metadata": metadata_dict,
-                "confidence_intervals": confidence_intervals,
-                "control_comparisons": control_comparisons,
+                "metadata": result.metadata.model_dump(mode="json"),
+                "config": self.config.model_dump(mode="json"),
+                "scores": result.summaries.to_dicts(),
+                "scores_path": str(result.summaries_path),
+                "unit_scores_path": str(result.unit_scores_path),
+                "controls": {
+                    name: {
+                        "scores": frame.to_dicts(),
+                        "scores_path": str(result.control_summaries_paths[name]),
+                        "unit_scores_path": str(result.control_unit_scores_paths[name]),
+                    }
+                    for name, frame in result.control_summaries.items()
+                },
             },
         )
-
-        result.confidence_intervals = confidence_intervals
-        result.output_path = output_path
-        result.resamples = resamples_df
-        result.summary_path = summary_path
-        result.control_comparisons = control_comparisons or None
+        return result

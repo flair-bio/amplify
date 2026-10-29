@@ -6,17 +6,38 @@ import pytest
 from omegaconf import OmegaConf
 
 from modules.core.utils.config_loader import load_and_parse
-from modules.evaluate.src.config import EvaluationConfig
-from modules.evaluate.src.utils.config_loader import load_evaluation_config
+from modules.evaluate.src.contracts.config import EvaluationConfig
+from modules.evaluate.src.contracts.config_loader import load_baseline_config, load_evaluation_config
 
 CONFIGS = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
 
 
-@pytest.mark.parametrize("tuning", [None, "torch_linear", "mlp_finetuning"])
-def test_neural_overlays_select_continuous_log_weight_decay(tuning):
+@pytest.mark.parametrize(
+    ("source", "revision"),
+    [("flair-bio/evaluation-suite", "a" * 40), ("/local/suite", None)],
+)
+def test_suite_source_is_shared_with_external_tests_and_baselines(source, revision):
+    paths = [CONFIGS / "config.yaml", CONFIGS / "datasets/localization_prediction.yaml"]
+    overrides = [
+        f"workspace.dataset_repo_id={source}",
+        f"workspace.dataset_revision={revision or 'null'}",
+        "workspace.dataset_name=custom_output",
+    ]
+    model = load_evaluation_config(paths, overrides)
+    baseline = load_baseline_config(paths, overrides)
+    for config in (model, baseline):
+        assert config.workspace.dataset_config_name == "localization_prediction"
+        external = config.external_test_sets[0]
+        assert external.dataset_repo_id == source
+        assert external.dataset_config_name == "sethard"
+        assert external.dataset_revision == revision
+
+
+@pytest.mark.parametrize("predictor", [None, "torch_linear", "mlp_finetuning"])
+def test_neural_overlays_select_continuous_log_weight_decay(predictor):
     paths = [CONFIGS / "config.yaml", CONFIGS / "datasets/fold_prediction.yaml"]
-    if tuning is not None:
-        paths.append(CONFIGS / "tuning" / f"{tuning}.yaml")
+    if predictor is not None:
+        paths.append(CONFIGS / "predictors" / f"{predictor}.yaml")
     config = load_evaluation_config(paths)
     search = config.steps.tune.hyperparameter_search
     assert search.enabled
@@ -24,6 +45,132 @@ def test_neural_overlays_select_continuous_log_weight_decay(tuning):
     assert search.search_space.weight_decay_sampling == "log"
     assert min(search.search_space.weight_decay) == 1e-6
     assert max(search.search_space.weight_decay) == 1e-1
+
+
+@pytest.mark.parametrize(
+    "predictor",
+    [
+        "torch_linear",
+        "sklearn_linear",
+        "knn",
+        "random_forest",
+        "xgboost",
+        "mlp_finetuning",
+    ],
+)
+def test_predictor_presets_compose_existing_steps_and_allow_overrides(
+    predictor,
+):
+    paths = [
+        CONFIGS / "config.yaml",
+        CONFIGS / "datasets/fold_prediction.yaml",
+        CONFIGS / "predictors" / f"{predictor}.yaml",
+    ]
+    config = load_evaluation_config(paths)
+    assert config.steps.tune.head.head_type == (
+        "mlp" if predictor == "mlp_finetuning" else predictor
+    )
+    assert config.steps.mode == (
+        "finetune" if predictor == "mlp_finetuning" else "tune_probe"
+    )
+    customized = load_evaluation_config(paths, overrides=["steps.tune.max_epochs=25"])
+    assert customized.steps.tune.max_epochs == 25
+
+
+@pytest.mark.parametrize(
+    "head,error",
+    [
+        ("mlp", "not supported for task_type='contact_prediction'"),
+        ("torch_linear", "not supported for task_type='contact_prediction'"),
+        ("sklearn_linear", "not supported for task_type='contact_prediction'"),
+    ],
+)
+def test_contact_rejects_unsupported_heads(head, error):
+    with pytest.raises(ValueError, match=error):
+        load_evaluation_config(
+            [
+                CONFIGS / "config.yaml",
+                CONFIGS / "datasets/contact_prediction_casp.yaml",
+            ],
+            overrides=[f"steps.tune.head.head_type={head}"],
+        )
+
+
+def test_contact_predictor_cannot_be_used_for_other_tasks():
+    with pytest.raises(ValueError, match="not supported for task_type='sequence_classification'"):
+        load_evaluation_config(
+            [
+                CONFIGS / "config.yaml",
+                CONFIGS / "datasets/fold_prediction.yaml",
+                CONFIGS / "predictors/contact_embedding.yaml",
+            ]
+        )
+
+
+def test_contact_predictor_overlay_keeps_task_default_and_cli_precedence():
+    config = load_evaluation_config(
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "datasets/contact_prediction_casp.yaml",
+            CONFIGS / "predictors/contact_embedding.yaml",
+        ],
+        overrides=["steps.tune.max_epochs=25"],
+    )
+    assert config.workspace.task_type == "contact_prediction"
+    assert config.steps.tune.head.head_type == "bilinear512"
+    assert config.steps.tune.max_epochs == 25
+
+
+def test_contact_attention_preset_selects_fixed_predictor():
+    config = load_evaluation_config(
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "datasets/contact_prediction_casp.yaml",
+            CONFIGS / "predictors/contact_attention.yaml",
+        ]
+    )
+    assert config.workspace.task_type == "contact_prediction"
+    assert config.steps.tune.head.head_type == "attention_l1"
+    assert not config.steps.prepare.embedding_cache.enabled
+    assert not config.steps.tune.hyperparameter_search.enabled
+
+
+def test_contact_attention_predictor_cannot_be_used_for_other_tasks():
+    with pytest.raises(ValueError, match="not supported for task_type='sequence_classification'"):
+        load_evaluation_config(
+            [
+                CONFIGS / "config.yaml",
+                CONFIGS / "datasets/fold_prediction.yaml",
+                CONFIGS / "predictors/contact_attention.yaml",
+            ]
+        )
+
+
+def test_contact_jacobian_preset_selects_zero_shot_predictor():
+    config = load_evaluation_config(
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "datasets/contact_prediction_casp.yaml",
+            CONFIGS / "predictors/contact_jacobian.yaml",
+        ]
+    )
+    assert config.workspace.task_type == "contact_prediction"
+    assert config.steps.tune.head.head_type == "categorical_jacobian"
+    assert config.steps.mode == "evaluate_as_is"
+    assert not config.steps.prepare.embedding_cache.enabled
+    assert not config.steps.tune.hyperparameter_search.enabled
+    assert config.steps.predict.controls == ["random_trunk"]
+
+
+def test_contact_jacobian_predictor_cannot_be_used_for_other_tasks():
+    with pytest.raises(ValueError, match="not supported for task_type='sequence_classification'"):
+        load_evaluation_config(
+            [
+                CONFIGS / "config.yaml",
+                CONFIGS / "datasets/fold_prediction.yaml",
+                CONFIGS / "predictors/contact_jacobian.yaml",
+            ]
+        )
 
 
 def test_default_protocol_needs_only_base_model_and_dataset():
@@ -70,7 +217,6 @@ def test_token_classification_uses_residue_scale_hpo():
     [
         ("calibration", "human_calibration"),
         ("pseudo_perplexity", "uniprot_protparams"),
-        ("categorical_jacobian", "contact_prediction_binary"),
     ],
 )
 def test_zero_shot_tasks_disable_default_training(task, dataset):
@@ -86,17 +232,22 @@ def test_zero_shot_tasks_disable_default_training(task, dataset):
 
 def test_contact_probe_does_not_inherit_cached_mlp_search():
     config = load_evaluation_config(
-        [CONFIGS / "config.yaml", CONFIGS / "datasets/contact_prediction_binary.yaml"]
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "datasets/contact_prediction_casp.yaml",
+            CONFIGS / "predictors/contact_embedding.yaml",
+        ]
     )
+    assert config.steps.tune.head.head_type == "bilinear512"
     assert config.steps.mode == "tune_probe"
     assert not config.steps.prepare.embedding_cache.enabled
     assert not config.steps.tune.refit_on_train_validation
     search = config.steps.tune.hyperparameter_search
-    assert search.enabled
-    assert search.metric == "contact_auc_long"
-    assert search.search_space.hidden_size is None
-    assert search.search_space.hidden_depth is None
-    assert search.search_space.batch_size is None
+    assert not search.enabled
+    assert not config.steps.tune.standardize_features
+    assert config.steps.tune.early_stopping_patience == 10
+    assert config.steps.tune.learning_rate == 0.001
+    assert config.steps.tune.weight_decay == 10
 
 
 @pytest.mark.parametrize(
@@ -106,11 +257,21 @@ def test_contact_probe_does_not_inherit_cached_mlp_search():
 )
 def test_dataset_default_matches_explicit_task_config(dataset):
     task = OmegaConf.load(dataset).workspace.default_task_type
+    predictors = (
+        [CONFIGS / "predictors/contact_embedding.yaml"]
+        if task == "contact_prediction"
+        else []
+    )
     expected = load_and_parse(
-        [CONFIGS / "config.yaml", CONFIGS / "tasks" / f"{task}.yaml", dataset],
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "tasks" / f"{task}.yaml",
+            dataset,
+            *predictors,
+        ],
         EvaluationConfig,
     )
-    actual = load_evaluation_config([CONFIGS / "config.yaml", dataset])
+    actual = load_evaluation_config([CONFIGS / "config.yaml", dataset, *predictors])
     assert actual.model_dump() == expected.model_dump()
 
 
@@ -127,12 +288,7 @@ def test_dataset_default_matches_explicit_task_config(dataset):
         ("token_classification", "ssp_q3", ["random_trunk"]),
         (
             "contact_prediction",
-            "contact_prediction_binary",
-            ["random_trunk"],
-        ),
-        (
-            "categorical_jacobian",
-            "contact_prediction_binary",
+            "contact_prediction_casp",
             ["random_trunk"],
         ),
         ("pseudo_perplexity", "uniprot_protparams", ["random_trunk"]),
@@ -145,6 +301,11 @@ def test_task_control_defaults(task, dataset, controls):
             CONFIGS / "config.yaml",
             CONFIGS / "tasks" / f"{task}.yaml",
             CONFIGS / "datasets" / f"{dataset}.yaml",
+            *(
+                [CONFIGS / "predictors/contact_embedding.yaml"]
+                if task == "contact_prediction"
+                else []
+            ),
         ]
     )
     assert config.steps.predict.controls == controls
@@ -153,6 +314,9 @@ def test_task_control_defaults(task, dataset, controls):
         "sequence_regression": ["train_mean"],
     }.get(task, [])
     assert config.baselines.names == expected_baselines
+    assert config.steps.predict.baselines == (
+        ["majority_class"] if task == "token_classification" else []
+    )
 
 
 def test_protparams_uses_sequence_regression_r2_defaults():
@@ -162,7 +326,7 @@ def test_protparams_uses_sequence_regression_r2_defaults():
             CONFIGS / "models/amplify_120m.yaml",
             CONFIGS / "tasks/sequence_regression.yaml",
             CONFIGS / "datasets/uniprot_protparams.yaml",
-            CONFIGS / "tuning/torch_linear.yaml",
+            CONFIGS / "predictors/torch_linear.yaml",
         ]
     )
     assert config.steps.prepare.label_column == "gravy"
@@ -175,7 +339,6 @@ def test_protparams_uses_sequence_regression_r2_defaults():
 @pytest.mark.parametrize(
     "dataset,task",
     [
-        ("contact_prediction_binary", "categorical_jacobian"),
         ("uniprot_protparams", "pseudo_perplexity"),
     ],
 )
@@ -208,7 +371,7 @@ def test_later_overlays_and_cli_can_customize_implicit_task(tmp_path):
         "    controls: [scrambled_labels]\n"
     )
     config = load_evaluation_config(
-        [CONFIGS / "config.yaml", dataset, CONFIGS / "tuning/mlp_finetuning.yaml"],
+        [CONFIGS / "config.yaml", dataset, CONFIGS / "predictors/mlp_finetuning.yaml"],
         overrides=["steps.predict.controls=[]", "steps.tune.max_epochs=3"],
     )
     assert config.steps.mode == "finetune"
@@ -218,17 +381,6 @@ def test_later_overlays_and_cli_can_customize_implicit_task(tmp_path):
     # The dataset itself also has higher priority than the implicit task.
     config = load_evaluation_config([CONFIGS / "config.yaml", dataset])
     assert config.steps.predict.controls == ["scrambled_labels"]
-
-
-def test_cli_task_selection_loads_method_behavior():
-    config = load_evaluation_config(
-        [CONFIGS / "config.yaml", CONFIGS / "datasets/contact_prediction_binary.yaml"],
-        overrides=["workspace.task_type=categorical_jacobian"],
-    )
-    assert config.workspace.task_type == "categorical_jacobian"
-    assert config.steps.mode == "evaluate_as_is"
-    assert not config.steps.prepare.embedding_cache.enabled
-    assert config.steps.predict.controls == ["random_trunk"]
 
 
 def test_unknown_default_fails_before_loading_task_file():

@@ -1,4 +1,4 @@
-"""Tests for modules.evaluate.src.dataset_sourcing.preprocess."""
+"""Tests for modules.evaluate.scripts.dataset_sourcing.shared.preprocess."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ from unittest.mock import patch
 import polars as pl
 import pytest
 
-from modules.evaluate.src.dataset_sourcing import preprocess
-from modules.evaluate.src.dataset_sourcing.config import (
+from modules.evaluate.scripts.dataset_sourcing.shared import preprocess
+from modules.evaluate.scripts.dataset_sourcing.shared.config import (
     DatasetSourcingConfig,
     UniProtDatasetSourcingConfig,
 )
-from modules.evaluate.src.dataset_sourcing.preprocess import (
+from modules.evaluate.scripts.dataset_sourcing.shared.preprocess import (
     _resolve_renamed_column,
     clean_source_splits,
     create_full_dataset_splits,

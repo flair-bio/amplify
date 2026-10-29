@@ -19,9 +19,9 @@ from modules.evaluate.scripts.dataset_sourcing.source_uniprot_go import (
     propagate_go_ids,
     read_go_ontology,
 )
-from modules.evaluate.src.dataset_sourcing import hf_io, pipeline
-from modules.evaluate.src.dataset_sourcing.config import DatasetSourcingConfig
-from modules.evaluate.src.dataset_sourcing.spec import DatasetSourceSpec
+from modules.evaluate.scripts.dataset_sourcing.shared import hf_io, pipeline
+from modules.evaluate.scripts.dataset_sourcing.shared.config import DatasetSourcingConfig
+from modules.evaluate.scripts.dataset_sourcing.shared.spec import DatasetSourceSpec
 _EVIDENCE = '/evidence="ECO:0000269|PubMed:1"'
 
 

@@ -11,153 +11,67 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from datasets import DatasetDict
-from pydantic import BaseModel, ConfigDict, Field
 from torch import nn
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
+from modules.evaluate.src.contracts.artifacts import (
+    EmbeddingArtifacts,
+    LayerwiseArtifacts,
+    PreparedArtifacts,
+    PreparedFeatures,
+)
+from modules.evaluate.src.contracts.config import (
+    BaselineName,
+    EmbeddingCacheConfig,
+    ExternalTestSetConfig,
+    PrepareConfig,
+    dataset_source_identity,
+)
+from modules.evaluate.src.dataset.baseline_data import (
+    baseline_context,
+    external_baseline_context,
+)
 from modules.evaluate.src.dataset.collator import (
     EvaluationCollator,
     EvaluationCollatorConfig,
 )
 from modules.evaluate.src.dataset.dataloader import (
     DataLoaderConfig,
-    DatasetSplitConfig,
-    ExternalTestSetConfig,
     build_dataloaders,
-    tokenize_dataset,
-)
-from modules.evaluate.src.dataset.resolution import (
     resolve_evaluation_data,
     resolve_external_data,
+    tokenize_dataset,
 )
-from modules.evaluate.src.dataset.workspace import EvaluationWorkspace, TaskType
-from modules.evaluate.src.model.heads import EmbeddingProbeHead
-from modules.evaluate.src.model.layerwise import LayerwiseProbeModel, resolve_layers
-from modules.evaluate.src.schemas.artifacts import (
-    CrossValidationIdentity,
-    PreparedArtifacts,
-)
-from modules.evaluate.src.tasks import get_task
-from modules.evaluate.src.utils.baselines import (
-    BaselineName,
-    baseline_context,
-    external_baseline_context,
-)
-from modules.evaluate.src.utils.embed import (
-    EmbeddingBackend,
+from modules.evaluate.src.dataset.embedding_cache import (
     EmbeddingCache,
-    EmbeddingCacheConfig,
-    build_embedding_dataloaders,
     embedding_cache_key,
-    validate_embedding_cache_compat,
+    load_tensor_cache,
+    validate_tensor_cache,
     weights_fingerprint,
 )
+from modules.evaluate.src.dataset.embeddings import (
+    EmbeddingBackend,
+    build_embedding_dataloaders,
+)
+from modules.evaluate.src.dataset.workspace import EvaluationWorkspace, TaskType
+from modules.evaluate.src.model.embeddings import validate_embedding_cache_compat
+from modules.evaluate.src.model.heads import EmbeddingProbeHead
+from modules.evaluate.src.model.layerwise import LayerwiseProbeModel, resolve_layers
+from modules.evaluate.src.tasks import get_task
+from modules.evaluate.src.tasks.base import StructuredTask
 
 if TYPE_CHECKING:
-    from modules.evaluate.src.config import LayerwiseConfig
+    from modules.evaluate.src.contracts.config import LayerwiseConfig
 
 # accelerate's logger adapter logs INFO/DEBUG only on the main process by
 # default, preventing duplicate lines when running under distributed launch.
 logger = get_logger(__name__)
-
-
-class PrepareConfig(BaseModel):
-    """Config. for the prepare step in evaluation."""
-
-    model_config = ConfigDict(extra="forbid")
-    dataloader_pin_memory: bool = True
-    dataloader_persistent_workers: bool = True
-    batch_size: int = 16
-    packed: bool = False
-    max_tokens_per_batch: int | None = Field(None, gt=0)
-    embedding_batch_size: int = Field(
-        128,
-        gt=0,
-        description=(
-            "Batch size used only while extracting frozen-trunk embeddings. "
-            "Increase until the trunk approaches device memory capacity."
-        ),
-    )
-    dataloader_num_workers: int = Field(
-        8,
-        ge=0,
-        description=(
-            "Number of dataloader worker processes per rank and per loader. "
-            "Defaults to 8; set to 0 to load batches in the main process."
-        ),
-    )
-    max_length: int = Field(
-        512, description="Maximum sequence length after truncation."
-    )
-    pad_to_multiple_of: int | None = 8
-    sequence_column: str = "sequence"
-    label_column: str = Field(
-        "targets",
-        description=(
-            "Dataset column containing label(s). Standardized evaluation "
-            "datasets use 'targets', not the source field 'label'."
-        ),
-    )
-    id_column: str = Field(
-        "id",
-        description=(
-            "Dataset column containing a per-example identifier, passed "
-            "through the batch so downstream prediction/scoring steps can key "
-            "predictions/labels back to their source example. Falls back "
-            "to a positional index when the dataset has no such column."
-        ),
-    )
-    tokenize_num_proc: int = Field(
-        8,
-        gt=0,
-        description=(
-            "Number of processes used to tokenize the dataset up front. "
-            "Defaults to 8; must be positive and is independent of dataloader workers."
-        ),
-    )
-    random_truncate_by_split: dict[str, bool] = Field(
-        default_factory=lambda: {
-            "train": True,
-            "validation": False,
-            "test": False,
-        },
-        description=(
-            "Whether sequences longer than max_length are cropped from a "
-            "random window, keyed by split. Defaults to random train crops "
-            "and deterministic validation/test crops."
-        ),
-    )
-    validation_fraction: float = Field(
-        0.1,
-        description=(
-            "Fraction of 'train' held out to synthesize a 'validation' split "
-            "when the dataset doesn't already have one."
-        ),
-    )
-    split: DatasetSplitConfig = Field(
-        default_factory=DatasetSplitConfig,
-        description=(
-            "Named dataset split method and source split names to map onto "
-            "the pipeline's train/validation/test roles and final-refit-only data."
-        ),
-    )
-    length_grouped_sampling: bool = Field(
-        False,
-        description=(
-            "Batch examples of similar tokenized length together (via "
-            "LengthGroupedSampler) instead of pure random shuffling. Reduces "
-            "the amount of padding the collator has to add per batch, at the "
-            "cost of batches no longer being uniformly randomly composed. "
-            "Frozen-trunk extraction groups lengths deterministically; "
-            "cached feature batches are not grouped."
-        ),
-    )
-    embedding_cache: EmbeddingCacheConfig = Field(default_factory=EmbeddingCacheConfig)
 
 
 class PrepareStep:
@@ -171,8 +85,8 @@ class PrepareStep:
         accelerator: Accelerator | None = None,
         layerwise_config: LayerwiseConfig | None = None,
         dataset: DatasetDict | None = None,
-        cross_validation: CrossValidationIdentity | None = None,
         baseline_names: list[BaselineName] | None = None,
+        head_type: str | None = None,
     ) -> PreparedArtifacts:
         """Load task data and models, optionally replacing tokens with features.
 
@@ -180,8 +94,8 @@ class PrepareStep:
         caching is enabled, its layer and pooling settings govern extraction,
         and heads are attached afterwards. Original token batches remain
         available for controls that change the input or trunk. A supplied
-        raw *dataset* (e.g. a CV fold's roles) replaces loading and
-        validation-split synthesis.
+        raw *dataset* with resolved roles replaces loading and validation-split
+        synthesis.
         """
         # The pipeline passes one shared instance; keep the fallback for direct
         # step use in tests and small standalone callers.
@@ -195,10 +109,23 @@ class PrepareStep:
         ):
             raise ValueError("max_tokens_per_batch supports a single process only.")
 
-        logger.info("Running Prepare step...")
-
         logger.info("Setting up workspace directories...")
         workspace.setup_directories()
+        task = get_task(workspace.task_type)
+        if isinstance(task, StructuredTask):
+            prepared = task.prepare_inputs(
+                inputs=workspace.config,
+                config=self.config,
+                device=accelerator.device,
+                dataset=dataset,
+                predictor=head_type,
+            )
+            self.prepare_features(workspace, prepared)
+            if prepared.input_identity:
+                workspace.validate_experiment("inputs", prepared.input_identity)
+            return prepared
+
+        logger.info("Running Prepare step...")
 
         model_id = workspace.model_repo_id or workspace.model_name
         dataset_id = workspace.dataset_repo_id or workspace.dataset_name
@@ -215,6 +142,8 @@ class PrepareStep:
             validation_fraction=self.config.validation_fraction,
             split=self.config.split,
             dataset=dataset,
+            config_name=workspace.config.dataset_config_name,
+            revision=workspace.config.dataset_revision,
         )
         shared_context = (
             baseline_context(
@@ -230,7 +159,6 @@ class PrepareStep:
             else None
         )
 
-        task = get_task(workspace.task_type)
         num_labels = task.resolve_num_labels(
             workspace.num_labels, workspace.dataset_name
         )
@@ -351,7 +279,6 @@ class PrepareStep:
                 "test": test_dataloader,
             }
             if active_layerwise_config is not None
-            and self.config.embedding_cache.enabled
             else None
         )
 
@@ -408,14 +335,17 @@ class PrepareStep:
             train_dataloader=train_dataloader,
             val_dataloader=val_dataloader,
             test_dataloader=test_dataloader,
-            layerwise_token_dataloaders=token_dataloaders,
+            layerwise=(
+                LayerwiseArtifacts(token_dataloaders=token_dataloaders)
+                if token_dataloaders is not None
+                else None
+            ),
             refit_token_dataloaders=refit_token_dataloaders,
             refit_random_truncate_by_split={
                 split: self.config.random_truncate_by_split.get(split, False)
                 for split in refit_token_dataloaders
             },
             split=self.config.split.name,
-            cross_validation=cross_validation,
             baseline_context=shared_context,
             **embedding_extras,
         )
@@ -489,7 +419,12 @@ class PrepareStep:
             external.dataset_repo_id,
             external.split,
         )
-        dataset = resolve_external_data(external.dataset_repo_id, external.split)
+        dataset = resolve_external_data(
+            external.dataset_repo_id,
+            external.split,
+            config_name=external.dataset_config_name,
+            revision=external.dataset_revision,
+        )
         shared_context = (
             external_baseline_context(
                 prepared.baseline_context,
@@ -497,6 +432,8 @@ class PrepareStep:
                 dataset,
                 dataset_id=external.dataset_repo_id,
                 split=external.split,
+                config_name=external.dataset_config_name,
+                revision=external.dataset_revision,
                 sequence_column=self.config.sequence_column,
                 label_column=self.config.label_column,
                 id_column=self.config.id_column,
@@ -545,15 +482,24 @@ class PrepareStep:
             )
         token_test_dataloader = accelerator.prepare(raw_test_dataloader)
 
-        backend = prepared.embedding_backend
-        token_dataloaders = prepared.layerwise_token_dataloaders
-        if token_dataloaders is not None:
-            token_dataloaders = {**token_dataloaders, "test": token_test_dataloader}
+        embedding = prepared.embedding
+        backend = embedding.backend if embedding is not None else None
+        layerwise = (
+            replace(
+                prepared.layerwise,
+                token_dataloaders={
+                    **prepared.layerwise.token_dataloaders,
+                    "test": token_test_dataloader,
+                },
+            )
+            if prepared.layerwise is not None
+            else None
+        )
         if backend is None:
             return replace(
                 prepared,
                 test_dataloader=token_test_dataloader,
-                layerwise_token_dataloaders=token_dataloaders,
+                layerwise=layerwise,
                 baseline_context=shared_context,
             )
         if backend.cache is None or backend.model_id is None:
@@ -573,7 +519,11 @@ class PrepareStep:
             or self.config.embedding_cache
         )
         model_fingerprint = weights_fingerprint(trunk)
-        external_id = external.dataset_repo_id
+        external_id = dataset_source_identity(
+            external.dataset_repo_id,
+            external.dataset_config_name,
+            external.dataset_revision,
+        )
         embedding_dataloader = build_embedding_dataloaders(
             model=trunk,
             splits={
@@ -618,8 +568,8 @@ class PrepareStep:
         return replace(
             prepared,
             test_dataloader=embedding_dataloader,
-            embedding_backend=external_backend,
-            layerwise_token_dataloaders=token_dataloaders,
+            embedding=EmbeddingArtifacts(backend=external_backend),
+            layerwise=layerwise,
             baseline_context=shared_context,
         )
 
@@ -656,7 +606,11 @@ class PrepareStep:
         layers = cache_config.resolved_layers
         embedding_size = hidden_size * len(layers)
         model_id = workspace.model_repo_id or workspace.model_name
-        dataset_id = workspace.dataset_repo_id or workspace.dataset_name
+        dataset_id = dataset_source_identity(
+            workspace.dataset_repo_id or workspace.dataset_name,
+            workspace.config.dataset_config_name,
+            workspace.config.dataset_revision,
+        )
         cache = EmbeddingCache(workspace.embeddings_path, cache_config.max_cache_gb)
         # The original token-based test dataloader, kept for PredictStep
         # controls/options that need real tokens or a re-embeddable trunk
@@ -730,37 +684,39 @@ class PrepareStep:
                 )
             refit_embedding_dataloaders[split] = dataloader
         embedding_extras = {
-            "embedding_backend": EmbeddingBackend(
-                trunk=model,
-                token_test_dataloader=token_test_dataloader,
-                token_train_dataloader=train_dataloader,
-                token_val_dataloader=val_dataloader,
-                train_random_truncate=self.config.random_truncate_by_split.get(
-                    "train", True
-                ),
-                validation_random_truncate=self.config.random_truncate_by_split.get(
-                    "validation", False
-                ),
-                extraction_batch_size=None
-                if self.config.packed
-                else self.config.embedding_batch_size,
-                pooling=cache_config.pooling,
-                layers=layers,
-                dtype=cache_config.dtype,
-                hidden_size=embedding_size,
-                autocast_dtype=cache_config.autocast_dtype,
-                normalize_before_pooling=cache_config.normalize_before_pooling,
-                test_cache_key=test_cache_key,
-                cache=cache,
-                cache_policy=cache_config.cache_policy,
-                model_id=model_id,
-                dataset_id=dataset_id,
-                max_length=self.config.max_length,
-                test_random_truncate=test_random_truncate,
-                length_grouped_sampling=self.config.length_grouped_sampling,
-                test_dataset_fingerprint=getattr(
-                    token_test_dataloader.dataset, "_fingerprint", None
-                ),
+            "embedding": EmbeddingArtifacts(
+                backend=EmbeddingBackend(
+                    trunk=model,
+                    token_test_dataloader=token_test_dataloader,
+                    token_train_dataloader=train_dataloader,
+                    token_val_dataloader=val_dataloader,
+                    train_random_truncate=self.config.random_truncate_by_split.get(
+                        "train", True
+                    ),
+                    validation_random_truncate=self.config.random_truncate_by_split.get(
+                        "validation", False
+                    ),
+                    extraction_batch_size=None
+                    if self.config.packed
+                    else self.config.embedding_batch_size,
+                    pooling=cache_config.pooling,
+                    layers=layers,
+                    dtype=cache_config.dtype,
+                    hidden_size=embedding_size,
+                    autocast_dtype=cache_config.autocast_dtype,
+                    normalize_before_pooling=cache_config.normalize_before_pooling,
+                    test_cache_key=test_cache_key,
+                    cache=cache,
+                    cache_policy=cache_config.cache_policy,
+                    model_id=model_id,
+                    dataset_id=dataset_id,
+                    max_length=self.config.max_length,
+                    test_random_truncate=test_random_truncate,
+                    length_grouped_sampling=self.config.length_grouped_sampling,
+                    test_dataset_fingerprint=getattr(
+                        token_test_dataloader.dataset, "_fingerprint", None
+                    ),
+                )
             ),
             "refit_dataloaders": refit_embedding_dataloaders,
         }
@@ -771,6 +727,32 @@ class PrepareStep:
             embedding_dataloaders["test"],
             embedding_extras,
         )
+
+    def prepare_features(
+        self,
+        workspace: EvaluationWorkspace,
+        prepared: PreparedArtifacts,
+    ) -> None:
+        """Materialize declared fitting inputs under the configured cache policy."""
+        task = get_task(workspace.task_type)
+        config = self.config.embedding_cache
+        prepared.features = {}
+        for name, request in task.feature_requests(prepared).items():
+            values, fingerprint = load_tensor_cache(
+                cache_dir=workspace.embeddings_path
+                if config.cache_policy != "off"
+                else None,
+                namespace=request.namespace,
+                identity=request.identity,
+                extract=request.extract,
+                validate=partial(
+                    validate_tensor_cache, shapes=request.shapes, dtype=request.dtype
+                ),
+                refresh=config.cache_policy == "refresh",
+                max_cache_gb=config.max_cache_gb,
+            )
+            prepared.features[name] = PreparedFeatures(values, fingerprint)
+        prepared.input_identity = task.fitting_identity(prepared)
 
     def _build_collator(
         self, tokenizer: PreTrainedTokenizerBase, task_type: TaskType

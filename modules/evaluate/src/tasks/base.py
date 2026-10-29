@@ -1,12 +1,10 @@
 """
 Task-type abstraction for the evaluation pipeline.
 
-A :class:`TaskHandler` owns everything that varies between downstream
-evaluation tasks -- model class, label alignment/collation, prediction
-extraction, metrics, and control-condition label scrambling -- so the
-prepare/tune/predict/score steps stay task-agnostic. Adding a task type is a
-new module under ``modules/evaluate/src/tasks/`` decorated with
-``@register_task``; no step code needs to change.
+A :class:`TaskHandler` owns scientific semantics: model selection, label
+alignment/collation, prediction interpretation, supported capabilities and
+control transformations. All tasks expose a common scoring entry point,
+returning flat or structured results. Stages own caching and publication.
 
 The base class defaults describe the most common shape: a single scalar label
 per example, a Hugging Face ``Auto*`` wrapper around the trunk, and dense
@@ -16,14 +14,38 @@ per example, a Hugging Face ``Auto*`` wrapper around the trunk, and dense
 from __future__ import annotations
 
 import warnings
-from abc import ABC
-from typing import Any, Callable, ClassVar, Mapping, Sequence
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import numpy as np
 import torch
 from torch import nn
 
 from modules.evaluate.src.metrics import metrics as metric_functions
+
+if TYPE_CHECKING:
+    from accelerate import Accelerator
+    from datasets import DatasetDict
+
+    from modules.evaluate.src.contracts.artifacts import (
+        ControlInputs,
+        EvaluationMetadata,
+        FeatureRequest,
+        FitResult,
+        PredictOutput,
+        PreparedArtifacts,
+        ScoreOutput,
+        StructuredScoreOutput,
+    )
+    from modules.evaluate.src.contracts.config import (
+        EvaluationConfig,
+        EvaluationWorkspaceConfig,
+        PredictConfig,
+        PrepareConfig,
+        ScoreConfig,
+        TuneConfig,
+    )
 
 # Every metric callable takes the same (values, labels, average) signature so
 # the base compute_metrics() can dispatch without knowing the metric. ``values``
@@ -51,6 +73,28 @@ class TaskHandler(ABC):
     #: Value of ``workspace.task_type`` that selects this handler.
     name: ClassVar[str]
     class_labels: tuple[int, ...] | None = None
+    uses_predictor_identity: ClassVar[bool] = False
+    supports_packing: ClassVar[bool] = True
+    supports_layerwise: ClassVar[bool] = False
+    fixed_protocol: ClassVar[bool] = False
+    evaluation_modes: ClassVar[frozenset[str]] = frozenset(
+        {"evaluate_as_is", "tune_probe", "finetune"}
+    )
+    supported_head_types: ClassVar[frozenset[str]] = frozenset(
+        {"mlp", "torch_linear", "sklearn_linear", "knn", "random_forest", "xgboost"}
+    )
+    supported_controls: ClassVar[frozenset[str]] = frozenset(
+        {
+            "untrained",
+            "random_trunk",
+            "random_head",
+            "random_both",
+            "scrambled_labels",
+            "scrambled_sequences",
+        }
+    )
+    dataset_baselines: ClassVar[frozenset[str]] = frozenset()
+    prediction_baselines: ClassVar[frozenset[str]] = frozenset()
 
     #: Hugging Face ``Auto*`` class used to wrap the trunk. Works with any Hub
     #: model repo rather than depending on a specific model module. Subclasses
@@ -95,10 +139,12 @@ class TaskHandler(ABC):
     #: primary way users discover the metric set.
     default_metric_names: ClassVar[tuple[str, ...]] = ()
 
-    def __init_subclass__(cls, **kwargs: Any) -> None:
+    def __init_subclass__(cls, *, abstract: bool = False, **kwargs: Any) -> None:
         """Warn at class-definition time, not at first use, if a concrete
         handler forgets the fields every task type must set."""
         super().__init_subclass__(**kwargs)
+        if abstract:
+            return
         if not getattr(cls, "name", None):
             warnings.warn(f"{cls.__name__} must set a non-empty 'name'.", stacklevel=2)
         if cls.build_model is TaskHandler.build_model and not getattr(
@@ -130,6 +176,91 @@ class TaskHandler(ABC):
     def model_kwargs(self) -> dict[str, Any]:
         """Extra ``from_pretrained`` kwargs beyond the common ones."""
         return {}
+
+    def validate_pipeline(
+        self,
+        config: EvaluationConfig,
+        *,
+        workspace_seed: int | None,
+        num_processes: int,
+    ) -> None:
+        """Validate task-specific execution constraints before reserving outputs."""
+
+    def validate_config(self, config: EvaluationConfig) -> None:
+        """Validate scientific constraints beyond generic stage compatibility."""
+
+    def validate_head(self, head_type: str) -> None:
+        if head_type not in self.supported_head_types:
+            raise ValueError(
+                f"head_type='{head_type}' is not supported for task_type='{self.name}'."
+            )
+
+    def feature_requests(
+        self, prepared: PreparedArtifacts
+    ) -> dict[str, FeatureRequest]:
+        """Declare extra fitting features; ordinary loader-based tasks need none."""
+        return {}
+
+    def fitting_identity(self, prepared: PreparedArtifacts) -> dict[str, Any]:
+        """Protocol identities that must match before fitting starts."""
+        return {}
+
+    def fit(
+        self,
+        prepared: PreparedArtifacts,
+        config: TuneConfig,
+        inputs: EvaluationWorkspaceConfig,
+        accelerator: Accelerator,
+        *,
+        seed: int,
+        mode: Literal["tune_probe", "finetune"] = "tune_probe",
+    ) -> FitResult:
+        """Execute the shared loader-based scientific fitting protocol."""
+        from modules.evaluate.src.trainers.selection import fit_predictor
+
+        return fit_predictor(
+            workspace=inputs,
+            prepared=prepared,
+            config=config,
+            accelerator=accelerator,
+            seed=seed,
+            mode=mode,
+        )
+
+    def independent_controls(
+        self,
+        prepared: PreparedArtifacts,
+        controls: Sequence[str],
+        *,
+        seed: int,
+        device: torch.device,
+    ) -> dict[str, ControlInputs]:
+        """Describe additional protocol controls, separate from inference ablations."""
+        return {}
+
+    def control_settings(
+        self,
+        inputs: ControlInputs,
+        result: FitResult,
+    ) -> dict[str, Any]:
+        """Describe an independent control's fitting result without publishing it."""
+        return {**inputs.metadata, "fit": result.checkpoint_settings}
+
+    def prediction_metadata(self, values: Mapping[str, Any]) -> EvaluationMetadata:
+        from modules.evaluate.src.contracts.artifacts import EvaluationMetadata
+
+        return EvaluationMetadata.model_validate(values)
+
+    @abstractmethod
+    def score(
+        self,
+        predictions: PredictOutput,
+        config: ScoreConfig,
+        *,
+        seed: int = 710019,
+    ) -> ScoreOutput | StructuredScoreOutput:
+        """Compute scientific scores and supported uncertainty without publishing."""
+        ...
 
     def build_model(
         self,
@@ -310,6 +441,16 @@ class TaskHandler(ABC):
         """Split a gathered batch into aligned per-example (pred, label) pairs."""
         return list(zip(predictions.cpu().tolist(), labels.cpu().tolist()))
 
+    def split_batch_rows_with_context(
+        self,
+        predictions: torch.Tensor,
+        labels: torch.Tensor,
+        *,
+        batch_metadata: Mapping[str, Any] | None = None,
+    ) -> list[tuple[Any, Any]]:
+        """Split rows while accepting optional task-specific batch metadata."""
+        return self.split_batch_rows(predictions, labels)
+
     # -- metrics -------------------------------------------------------------
 
     def bootstrap_group_id(self, row_id: Any) -> Any:
@@ -346,6 +487,124 @@ class TaskHandler(ABC):
         None when metrics require computation over the combined sample.
         """
         return None
+
+    def validate_metric_inputs(self, predictions: Sequence, labels: Sequence) -> None:
+        """Reject labels outside the configured vocabulary rather than omit them."""
+        if self.class_labels is None:
+            return
+        pred_array, label_array = np.asarray(predictions), np.asarray(labels)
+        if pred_array.shape != label_array.shape:
+            raise ValueError("Classification prediction and label shapes must match.")
+        if self.name == "sequence_multilabel_classification":
+            if label_array.ndim != 2 or label_array.shape[1] != len(self.class_labels):
+                raise ValueError(
+                    "Multilabel metric inputs must have one column per configured label."
+                )
+            if (
+                not np.isin(pred_array, (0, 1)).all()
+                or not np.isin(label_array, (0, 1)).all()
+            ):
+                raise ValueError("Multilabel metric inputs must contain binary values.")
+        elif (
+            pred_array.ndim != 1
+            or not np.isin(pred_array, self.class_labels).all()
+            or not np.isin(label_array, self.class_labels).all()
+        ):
+            raise ValueError(
+                "Classification metric inputs contain labels outside the configured "
+                "class vocabulary; token ignore-index positions must be removed first."
+            )
+
+    # -- controls ------------------------------------------------------------
+
+    def scramble_labels(self, labels: list[Any], rng: np.random.Generator) -> list[Any]:
+        """Permute labels to build a chance-level control.
+
+        Predictions are unchanged, but their association with the true labels
+        is destroyed, so the resulting metric approximates what's attainable by
+        chance given the label distribution.
+        """
+        permuted_idx = rng.permutation(len(labels))
+        return [labels[j] for j in permuted_idx]
+
+    def make_sequence_scrambler(
+        self, tokenizer: Any, seed: int
+    ) -> Callable[[dict[str, Any]], dict[str, Any]]:
+        """Build a batch_transform that shuffles token order within each sequence
+        (leaving padding/special-token positions, as well as each sequence's
+        first amino acid, in place), destroying sequence/positional
+        information while preserving token composition.
+
+        Loops over rows in Python (batch_size is small relative to a training
+        loop, so this isn't performance-critical) and permutes each row's
+        shufflable positions in place via ``torch.randperm``, rather than a
+        single vectorized argsort over the whole batch. Uses its own
+        ``torch.Generator`` seeded from `seed` (rather than torch's global
+        RNG) so the shuffling is fully deterministic and independent of any
+        other randomness consumed elsewhere in the run.
+        """
+        special_ids_list = list(tokenizer.all_special_ids)
+        # Lazily bound to the first batch's device and reused (its state
+        # advances) across subsequent batches, so calls draw from a single
+        # continuing random stream instead of repeating the same values.
+        state: dict[str, Any] = {"generator": None, "device": None}
+
+        def _scramble(batch: dict[str, Any]) -> dict[str, Any]:
+            batch = dict(batch)
+            input_ids = batch["input_ids"]
+            device = input_ids.device
+            batch_size, _ = input_ids.shape
+
+            if state["generator"] is None or state["device"] != device:
+                state["generator"] = torch.Generator(device=device).manual_seed(seed)
+                state["device"] = device
+            generator = state["generator"]
+            special_ids = torch.tensor(
+                special_ids_list, device=device, dtype=input_ids.dtype
+            )
+            movable = ~torch.isin(input_ids, special_ids)
+
+            scrambled = input_ids.clone()
+            if "cu_seqlens" in batch:
+                offsets = batch["cu_seqlens"][: batch["num_sequences"] + 1].tolist()
+                spans = [
+                    (0, start, end) for start, end in zip(offsets[:-1], offsets[1:])
+                ]
+            else:
+                spans = [(row, 0, input_ids.shape[1]) for row in range(batch_size)]
+            for row, start, end in spans:
+                movable_idx = movable[row, start:end].nonzero(as_tuple=True)[0] + start
+                if movable_idx.numel() <= 1:
+                    continue
+                # Keep the first movable position (first amino acid) in
+                # place; only the remaining movable positions are shuffled.
+                shufflable_idx = movable_idx[1:]
+                perm = shufflable_idx[
+                    torch.randperm(
+                        shufflable_idx.numel(), generator=generator, device=device
+                    )
+                ]
+                scrambled[row, shufflable_idx] = input_ids[row, perm]
+
+            batch["input_ids"] = scrambled
+            return batch
+
+        return _scramble
+
+
+class FlatMetricsTask(TaskHandler, abstract=True):
+    """Tasks scored from aligned prediction and label rows."""
+
+    def score(
+        self,
+        predictions: PredictOutput,
+        config: ScoreConfig,
+        *,
+        seed: int = 710019,
+    ) -> ScoreOutput:
+        from modules.evaluate.src.metrics.scoring import score_flat
+
+        return score_flat(self, predictions, config, seed=seed)
 
     def compute_metrics(
         self,
@@ -388,41 +647,40 @@ class TaskHandler(ABC):
                 scores[name] = float(self.metrics[name](predictions, labels, average))
         return scores
 
-    def validate_metric_inputs(self, predictions: Sequence, labels: Sequence) -> None:
-        """Reject labels outside the configured vocabulary rather than omit them."""
-        if self.class_labels is None:
-            return
-        pred_array, label_array = np.asarray(predictions), np.asarray(labels)
-        if pred_array.shape != label_array.shape:
-            raise ValueError("Classification prediction and label shapes must match.")
-        if self.name == "sequence_multilabel_classification":
-            if label_array.ndim != 2 or label_array.shape[1] != len(self.class_labels):
-                raise ValueError(
-                    "Multilabel metric inputs must have one column per configured label."
-                )
-            if (
-                not np.isin(pred_array, (0, 1)).all()
-                or not np.isin(label_array, (0, 1)).all()
-            ):
-                raise ValueError("Multilabel metric inputs must contain binary values.")
-        elif (
-            pred_array.ndim != 1
-            or not np.isin(pred_array, self.class_labels).all()
-            or not np.isin(label_array, self.class_labels).all()
-        ):
-            raise ValueError(
-                "Classification metric inputs contain labels outside the configured "
-                "class vocabulary; token ignore-index positions must be removed first."
-            )
 
-    # -- controls ------------------------------------------------------------
+class StructuredTask(TaskHandler, abstract=True):
+    """Tasks scored using structured prediction records."""
 
-    def scramble_labels(self, labels: list[Any], rng: np.random.Generator) -> list[Any]:
-        """Permute labels to build a chance-level control.
+    @abstractmethod
+    def prepare_inputs(
+        self,
+        *,
+        inputs: EvaluationWorkspaceConfig,
+        config: PrepareConfig,
+        dataset: DatasetDict | None,
+        predictor: str | None,
+        device: torch.device,
+    ) -> PreparedArtifacts:
+        """Construct scientific inputs without cache or workspace operations."""
+        ...
 
-        Predictions are unchanged, but their association with the true labels
-        is destroyed, so the resulting metric approximates what's attainable by
-        chance given the label distribution.
-        """
-        permuted_idx = rng.permutation(len(labels))
-        return [labels[j] for j in permuted_idx]
+    @abstractmethod
+    def predict(
+        self,
+        prepared: PreparedArtifacts,
+        metadata: EvaluationMetadata,
+        config: PredictConfig,
+    ) -> PredictOutput:
+        """Construct structured observations for the primary and requested controls."""
+        ...
+
+    @abstractmethod
+    def score(
+        self,
+        predictions: PredictOutput,
+        config: ScoreConfig,
+        *,
+        seed: int = 710019,
+    ) -> StructuredScoreOutput:
+        """Validate the scoring protocol and return tables for publication."""
+        ...

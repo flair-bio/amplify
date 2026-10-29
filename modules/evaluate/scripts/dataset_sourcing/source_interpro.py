@@ -16,31 +16,33 @@ import polars as pl
 from pydantic import ConfigDict, Field
 
 from modules.core.utils.hf_download import resolve_hf_token
-from modules.evaluate.src.dataset_sourcing.config import (
+from modules.evaluate.scripts.dataset_sourcing.shared.config import (
     DEFAULT_MIN_SOURCE_LABEL_COUNT,
     UniProtLabelSupportConfig,
     UniProtReviewStatus,
 )
-from modules.evaluate.src.dataset_sourcing.downloads import (
+from modules.evaluate.scripts.dataset_sourcing.shared.downloads import (
     UNIPROT_STREAM_URL,
     build_uniprot_query,
     download_uniprot_tsv,
     download_url,
     read_uniprot_tsv,
 )
-from modules.evaluate.src.dataset_sourcing.hf_io import upload_dataset_artifact
-from modules.evaluate.src.dataset_sourcing.outputs import (
+from modules.evaluate.scripts.dataset_sourcing.shared.hf_io import (
+    upload_dataset_artifact,
+)
+from modules.evaluate.scripts.dataset_sourcing.shared.outputs import (
     generated_utc_date,
     mmseqs_settings_lines,
     write_dataset_stats,
     write_hf_split_files,
 )
-from modules.evaluate.src.dataset_sourcing.pipeline import (
+from modules.evaluate.scripts.dataset_sourcing.shared.pipeline import (
     prepare_output_dir,
     resolve_datasets,
     run_script,
 )
-from modules.evaluate.src.dataset_sourcing.preprocess import (
+from modules.evaluate.scripts.dataset_sourcing.shared.preprocess import (
     merge_label_sets_by_sequence,
     split_by_clusters,
 )

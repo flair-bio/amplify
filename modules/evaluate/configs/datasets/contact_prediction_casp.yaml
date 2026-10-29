@@ -1,0 +1,10 @@
+workspace:
+  # Full chains, including >=2048 residues, remain included pending protocol revision.
+  dataset_name: contact_prediction_casp
+  dataset_repo_id: flair-bio/evaluation-suite
+  dataset_config_name: contact_prediction_casp
+  dataset_revision: null # set an immutable HF commit SHA (or use a local Parquet artifact)
+  default_task_type: contact_prediction
+  target_type: categorical
+  label_format: contact_pairs
+  num_labels: null

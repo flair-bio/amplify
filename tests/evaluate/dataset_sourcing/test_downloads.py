@@ -9,9 +9,9 @@ from modules.evaluate.scripts.dataset_sourcing.source_interpro import (
     SourceInterProConfig,
     download_sources,
 )
-from modules.evaluate.src.dataset_sourcing import downloads
-from modules.evaluate.src.dataset_sourcing.config import UniProtDatasetSourcingConfig
-from modules.evaluate.src.dataset_sourcing.downloads import (
+from modules.evaluate.scripts.dataset_sourcing.shared import downloads
+from modules.evaluate.scripts.dataset_sourcing.shared.config import UniProtDatasetSourcingConfig
+from modules.evaluate.scripts.dataset_sourcing.shared.downloads import (
     build_uniprot_query,
     download_url,
     download_uniprot_tsv,

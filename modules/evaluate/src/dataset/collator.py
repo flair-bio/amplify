@@ -29,7 +29,7 @@ def unpack_packed(
     tensor: torch.Tensor,
     cu_seqlens: torch.Tensor,
     num_sequences: int,
-    pad_value: int | float = 0,
+    pad_value: float = 0,
 ) -> torch.Tensor:
     offsets = cu_seqlens[: num_sequences + 1].tolist()
     return pad_sequence(

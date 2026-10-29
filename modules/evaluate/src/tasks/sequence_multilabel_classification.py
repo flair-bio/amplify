@@ -10,12 +10,12 @@ import torch
 from transformers import AutoModelForSequenceClassification
 
 from modules.evaluate.src.metrics import metrics
-from modules.evaluate.src.tasks.base import MetricFn, TaskHandler
+from modules.evaluate.src.tasks.base import FlatMetricsTask, MetricFn
 from modules.evaluate.src.tasks.registry import register_task
 
 
 @register_task
-class SequenceMultilabelClassificationTask(TaskHandler):
+class SequenceMultilabelClassificationTask(FlatMetricsTask):
     """Multiple independent binary labels per sequence.
 
     Each source label is a fixed-width binary indicator vector, collated as a
@@ -23,6 +23,8 @@ class SequenceMultilabelClassificationTask(TaskHandler):
     ``AutoModelForSequenceClassification``'s ``BCEWithLogitsLoss`` path
     (``problem_type='multi_label_classification'``) expects.
     """
+
+    supports_layerwise = True
 
     name = "sequence_multilabel_classification"
     auto_model_class = AutoModelForSequenceClassification

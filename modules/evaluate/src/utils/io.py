@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import polars as pl
+
+from modules.evaluate.src.utils.storage import atomic_output
 
 
 @contextmanager
@@ -37,16 +39,14 @@ def log_to_file(path: Path) -> Iterator[None]:
         handler.close()
 
 
-def write_json(path: Path, payload: dict[str, Any]) -> Path:
+def write_json(path: Path, payload: Mapping[str, Any]) -> Path:
     """Write *payload* to *path* as indented JSON, creating parent dirs.
 
     Returns *path* so callers can assign and use it in one expression.
     Atomic: a crash mid-write leaves the previous file intact.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2))
-    tmp.replace(path)
+    with atomic_output(path) as temporary:
+        temporary.write_text(json.dumps(dict(payload), indent=2))
     return path
 
 
@@ -58,8 +58,8 @@ def write_parquet(df: pl.DataFrame, path: Path) -> Path:
     ``EvaluationWorkspace.setup_directories()`` having already run.
     Returns *path* so callers can assign and use it in one expression.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.write_parquet(path)
+    with atomic_output(path) as temporary:
+        df.write_parquet(temporary)
     return path
 
 

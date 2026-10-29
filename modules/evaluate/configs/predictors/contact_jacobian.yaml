@@ -1,0 +1,12 @@
+steps:
+  mode: evaluate_as_is
+  prepare:
+    embedding_cache:
+      enabled: false
+      cache_policy: "off"
+  tune:
+    head:
+      head_type: categorical_jacobian
+    hyperparameter_search:
+      enabled: false
+    refit_on_train_validation: false

@@ -10,6 +10,9 @@ calls ``from_pretrained`` against a real Hub repo id.
 """
 
 from __future__ import annotations
+from modules.evaluate.src.steps.controls import ControlsStep
+from modules.evaluate.src.contracts.config import PrepareConfig
+from modules.evaluate.src.model.inference import run_local_head_inference
 
 from types import SimpleNamespace
 import sys
@@ -20,29 +23,25 @@ import pytest
 import polars as pl
 from datasets import DatasetDict
 
-from modules.evaluate.src.dataset.collator import (
-    EvaluationCollator,
-    EvaluationCollatorConfig,
-)
+from modules.evaluate.src.dataset.collator import EvaluationCollator, EvaluationCollatorConfig
 from modules.evaluate.src.dataset.dataloader import DataLoaderConfig, build_dataloaders
 from modules.evaluate.src.dataset.dataloader import tokenize_dataset
-from modules.evaluate.src.dataset.workspace import (
-    EvaluationWorkspaceConfig,
-    get_evaluation_workspace,
-)
-from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
-from modules.evaluate.src.config import EvaluationConfig, LayerwiseConfig
-from modules.evaluate.src.steps.predict import PredictConfig, PredictStep
-from modules.evaluate.src.steps.score import ScoreConfig, ScoreStep
-from modules.evaluate.src.steps.tune import TuneConfig, TuneStep
-from modules.evaluate.src.model.heads import HeadConfig
-from modules.evaluate.src.utils.controls import ControlBuilder
-from modules.evaluate.src.utils.embed import (
-    EmbeddingCacheConfig,
-    find_embedding_dataset,
-)
+from modules.evaluate.src.contracts.config import EvaluationWorkspaceConfig
+from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
+from modules.evaluate.src.contracts.artifacts import PreparedArtifacts
+from modules.evaluate.src.contracts.config import EvaluationConfig, LayerwiseConfig
+from modules.evaluate.src.contracts.config import PredictConfig
+from modules.evaluate.src.steps.predict import PredictStep
+from modules.evaluate.src.contracts.config import ScoreConfig
+from modules.evaluate.src.steps.score import ScoreStep
+from modules.evaluate.src.contracts.config import TuneConfig
+from modules.evaluate.src.steps.tune import TuneStep
+from modules.evaluate.src.contracts.config import HeadConfig
+from modules.evaluate.src.steps.controls import ControlBuilder
+from modules.evaluate.src.contracts.config import EmbeddingCacheConfig
+from modules.evaluate.src.dataset.embeddings import find_embedding_dataset
 from unittest.mock import MagicMock
-from modules.evaluate.src.utils.inference import run_inference
+from modules.evaluate.src.model.inference import run_inference
 
 from .conftest import ModelFamily, build_raw_dataset_dict, build_tiny_model
 from .test_prepare import _make_workspace, _run_prepare
@@ -56,7 +55,7 @@ from .test_prepare import _make_workspace, _run_prepare
 def test_prediction_batch_progress_is_scoped_and_throttled(
     monkeypatch, caplog, label, main, backend
 ):
-    from modules.evaluate.src.utils import inference
+    from modules.evaluate.src.model import inference
 
     now = [0.0]
     monkeypatch.setattr(inference, "monotonic", lambda: now[0])
@@ -95,16 +94,16 @@ def test_prediction_batch_progress_is_scoped_and_throttled(
             )
             assert result[:3] == (list(range(5)), [0] * 5, [0] * 5)
         elif backend == "control":
-            from modules.evaluate.src.utils import controls
+            from modules.evaluate.src.steps import controls
             monkeypatch.setattr(controls, "monotonic", lambda: now[0])
-            result = ControlBuilder._run_local_head_inference(
+            result = run_local_head_inference(
                 Model(), torch.utils.data.DataLoader(batches, batch_size=None),
                 "sequence_classification", False, accelerator,
                 gather_across_processes=False, progress_label=label,
             )
             assert result[:2] == (list(range(5)), [0] * 5)
         else:
-            from modules.evaluate.src.utils import layerwise
+            from modules.evaluate.src.model import layerwise
             monkeypatch.setattr(layerwise, "monotonic", lambda: now[0])
             result = layerwise.run_layerwise_conditions(
                 Model(), iter(batches), "sequence_classification", accelerator,
@@ -162,7 +161,9 @@ def test_online_layerwise_cli_branch(monkeypatch, tmp_path, model_family):
     run_evaluate.main()
     for layer in (0, 2):
         layer_workspace = get_evaluation_workspace(
-            config.workspace, variant=f"{config.variant}-layer_{layer}"
+            config.workspace,
+            variant=f"{config.variant}-layer_{layer}",
+            seed=config.seed,
         )
         assert (layer_workspace.preds_path / "predictions.parquet").exists()
         assert layer_workspace.run_manifest_path.exists()
@@ -271,8 +272,8 @@ def test_cached_layerwise_pipeline_scores_each_layer(
         ),
         embedding_cache=EmbeddingCacheConfig(enabled=True, dtype="float32"),
     )
-    assert prepared.embedding_backend is not None
-    assert prepared.embedding_backend.layers == [0, 2]
+    assert prepared.embedding is not None
+    assert prepared.embedding.backend.layers == [0, 2]
     assert find_embedding_dataset(prepared.train_dataloader) is not None
     prepared.model.trunk.forward = MagicMock(
         side_effect=AssertionError("cached probes ran the trunk")
@@ -313,7 +314,7 @@ def test_cached_layerwise_pipeline_scores_each_layer(
             for call in forward.call_args_list
         )
     decode_sequences.assert_called_once_with(
-        prepared.embedding_backend.token_test_dataloader,
+        prepared.embedding.backend.token_test_dataloader,
         prepared.tokenizer,
         accelerator,
     )
@@ -360,7 +361,7 @@ def test_cached_token_controls_preserve_extraction_order(
         embedding_batch_size=embedding_batch_size,
     )
     workspace = _make_workspace(tmp_path, "token_classification")
-    backend = prepared.embedding_backend
+    backend = prepared.embedding.backend
     assert backend is not None
     expected_ids = []
     expected_labels = []
@@ -373,13 +374,8 @@ def test_cached_token_controls_preserve_extraction_order(
             expected_labels.extend([[value] for value in valid_labels])
             example_offset += 1
 
-    TuneStep(
-        TuneConfig(
-            head=HeadConfig(head_type="torch_linear"),
-            max_epochs=1,
-            save_best_model=False,
-        )
-    ).run(workspace, prepared, controls=["random_trunk"], accelerator=Accelerator(cpu=True))
+    TuneStep(TuneConfig(head=HeadConfig(head_type='torch_linear'), max_epochs=1, save_best_model=False)).run(workspace, prepared, accelerator=Accelerator(cpu=True))
+    ControlsStep(TuneConfig(head=HeadConfig(head_type='torch_linear'), max_epochs=1, save_best_model=False), PrepareConfig()).run(workspace, prepared, controls=['random_trunk'], accelerator=Accelerator(cpu=True))
     result = PredictStep(
         PredictConfig(controls=["untrained", "random_head", "random_trunk", "random_both"])
     ).run(workspace, prepared, accelerator=Accelerator(cpu=True))
@@ -403,15 +399,10 @@ def test_cached_prediction_batching_is_independent_of_protein_batches(
     )
     workspace = _make_workspace(tmp_path, task_type)
     loader = prepared.test_dataloader
-    backend = prepared.embedding_backend
+    backend = prepared.embedding.backend
     controls = ["untrained", "random_head", "random_trunk", "random_both"]
-    TuneStep(
-        TuneConfig(
-            head=HeadConfig(head_type="torch_linear"),
-            max_epochs=1,
-            save_best_model=False,
-        )
-    ).run(workspace, prepared, controls=controls, accelerator=Accelerator(cpu=True))
+    TuneStep(TuneConfig(head=HeadConfig(head_type='torch_linear'), max_epochs=1, save_best_model=False)).run(workspace, prepared, accelerator=Accelerator(cpu=True))
+    ControlsStep(TuneConfig(head=HeadConfig(head_type='torch_linear'), max_epochs=1, save_best_model=False), PrepareConfig()).run(workspace, prepared, controls=controls, accelerator=Accelerator(cpu=True))
     with caplog.at_level("INFO"):
         baseline = PredictStep(
             PredictConfig(controls=controls, collect_probabilities=True)
@@ -422,12 +413,12 @@ def test_cached_prediction_batching_is_independent_of_protein_batches(
         for m in caplog.messages
     )
 
-    from modules.evaluate.src.utils import controls as control_module
+    from modules.evaluate.src.steps import controls as control_module
     from modules.evaluate.src.steps import predict as predict_module
 
     local_inference = MagicMock(wraps=predict_module.run_local_embedding_inference)
     monkeypatch.setattr(predict_module, "run_local_embedding_inference", local_inference)
-    control_inference = ControlBuilder._run_local_head_inference
+    control_inference = run_local_head_inference
     control_batch_sizes = []
 
     def capture_batches(head, dataloader, *args, **kwargs):
@@ -435,9 +426,9 @@ def test_cached_prediction_batching_is_independent_of_protein_batches(
         return control_inference(head, dataloader, *args, **kwargs)
 
     monkeypatch.setattr(
-        control_module.ControlBuilder,
-        "_run_local_head_inference",
-        staticmethod(capture_batches),
+        control_module,
+        "run_local_head_inference",
+        capture_batches,
     )
     result = PredictStep(
         PredictConfig(
@@ -449,7 +440,8 @@ def test_cached_prediction_batching_is_independent_of_protein_batches(
     assert local_inference.call_args.args[6] == 7
     assert control_batch_sizes == [7] * len(controls)
     assert prepared.test_dataloader is loader
-    assert prepared.embedding_backend is backend
+    assert prepared.embedding is not None
+    assert prepared.embedding.backend is backend
     for actual, expected in [
         (result.predictions, baseline.predictions),
         *[(result.controls[name], baseline.controls[name]) for name in controls],
@@ -472,7 +464,7 @@ def test_cached_prediction_batching_is_independent_of_protein_batches(
 def test_model_controls_align_repeated_and_unique_ids(
     monkeypatch, test_ids, control_ids, expected
 ):
-    from modules.evaluate.src.utils import controls
+    from modules.evaluate.src.steps import controls
 
     builder = ControlBuilder(collect_probabilities=False)
     monkeypatch.setattr(builder, "_build_control_model", lambda *args: object())
@@ -491,7 +483,7 @@ def test_model_controls_align_repeated_and_unique_ids(
     result, _ = builder.build(
         "random_both",
         SimpleNamespace(task_type="pseudo_perplexity"),
-        SimpleNamespace(embedding_backend=None, test_dataloader=None, tokenizer=None),
+        SimpleNamespace(embedding=None, test_dataloader=None, tokenizer=None),
         predictions,
         Accelerator(cpu=True),
         seed=1,
@@ -502,7 +494,7 @@ def test_model_controls_align_repeated_and_unique_ids(
 
 @pytest.mark.parametrize("control_ids", [["p1", "p2", "p1"], ["p1", "p1"]])
 def test_model_controls_reject_misaligned_repeated_ids(monkeypatch, control_ids):
-    from modules.evaluate.src.utils import controls
+    from modules.evaluate.src.steps import controls
 
     builder = ControlBuilder(collect_probabilities=False)
     monkeypatch.setattr(builder, "_build_control_model", lambda *args: object())
@@ -523,7 +515,7 @@ def test_model_controls_reject_misaligned_repeated_ids(monkeypatch, control_ids)
             "random_both",
             SimpleNamespace(task_type="pseudo_perplexity"),
             SimpleNamespace(
-                embedding_backend=None, test_dataloader=None, tokenizer=None
+                embedding=None, test_dataloader=None, tokenizer=None
             ),
             predictions,
             Accelerator(cpu=True),
@@ -554,12 +546,8 @@ def test_cached_layerwise_token_controls(monkeypatch, tmp_path, model_family):
         "random_both",
         "majority_class",
     ]
-    prepared = TuneStep(
-        TuneConfig(
-            head=HeadConfig(head_type="torch_linear"),
-            max_epochs=1,
-        )
-    ).run(workspace, prepared, accelerator=accelerator, controls=controls)
+    prepared = TuneStep(TuneConfig(head=HeadConfig(head_type='torch_linear'), max_epochs=1)).run(workspace, prepared, accelerator=accelerator)
+    ControlsStep(TuneConfig(head=HeadConfig(head_type='torch_linear'), max_epochs=1), PrepareConfig()).run(workspace, prepared, accelerator=accelerator, controls=controls)
     results = PredictStep(PredictConfig(controls=controls)).run_layerwise(
         workspace, prepared, accelerator, seed=710019
     )
@@ -587,14 +575,13 @@ def test_cached_layerwise_token_controls(monkeypatch, tmp_path, model_family):
 
 @pytest.mark.parametrize("control", ["random_trunk", "random_both"])
 def test_layerwise_random_trunk_controls_require_tuned_baseline(control):
-    from modules.evaluate.src.utils.layerwise import run_layerwise_control_conditions
+    from modules.evaluate.src.model.layerwise import run_layerwise_control_conditions
 
     prepared = SimpleNamespace(
-        embedding_backend=None,
-        layerwise_token_dataloaders=None,
-        layerwise_random_model=None,
+        embedding=None,
+        layerwise=None,
     )
-    with pytest.raises(ValueError, match="pass the predict controls to TuneStep"):
+    with pytest.raises(ValueError, match="pass the predict controls to ControlsStep.run"):
         run_layerwise_control_conditions(
             prepared,
             "sequence_classification",
@@ -633,12 +620,8 @@ def test_online_layerwise_controls_and_bootstrap(
         "scrambled_sequences",
         "majority_class",
     ]
-    prepared = TuneStep(
-        TuneConfig(
-            head=HeadConfig(head_type="torch_linear"),
-            max_epochs=1,
-        )
-    ).run(workspace, prepared, accelerator=accelerator, controls=controls)
+    prepared = TuneStep(TuneConfig(head=HeadConfig(head_type='torch_linear'), max_epochs=1)).run(workspace, prepared, accelerator=accelerator)
+    ControlsStep(TuneConfig(head=HeadConfig(head_type='torch_linear'), max_epochs=1), PrepareConfig()).run(workspace, prepared, accelerator=accelerator, controls=controls)
     results = PredictStep(PredictConfig(controls=controls)).run_layerwise(
         workspace, prepared, accelerator, seed=710019
     )
@@ -700,7 +683,7 @@ def test_control_head_uses_task_probability_conversion(
         {"inputs_embeds": row, "id": index}
         for index, row in enumerate(logits)
     ]
-    ids, predictions, probabilities = ControlBuilder._run_local_head_inference(
+    ids, predictions, probabilities = run_local_head_inference(
         Head(),
         DataLoader(rows, batch_size=1, collate_fn=lambda batch: {
             "inputs_embeds": torch.stack([row["inputs_embeds"] for row in batch]),
@@ -737,7 +720,7 @@ def test_cached_multilabel_control_probabilities_persist_sigmoid(
         num_labels=2,
         embedding_cache=EmbeddingCacheConfig(enabled=True, dtype="float32"),
     )
-    original = ControlBuilder._run_local_head_inference
+    original = run_local_head_inference
     captured = []
 
     def capture_logits(head, *args, **kwargs):
@@ -752,19 +735,14 @@ def test_cached_multilabel_control_probabilities_persist_sigmoid(
             hook.remove()
 
     monkeypatch.setattr(
-        ControlBuilder, "_run_local_head_inference", staticmethod(capture_logits)
+        "modules.evaluate.src.steps.controls.run_local_head_inference", capture_logits
     )
     workspace = _make_workspace(
         tmp_path, "sequence_multilabel_classification", num_labels=2
     )
     if control == "random_trunk":
-        TuneStep(
-            TuneConfig(
-                head=HeadConfig(head_type="torch_linear"),
-                max_epochs=1,
-                save_best_model=False,
-            )
-        ).run(workspace, prepared, controls=[control], accelerator=Accelerator(cpu=True))
+        TuneStep(TuneConfig(head=HeadConfig(head_type='torch_linear'), max_epochs=1, save_best_model=False)).run(workspace, prepared, accelerator=Accelerator(cpu=True))
+        ControlsStep(TuneConfig(head=HeadConfig(head_type='torch_linear'), max_epochs=1, save_best_model=False), PrepareConfig()).run(workspace, prepared, controls=[control], accelerator=Accelerator(cpu=True))
     result = PredictStep(
         PredictConfig(controls=[control], collect_probabilities=True)
     ).run(workspace, prepared, accelerator=Accelerator(cpu=True))

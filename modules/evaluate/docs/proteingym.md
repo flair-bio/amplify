@@ -54,14 +54,14 @@ The full archive for the selected track is downloaded and extracted, and the
 source converts every assay listed in that track's reference file. The sourcing
 script has no assay-subset option. Select a track with
 `track: dms_substitutions | dms_indels | clinical_substitutions |
-clinical_indels` in [`source_proteingym.yaml`](../configs/dataset_sourcing/source_proteingym.yaml).
+clinical_indels` in [`source_proteingym.yaml`](../scripts/dataset_sourcing/configs/source_proteingym.yaml).
 
 As with the other sourcing scripts, this only writes local artifacts by
 default. Set an HF owner to upload the normalized track after conversion:
 
 ```bash
 uv run python modules/evaluate/scripts/dataset_sourcing/source_proteingym.py \
-    modules/evaluate/configs/dataset_sourcing/source_proteingym.yaml \
+    modules/evaluate/scripts/dataset_sourcing/configs/source_proteingym.yaml \
     track=dms_substitutions \
     repo_owner=<your-hf-username-or-org>
 ```

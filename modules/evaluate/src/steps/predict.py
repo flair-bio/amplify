@@ -11,112 +11,51 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, cast
 
 import polars as pl
 import torch
 from accelerate import Accelerator
-from pydantic import BaseModel, ConfigDict, Field
 from sklearn.base import BaseEstimator
 
-from modules.evaluate.src.dataset.workspace import (
-    EvaluationWorkspace,
-    get_evaluation_workspace,
-)
-from modules.evaluate.src.model.heads import (
-    CLASSICAL_HEAD_TYPES,
-    run_classical_inference,
-)
-from modules.evaluate.src.model.layerwise import LayerwiseProbeModel
-from modules.evaluate.src.schemas.artifacts import (
+from modules.evaluate.src.contracts.artifacts import (
     EvaluationMetadata,
     PredictOutput,
     PreparedArtifacts,
 )
-from modules.evaluate.src.tasks import get_task
-from modules.evaluate.src.utils.controls import (
-    NO_INFERENCE_CONTROLS,
-    ControlBuilder,
-    ControlCondition,
+from modules.evaluate.src.contracts.config import (
+    BASELINE_NAMES,
+    CLASSICAL_HEAD_TYPES,
+    BaselineName,
+    PredictConfig,
 )
-from modules.evaluate.src.utils.embed import find_embedding_dataset
-from modules.evaluate.src.utils.inference import (
+from modules.evaluate.src.dataset.embeddings import find_embedding_dataset
+from modules.evaluate.src.dataset.workspace import (
+    EvaluationWorkspace,
+    get_evaluation_workspace,
+)
+from modules.evaluate.src.model.baselines import build_prediction_baseline
+from modules.evaluate.src.model.controls import NO_INFERENCE_CONTROLS
+from modules.evaluate.src.model.heads import run_classical_inference
+from modules.evaluate.src.model.inference import (
+    gather_training_labels,
     run_inference,
     run_local_embedding_inference,
 )
+from modules.evaluate.src.model.layerwise import (
+    LayerwiseProbeModel,
+    run_layerwise_control_conditions,
+)
+from modules.evaluate.src.steps.controls import ControlBuilder
+from modules.evaluate.src.tasks import get_task
+from modules.evaluate.src.tasks.base import StructuredTask
 from modules.evaluate.src.utils.io import (
     downcast_prediction_dtypes,
     update_run_manifest,
     write_parquet,
 )
-from modules.evaluate.src.utils.layerwise import (
-    run_layerwise_control_conditions,
-)
 
 logger = logging.getLogger(__name__)
-
-
-class PredictConfig(BaseModel):
-    """Config. for the predict step in evaluation."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    embedding_batch_size: int | None = Field(
-        None,
-        gt=0,
-        description=(
-            "Cached-feature rows per prediction batch, including controls. "
-            "Token caches count residues, not proteins. Null inherits the "
-            "prepared loader size; live trunk inference is unchanged."
-        ),
-    )
-    collect_probabilities: bool = Field(
-        False,
-        description=(
-            "Whether to collect per-example per-class probabilities "
-            "for the trained model and any model-based controls. Required "
-            "if ScoreConfig.metrics includes 'roc_auc'. When using the "
-            "top-level EvaluationConfig, this is auto-enabled when needed."
-        ),
-    )
-    predictions_filename: str = "predictions.parquet"
-    persist_to_disk: bool = Field(
-        True,
-        description=(
-            "Write predictions and the predict manifest to disk. Disable for "
-            "fast in-process evaluation when ScoreStep receives this step's "
-            "PredictOutput directly."
-        ),
-    )
-    store_sequences: bool = Field(
-        False,
-        description=(
-            "Whether to decode and persist input sequences alongside primary "
-            "predictions. Kept off by default to reduce prediction-time "
-            "memory use and parquet size. This only affects the main "
-            "predictions table; the scrambled_sequences control still stores "
-            "its transformed sequences regardless."
-        ),
-    )
-
-    # Control conditions to compute predictions for, so ScoreStep can compare
-    # the trained model against them:
-    # - "untrained": the pretrained trunk with a freshly-initialized head,
-    #   i.e. the model as it was before fine-tuning.
-    # - "random_trunk": independently tuned/refitted probe on random features
-    #   for cached probes; a trunk-replacement ablation for live/native runs.
-    # - "random_head"/"random_both": the trained model with its head/both
-    #   randomly re-initialized, without retraining.
-    # - "scrambled_labels": no inference needed -- ScoreStep derives this
-    #   directly from the trained model's own predictions/labels.
-    # - "scrambled_sequences": the trained model's predictions on inputs
-    #   whose token order has been shuffled (sequence-level tasks only).
-    # - "majority_class": a constant class predictor selected from the
-    #   training split's class frequencies (a simple non-model baseline).
-    # - "train_mean": a constant regression predictor equal to the
-    #   training split's label mean (the regression counterpart to
-    #   "majority_class").
-    controls: list[ControlCondition] = Field(default_factory=lambda: ["random_trunk"])
 
 
 def persist_predictions(
@@ -180,26 +119,33 @@ class PredictStep:
         inner = accelerator.unwrap_model(prepared.model)
         if not isinstance(inner, LayerwiseProbeModel):
             raise TypeError("Layerwise prediction requires a LayerwiseProbeModel.")
-        using_embeddings = prepared.embedding_backend is not None
+        using_embeddings = prepared.embedding is not None
         conditions = run_layerwise_control_conditions(
             prepared, workspace.task_type, accelerator, self.config, seed
         )
 
         sequence_by_id = None
         if using_embeddings and self.config.store_sequences:
-            assert prepared.embedding_backend is not None
+            assert prepared.embedding is not None
             sequence_by_id = self._decode_token_dataloader(
-                prepared.embedding_backend.token_test_dataloader,
+                prepared.embedding.backend.token_test_dataloader,
                 prepared.tokenizer,
                 accelerator,
             )
 
         outputs: dict[int, PredictOutput] = {}
+        train_labels = (
+            gather_training_labels(prepared, accelerator)
+            if set(self.config.baselines) & BASELINE_NAMES
+            else None
+        )
         for layer, (ids, predictions, labels, probabilities, sequences) in conditions[
             "trained"
         ].items():
             layer_workspace = get_evaluation_workspace(
-                workspace.config, variant=f"{workspace.variant}-layer_{layer}"
+                workspace.config,
+                variant=f"{workspace.variant}-layer_{layer}",
+                seed=workspace.seed,
             )
             layer_workspace.setup_directories()
             metadata = EvaluationMetadata(
@@ -207,13 +153,14 @@ class PredictStep:
                 model_repo_id=workspace.model_repo_id,
                 dataset_name=workspace.dataset_name,
                 dataset_repo_id=workspace.dataset_repo_id,
+                dataset_config_name=workspace.config.dataset_config_name,
+                dataset_revision=workspace.config.dataset_revision,
                 task_type=workspace.task_type,
                 split=prepared.split,
                 seed=seed,
                 head_type="torch_linear",
                 layer_index=layer,
                 variant=layer_workspace.variant,
-                **prepared.cv_metadata(),
             )
             data: dict[str, list[Any]] = {
                 "layer_index": [layer] * len(ids),
@@ -235,19 +182,18 @@ class PredictStep:
                     how="left",
                 )
             controls: dict[str, pl.DataFrame] = {}
-            for control in self.config.controls:
+            for control in self.config.conditions:
                 if control in NO_INFERENCE_CONTROLS:
                     continue
-                if control in {"majority_class", "train_mean"}:
-                    controls[control], _ = ControlBuilder(
-                        self.config.collect_probabilities
-                    ).build(
-                        control,
-                        layer_workspace,
-                        prepared,
+                if control in BASELINE_NAMES:
+                    assert train_labels is not None
+                    controls[control] = build_prediction_baseline(
+                        cast(BaselineName, control),
+                        workspace.task_type,
+                        workspace.dataset_name,
+                        workspace.num_labels,
                         predictions_df,
-                        accelerator,
-                        seed,
+                        train_labels,
                     )
                     controls[control] = controls[control].with_columns(
                         pl.lit(layer).alias("layer_index")
@@ -279,7 +225,7 @@ class PredictStep:
                 metadata=metadata,
                 predictions=predictions_df,
                 controls=controls,
-                requested_controls=list(self.config.controls),
+                requested_controls=self.config.conditions,
                 config=self.config.model_dump(mode="json"),
                 baseline_context=prepared.baseline_context,
             )
@@ -296,13 +242,36 @@ class PredictStep:
         variant: str | None = None,
         accelerator: Accelerator | None = None,
     ) -> PredictOutput:
-        # Guard in case the user misconfigures the pipeline and tries to run PredictStep without a test dataloader (e.g. no 'test' split in the dataset).
+        metadata = EvaluationMetadata(
+            model_name=workspace.model_name,
+            model_repo_id=workspace.model_repo_id,
+            dataset_name=workspace.dataset_name,
+            dataset_repo_id=workspace.dataset_repo_id,
+            dataset_config_name=workspace.config.dataset_config_name,
+            dataset_revision=workspace.config.dataset_revision,
+            task_type=workspace.task_type,
+            split=prepared.split,
+            seed=seed,
+            head_type=head_type,
+            variant=variant,
+        )
+        task = get_task(workspace.task_type, workspace.num_labels)
+        if isinstance(task, StructuredTask):
+            if accelerator is not None and accelerator.num_processes != 1:
+                raise ValueError("Structured prediction requires a single process")
+            output = task.predict(prepared, metadata, self.config)
+            output.config = self.config.model_dump(mode="json")
+            if self.config.persist_to_disk and (
+                accelerator is None or accelerator.is_main_process
+            ):
+                persist_predictions(workspace, output, seed)
+            return output
         if prepared.test_dataloader is None:
             raise ValueError(
                 "PredictStep requires a test_dataloader, but the Prepare "
                 "step did not produce one (no 'test' split in the dataset)."
             )
-
+        assert prepared.test_dataloader is not None
         # The pipeline passes the same instance used by Prepare/Tune, so
         # gather_for_metrics() and is_main_process use one process state.
         if accelerator is None:
@@ -327,7 +296,7 @@ class PredictStep:
         # pooled inputs_embeds, not tokens, so sequences can't be decoded
         # from it directly -- decode separately from the retained
         # token-based dataloader and join back onto predictions by id below.
-        using_embeddings = prepared.embedding_backend is not None
+        using_embeddings = prepared.embedding is not None
 
         # Classical heads are fitted estimators over cached embeddings, not
         # torch modules, so they use their direct prediction path.
@@ -404,19 +373,6 @@ class PredictStep:
             )
 
         # Keep track of conditions for reproducibility and downstream steps like ScoreStep
-        metadata = EvaluationMetadata(
-            model_name=workspace.model_name,
-            model_repo_id=workspace.model_repo_id,
-            dataset_name=workspace.dataset_name,
-            dataset_repo_id=workspace.dataset_repo_id,
-            task_type=workspace.task_type,
-            split=prepared.split,
-            seed=seed,
-            head_type=head_type,
-            variant=variant,
-            **prepared.cv_metadata(),
-        )
-
         prediction_data: dict[str, list[Any]] = {
             "id": ids,
             "prediction": predictions,
@@ -429,9 +385,9 @@ class PredictStep:
         predictions_df = pl.DataFrame(prediction_data)
 
         if using_embeddings and self.config.store_sequences:
-            assert prepared.embedding_backend is not None
+            assert prepared.embedding is not None
             sequence_by_id = self._decode_token_dataloader(
-                prepared.embedding_backend.token_test_dataloader,
+                prepared.embedding.backend.token_test_dataloader,
                 prepared.tokenizer,
                 accelerator,
             )
@@ -445,16 +401,30 @@ class PredictStep:
             )
         controls: dict[str, pl.DataFrame] = {}
         control_paths: dict[str, Path] = {}
+        train_labels = None
         control_builder = ControlBuilder(
             self.config.collect_probabilities,
             embedding_batch_size=self.config.embedding_batch_size,
         )
-        for control in self.config.controls:
+        for control in self.config.conditions:
             if control in NO_INFERENCE_CONTROLS:
                 continue
-            control_df, control_path = control_builder.build(
-                control, workspace, prepared, predictions_df, accelerator, seed
-            )
+            if control in BASELINE_NAMES:
+                if train_labels is None:
+                    train_labels = gather_training_labels(prepared, accelerator)
+                control_df = build_prediction_baseline(
+                    cast(BaselineName, control),
+                    workspace.task_type,
+                    workspace.dataset_name,
+                    workspace.num_labels,
+                    predictions_df,
+                    train_labels,
+                )
+                control_path = None
+            else:
+                control_df, control_path = control_builder.build(
+                    control, workspace, prepared, predictions_df, accelerator, seed
+                )
             controls[control] = control_df
             if control_path is not None:
                 control_paths[control] = control_path
@@ -466,7 +436,7 @@ class PredictStep:
             predictions=predictions_df,
             controls=controls,
             control_paths=control_paths,
-            requested_controls=list(self.config.controls),
+            requested_controls=self.config.conditions,
             config=self.config.model_dump(mode="json"),
             baseline_context=prepared.baseline_context,
         )

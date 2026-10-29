@@ -24,8 +24,11 @@ steps.predict.controls → Predict: build each control's predictions
   `scrambled_labels` needs no inference and has no file.
 - Sequence `majority_class` and `train_mean` run separately with
   `run_evaluate.py --baselines`. Score loads their shared artifacts; model
-  evaluations never generate them. Token majority and contact separation
-  priors still run inside Predict.
+  evaluations never generate them. Token majority runs inside Predict via
+  `steps.predict.baselines=[majority_class]`.
+- CASP supports the independent `random_trunk` control for all three predictors.
+  Bilinear and attention controls fit their own heads; Jacobian controls are
+  zero-shot. Their hierarchical scores do not require generic bootstrap.
 - Model-control predictions are rebuilt from the current head; only
   frozen-trunk embeddings are reused through the embedding cache.
 - Comparisons only exist when `steps.score.bootstrap_enabled=true`. The
@@ -51,7 +54,8 @@ The baseline route ignores model/tuning settings and uses train-only labels,
 never validation or final-refit-only data. External test predictions use the
 same source training prior.
 
-Artifacts live under `<base_path>/baselines/<name>/<fit-hash>/tests/<test-hash>/`.
+Artifacts live under
+`<benchmark-root>/<task_type>/<dataset_name>/baselines/<name>/fit-<hash>/test-<hash>/`.
 Identity includes actual sequence/ID/label content, source split mappings, and
 the task/class contract. Completed artifacts are reused; inconsistent or
 corrupt files fail explicitly. Scoring checks IDs, labels, and observation
@@ -60,9 +64,11 @@ references and baseline point scores even without bootstrap comparisons.
 Constant-prediction Spearman is NaN; undefined paired comparisons are omitted.
 
 Missing artifacts are an error with instructions to run `--baselines`, not an
-automatic baseline job. CV and shared token/contact baselines are not supported
-by this route yet; use `baselines.names=[]` for CV. Existing token/contact
-controls are unchanged. Composition and MMseqs remain unimplemented.
+automatic baseline job. Shared token/contact baselines are not supported
+by this route. Token majority uses `steps.predict.baselines`, not `controls`;
+legacy accepted control lists are normalized with a deprecation warning.
+Duplicate requests fail. CASP does not support `separation_prior`.
+Composition and MMseqs remain unimplemented.
 
 ## Catalog
 
@@ -75,6 +81,10 @@ keeps depends on the task.*
 
 `random_trunk` trains a separate probe in cached and layerwise runs.
 Other model controls replace weights or inputs without retraining.
+For CASP, the task specifies an independent randomized predictor and fitting
+protocol. The control stage materializes its feature requests and publishes
+the result; bilinear/attention controls train independently, while the
+categorical Jacobian remains zero-shot.
 
 | Control | What changes | Retrained? | Question it answers |
 |---|---|---|---|
@@ -86,7 +96,6 @@ Other model controls replace weights or inputs without retraining.
 | `scrambled_labels` | Trained predictions scored against permuted labels | — | Is performance above chance for this label distribution? |
 | `majority_class` | Most frequent train class, with the train class prior as probabilities | — | Classification floor; ROC-AUC is 0.5 by construction |
 | `train_mean` | Train label mean for every example | — | Regression floor |
-| `separation_prior` | Train contact rate for each residue separation | — | Contact floor: "nearby residues touch" |
 
 Details that change the interpretation:
 
@@ -100,7 +109,7 @@ Details that change the interpretation:
   train+validation features. Test features never enter selection or fitting.
   Predict regenerates the same seeded random trunk and uses that fitted probe,
   not the pretrained-feature probe's weights or scaler. Pass the requested
-  controls to `TuneStep.run` before prediction; a missing fitted probe is an
+  controls to `ControlsStep.run` after tuning and before prediction; a missing fitted probe is an
   error. Checkpoints/settings use a separate `<variant>-random_trunk` workspace.
   This adds a second search/refit when HPO is enabled.
 - **`random_trunk` in layerwise mode:** probes are retrained on a random trunk
@@ -116,13 +125,13 @@ Details that change the interpretation:
 - **`scrambled_labels` permutes at the task's natural unit:**
   - sequence tasks: across examples;
   - `token_classification`: within each sequence;
-  - contact tasks: across scored pairs within each protein. This also destroys
-    separation structure, so `separation_prior` is the tighter contact floor.
+  - contact tasks: across scored pairs within each protein.
 - **Randomness:** each control re-seeds from the run seed, so its result
   doesn't depend on the order in which controls are built.
 
-Source: [`utils/controls.py`](../src/utils/controls.py); label scrambling is
-`scramble_labels` on each task handler in [`src/tasks/`](../src/tasks/).
+Prediction/cache coordination is in [`steps/controls.py`](../src/steps/controls.py);
+weight ablations are in [`model/controls.py`](../src/model/controls.py).
+Label and input scrambling belong to task handlers in [`src/tasks/`](../src/tasks/).
 
 ## Defaults and compatibility
 
@@ -134,25 +143,25 @@ Each task config ships a preset; override it with `steps.predict.controls`
 | `sequence_classification` | `random_trunk`; shared `majority_class` |
 | `sequence_multilabel_classification` | `random_trunk` |
 | `sequence_regression` | `random_trunk`; shared `train_mean` |
-| `token_classification` | `random_trunk`, `majority_class` |
-| `contact_prediction` | `random_trunk`, `separation_prior` |
-| `categorical_jacobian` | `random_trunk`, `separation_prior` |
+| `token_classification` | `random_trunk`; inline `majority_class` baseline |
+| `contact_prediction` | `random_trunk` (independent fitted/zero-shot predictor) |
 | `pseudo_perplexity` | `random_trunk` |
 | `calibration` | `random_trunk` |
 
 `random_trunk` is the per-model default. Other controls remain available by
-explicit override. Shared sequence baselines run once per dataset/split/protocol
-with `--baselines`; token/contact priors still compute per run. Composition, MMseqs k-NN,
+explicit override where supported. Shared sequence baselines run once per
+dataset/split/protocol with `--baselines`; token majority computes per run.
+Composition, MMseqs k-NN,
 multilabel priors, and amino-acid-frequency baselines are not configured
 because they are not implemented.
 
-Config validation ([`utils/config_validation.py`](../src/utils/config_validation.py))
+Config validation ([`contracts/validation.py`](../src/contracts/validation.py))
 rejects these combinations before any work starts:
 
 - `scrambled_sequences` on ragged tasks (`token_classification`, contact
   tasks): position-aligned labels would not move with the shuffled tokens.
 - `majority_class` on regression or multilabel tasks; `train_mean` outside
-  `sequence_regression`; `separation_prior` outside contact tasks.
+  `sequence_regression`; generic controls on the CASP contact path.
 - `untrained`, `random_head`, `random_both` with classical heads (`knn`,
   `sklearn_linear`, `random_forest`, `xgboost`): a fitted estimator has no
   random re-initialization.
@@ -163,7 +172,7 @@ Each control answers a different question, so read them together:
 
 | Trained model beats... | What it shows | If it doesn't |
 |---|---|---|
-| `scrambled_labels`, `majority_class`, `train_mean`, `separation_prior` | Predictions beat the label or separation prior | The model has learned nothing usable for this task |
+| `scrambled_labels`, `majority_class`, `train_mean` | Predictions beat the label prior | The model has learned nothing usable for this task |
 | `scrambled_sequences` | The model uses residue order | The task may be solvable from composition and length alone |
 | `random_trunk` (cached/layerwise) | Pretrained features beat a separately fitted random-feature probe | The comparison does not establish a benefit from pretraining |
 | `untrained`, `random_head`, `random_trunk` (live/native), `random_both` | The trained weights are what produce the score | Something is wrong with tuning or loading; check the run |
@@ -195,21 +204,23 @@ Per (control, metric), Score reports:
 
 Column layout and a loading snippet: [Reading results](../README.md#reading-results).
 Settings: [Step 4 — Score](../README.md#step-4--score). Implementation:
-[`utils/bootstrap.py`](../src/utils/bootstrap.py).
+[`metrics/bootstrap.py`](../src/metrics/bootstrap.py) and
+[`metrics/comparisons.py`](../src/metrics/comparisons.py).
 
 ## Adding a control
 
-1. Add the name to the constants and `ControlCondition` in
-   [`utils/controls.py`](../src/utils/controls.py), and to the relevant
-   `RANDOMIZED_*`/`NO_INFERENCE_CONTROLS` sets.
-2. Build its predictions in `ControlBuilder.build` (non-model baselines) or
-   `_build_control_model` / `_run_embedding_control_inference` (model
-   variants, with and without the embedding cache). Return rows aligned to the
-   trained model's `id`s.
-3. Reject unsupported task types or heads in
-   [`utils/config_validation.py`](../src/utils/config_validation.py).
+1. Declare the name in `ControlCondition` in
+   [`contracts/config.py`](../src/contracts/config.py), with weight-ablation
+   constants in [`model/controls.py`](../src/model/controls.py) where applicable.
+2. Coordinate predictions in [`steps/controls.py`](../src/steps/controls.py),
+   using model inference and task transformations. Keep model-independent
+   heuristic calculations in
+   [`dataset/baseline_data.py`](../src/dataset/baseline_data.py);
+   the standalone runner is [`runners/baselines.py`](../src/runners/baselines.py).
+3. Declare task support in its handler. Generic head/stage compatibility checks
+   remain in [`contracts/validation.py`](../src/contracts/validation.py).
 4. Support or explicitly reject it in layerwise mode
-   ([`utils/layerwise.py`](../src/utils/layerwise.py)).
+   ([`model/layerwise.py`](../src/model/layerwise.py)).
 5. Add it to the relevant task presets in `configs/tasks/`.
 
 Score picks up any control present in Predict's output; no scoring changes are

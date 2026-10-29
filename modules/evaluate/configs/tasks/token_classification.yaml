@@ -3,15 +3,18 @@ workspace:
 
 steps:
   tune:
+    batch_size: 2048 # valid residues, not proteins; used when HPO is disabled
     hyperparameter_search:
       metric: f1
       direction: maximize
       n_trials: 100
       search_space:
         batch_size: [1024, 2048, 4096] # valid residues per optimizer batch
-        max_epochs: [1, 2, 5, 10]
+        max_epochs: [1, 2, 5, 10] # token-specific budget, not the sequence-task epoch space
   score:
     metrics: [f1]
     metric_aggregation: macro # pool valid residues, then average classes; -100 positions are excluded
   predict:
+    embedding_batch_size: 8192 # cached residues; trunk batches still use prepare settings
     controls: [random_trunk]
+    baselines: [majority_class] # training-only valid-residue prior; not a model control

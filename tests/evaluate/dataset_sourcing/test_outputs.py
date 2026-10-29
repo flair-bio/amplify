@@ -7,15 +7,15 @@ from unittest.mock import patch
 import polars as pl
 import pytest
 
-from modules.evaluate.src.dataset_sourcing.config import DatasetSourcingConfig
-from modules.evaluate.src.dataset_sourcing.outputs import (
+from modules.evaluate.scripts.dataset_sourcing.shared.config import DatasetSourcingConfig
+from modules.evaluate.scripts.dataset_sourcing.shared.outputs import (
     build_seqkit_split_fastas,
     stats_json_is_complete,
     write_dataset_card,
     write_dataset_stats,
 )
-from modules.evaluate.src.dataset_sourcing.spec import DatasetSourceSpec
-from modules.evaluate.src.utils.stats import compute_seqkit_stats
+from modules.evaluate.scripts.dataset_sourcing.shared.spec import DatasetSourceSpec
+from modules.evaluate.scripts.dataset_sourcing.shared.stats import compute_seqkit_stats
 
 
 @pytest.mark.parametrize("suffix", [".fasta", ".fasta.gz"])
@@ -56,7 +56,7 @@ def test_compute_seqkit_stats_preserves_shards_and_overall(
         ).write_csv(output_path, separator="\t")
 
     with patch(
-        "modules.evaluate.src.utils.stats._run_seqkit", side_effect=run_seqkit
+        "modules.evaluate.scripts.dataset_sourcing.shared.stats._run_seqkit", side_effect=run_seqkit
     ) as runner:
         frame = compute_seqkit_stats(shard_dir, combined, threads=1)
 
@@ -70,7 +70,7 @@ def test_compute_seqkit_stats_preserves_shards_and_overall(
 
 
 def test_compute_seqkit_stats_empty_directory_does_not_run_seqkit(tmp_path):
-    with patch("modules.evaluate.src.utils.stats._run_seqkit") as runner:
+    with patch("modules.evaluate.scripts.dataset_sourcing.shared.stats._run_seqkit") as runner:
         assert compute_seqkit_stats(tmp_path, tmp_path / "combined.fasta").is_empty()
     runner.assert_not_called()
 
@@ -85,7 +85,7 @@ def _write_stats(tmp_path, split_frames, **kwargs):
         }
     )
     with patch(
-        "modules.evaluate.src.dataset_sourcing.outputs.compute_seqkit_stats",
+        "modules.evaluate.scripts.dataset_sourcing.shared.outputs.compute_seqkit_stats",
         return_value=seqkit_stats,
     ) as compute:
         stats_path = write_dataset_stats(tmp_path, split_frames, threads=1, **kwargs)

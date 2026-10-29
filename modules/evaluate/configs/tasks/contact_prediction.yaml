@@ -3,21 +3,9 @@ workspace:
   model_kwargs: {}
 
 steps:
-  prepare:
-    embedding_cache:
-      enabled: false
-  tune:
-    refit_on_train_validation: false # live contact head; cached-probe refit does not apply
-    head:
-      head_type: mlp
-    hyperparameter_search:
-      metric: contact_auc_long
-      direction: maximize
-      search_space:
-        hidden_size: null
-        hidden_depth: null
-        batch_size: null
-  score:
-    metrics: [contact_auc_long] # existing precision-decile summary; CASP protocol integration is pending
   predict:
-    controls: [random_trunk]
+    controls: [random_trunk] # independent fitted head, or zero-shot Jacobian control
+    collect_probabilities: false
+  score:
+    metrics: [AUC, P@L, P@L/2, P@L/5, ROC-AUC]
+    bootstrap_enabled: false

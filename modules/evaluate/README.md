@@ -15,13 +15,15 @@ clustered, scored       MLM training,            downstream tasks, controls,
 protein datasets        HF checkpoints           confidence intervals
 ```
 
-Every run goes through four steps:
+Evaluation follows five stage APIs:
 
 ```
-Prepare            →  Tune               →  Predict            →  Score
-(load model + data,   (probe or fine-tune;  (test split, plus     (metrics, CIs,
- build dataloaders)    skipped if as-is)     each control)         control tests)
+Prepare → Tune → Controls → Predict → Score
 ```
+
+Tune fits the primary predictor and is skipped for `evaluate_as_is`.
+Controls prepares independently fitted controls (including zero-shot controls
+when requested); inference-only ablations remain in Predict.
 
 A run is configured by stacking YAML files (a base config, then one file each for
 the model, task, and dataset) plus optional `key=value` overrides; see
@@ -53,10 +55,9 @@ Deeper guides on controls, datasets, dataset sourcing, and ProteinGym are in
   - [Output disk layout](#output-disk-layout)
   - [Reading results](#reading-results)
 - [Advanced Workflows](#advanced-workflows)
-  - [Frozen-trunk probe overlays (`configs/tuning/`)](#frozen-trunk-probe-overlays-configstuning)
+  - [Predictor overlays (`configs/predictors/`)](#predictor-overlays-configspredictors)
   - [Layerwise linear probes](#layerwise-linear-probes)
-  - [Cross-validation](#cross-validation)
-  - [Categorical-Jacobian contact prediction](#categorical-jacobian-contact-prediction)
+  - [Zero-shot contact prediction](#categorical-jacobian-contact-prediction)
 - [Developer Guide](#developer-guide)
   - [Code Layout](#code-layout)
   - [Pipeline Architecture \& Distributed Execution](#pipeline-architecture--distributed-execution)
@@ -95,29 +96,94 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
 
 If the run prints `=== Evaluation Pipeline Completed Successfully ===`, your
 environment and the Prepare, Predict, and Score steps work. To exercise training
-too, append a [probe overlay](#frozen-trunk-probe-overlays-configstuning) such as
-`modules/evaluate/configs/tuning/torch_linear.yaml`.
+too, append a [probe overlay](#predictor-overlays-configspredictors) such as
+`modules/evaluate/configs/predictors/torch_linear.yaml`.
 
 ### Contact prediction
 
-The same smoke overlay works for contact prediction. `local.yaml` runs a single
-local process, and `n_permutations=5` keeps the trained-vs-control statistics
-cheap enough for a laptop:
+The replacement CASP14-16 benchmark consumes the schema-6.0 Hugging Face dataset
+only. `tasks/contact_prediction.py` owns its data/prediction/scoring orchestration;
+the existing step classes delegate to that handler and persist its artifacts.
+The data contract/alignment also live in that task module, shared extraction in
+`model/inference.py`, and ranking/aggregation in `metrics/contact_metrics.py`.
+The frozen-embedding, attention, and zero-shot categorical-Jacobian predictors
+run through the normal CLI and prediction entry point. CASP `random_trunk`
+controls run by default. The old Biomap contact overlay and embedding head are removed.
+The dataset selects the shared `contact_prediction` task; an explicit predictor
+overlay selects extraction, fitting and inference without changing that task.
 
 ```bash
-uv run accelerate launch \
-    --config_file modules/evaluate/configs/accelerate/local.yaml \
-    modules/evaluate/src/run_evaluate.py \
+uv run python modules/evaluate/src/run_evaluate.py \
     modules/evaluate/configs/config.yaml \
     modules/evaluate/configs/models/amplify_120m.yaml \
-    modules/evaluate/configs/tasks/contact_prediction.yaml \
-    modules/evaluate/configs/datasets/contact_prediction_binary.yaml \
-    modules/evaluate/configs/smoke_test.yaml \
-    steps.score.n_permutations=5
+    modules/evaluate/configs/datasets/contact_prediction_casp.yaml \
+    modules/evaluate/configs/predictors/contact_embedding.yaml \
+    "workspace.dataset_revision=<immutable-40-character-HF-commit>" \
+    workspace.run_id=casp-embedding \
+    seed=0
 ```
 
-Smoke-test results are written under `./eval/smoke_test/`; see [Outputs](#outputs)
-for the layout and how to read them.
+For the attention readout, replace `contact_embedding.yaml` with
+`contact_attention.yaml` and use a distinct `workspace.run_id`.
+
+The final residue embeddings are frozen, unpooled and unnormalized. Two
+independent bias-free 512-dimensional projections produce averaged directional
+logits plus a zero-initialized scalar bias. Fitting uses all known unordered
+training pairs at original separation >=6, equal pair weighting, AdamW
+(lr=0.001, matrix weight decay=10, bias decay=0), and one effective 20-protein
+batch per epoch. Validation uses mean structure P@L over the fixed 20 validation
+structures, strict improvement and patience 10; the best head is restored.
+There is no HPO, class weighting, negative subsampling, scheduler, clipping,
+feature standardization or train+validation refit. `max_epochs` is a safety
+limit: reaching it before patience is a failed fit.
+
+The attention preset uses all layer/head probability maps, sum-symmetrizes each
+map, applies APC, and fits one L1 logistic regression (`C=0.15`,
+`solver=liblinear`) on all known unordered training pairs at original separation
+>=6. It does not standardize features or select settings on validation data.
+Training attention maps are transient, and test maps are never persisted.
+Select it with `configs/predictors/contact_attention.yaml` instead of the
+embedding preset.
+
+### Categorical-Jacobian contact prediction
+
+The zero-shot categorical Jacobian shares the CASP dataset, alignment, unit
+scoring, and full-chain inference path. Select it with
+`configs/predictors/contact_jacobian.yaml`. It computes canonical-amino-acid
+mutant-minus-wild-type log-softmax deltas, keeps the Jacobian in FP32, centers
+all four categorical/residue axes, symmetrizes directional effects, applies
+the Frobenius reduction and APC, and removes self-pairs. It does not fit a
+head or persist test Jacobians. This preset requires a masked-LM checkpoint
+with one tokenizer token per canonical amino acid.
+
+`tokenize_contact_chain` supplies uncropped tokens and original-coordinate
+position IDs. Native AMPLIFY and ESM rotary computations preserve gaps and
+grow positional caches without rescaling. `PreparedArtifacts.contact_dataset`
+passes these chains to the standard `PredictStep.run()`, which delegates
+scientific processing to the task handler and uses ordinary prediction
+persistence. Pass a local `workspace.dataset_repo_id` directory and omit the revision for
+offline Parquet loading. No source coordinate files or source-manifest joins
+are used. The runtime dataset fingerprint covers the scoring rows and fixed
+development splits.
+
+Inputs are cleaned once per chain; global/EU rows share full-chain inference,
+and exact original sequences share predictions without merging their identities.
+Reference-free chains skip inference but retain unscored rows. Test features
+are transient; persisted predictions contain candidate scores, labels and
+original pair indices, not embeddings or attention maps.
+Development embeddings are cached across seeds; attention maps are not cached.
+Embedding-cache keys include the backbone weights/configuration, tokens,
+original positions and precision. Use
+`steps.prepare.embedding_cache.cache_policy=off` to disable the embedding cache.
+Run one seed per invocation; final repetitions use seeds 0 through 4.
+
+Score writes `unit_scores.parquet` and `scores.parquet`, reporting both original
+separations (>=6 and >=24), AUC (mean precision at ten length cutoffs), P@L,
+P@L/2, P@L/5 and ROC-AUC. EUs, chains and complexes are averaged equally within
+each edition, with metric-specific contributing counts. Development validation
+averages structures equally. Generic flat bootstrap and controls other than
+`random_trunk` are rejected. All chain lengths currently remain included,
+including chains of 2,048 residues or longer; the plan's length exclusion is deferred.
 
 ---
 
@@ -147,16 +213,40 @@ for the layout and how to read them.
 | `sequence_regression` | One number per protein |
 | `sequence_multilabel_classification` | A set of labels per protein |
 | `token_classification` | One class per residue |
-| `contact_prediction` | Which residue pairs touch |
-| `categorical_jacobian` | Contacts, zero-shot |
+| `contact_prediction` | Which residue pairs touch (fixed CASP protocol) |
 | `pseudo_perplexity` | Nothing; scores masked residues, zero-shot |
 | `calibration` | Homolog amino-acid profiles at conserved positions, zero-shot |
 
-`categorical_jacobian`, `pseudo_perplexity` and `calibration` run only with
+`pseudo_perplexity` and `calibration` run only with
 `steps.mode=evaluate_as_is`. Target formats, why each task matters, and default
 metrics per dataset are in the [dataset catalog](docs/datasets.md#evaluation-tasks).
 
 ### Datasets
+
+Dataset overlays select one named configuration from
+`flair-bio/evaluation-suite`. A run downloads only that configuration's data,
+not the entire suite. `workspace.dataset_config_name` selects the data;
+`workspace.dataset_name` remains an independent output label.
+
+For direct Hub loading, use the dataset overlay as usual and optionally append
+`workspace.dataset_revision=<commit-SHA>` to pin the input. Contact prediction
+requires a full 40-character commit SHA.
+
+For a downloaded suite, append these overrides to the same command:
+
+```bash
+"workspace.dataset_repo_id=/path/to/evaluation-suite" \
+workspace.dataset_revision=null
+```
+
+Keep `workspace.dataset_config_name` from the overlay. This works offline and
+also applies to `--baselines`. Localization's external setHARD test follows
+the same suite root and revision. A single configuration directory such as
+`/path/to/evaluation-suite/meltome_human` is also supported. For a legacy
+standalone Hub repository, override its repo ID and set
+`workspace.dataset_config_name=null`; configure external test sources separately.
+Dataset configuration selection is separate from
+`steps.prepare.split`, which selects the partition/protocol within that dataset.
 
 The [dataset catalog](docs/datasets.md) lists each shipped overlay, what its
 labels represent, and which task uses it; [Dataset Sourcing](docs/dataset-sourcing.md)
@@ -174,9 +264,32 @@ The base [`configs/config.yaml`](configs/config.yaml) defines the complete defau
 protocol: an MLP probe trained over cached embeddings from a frozen trunk, with
 100-trial hyperparameter search and fresh train+validation refitting. Supply the
 base, model, and dataset configs; no MLP tuning overlay is needed. Full trunk
-fine-tuning and other probe types remain explicit alternatives in `configs/tuning/`.
+fine-tuning and other probe types remain explicit alternatives in `configs/predictors/`.
 Composition is base → model/task → dataset → optional alternative → smoke
 settings → CLI overrides; later values win.
+
+Compute defaults target one GPU (for example a B200), eight CPU cores and
+64 GB host RAM: eight proteins per live/extraction batch, four tokenizer
+processes, and no dataloader worker pools. Expanded calibration and
+pseudo-perplexity data use one tokenizer process. FP32 extraction/storage is
+retained; these are conservative starting settings, not measured memory guarantees.
+Cached prediction uses 1,024 proteins or 8,192 residues per batch. With HPO
+disabled, cached training uses 128 proteins or 2,048 residues; HPO selects its
+own training batch. Token HPO deliberately retains residue batches
+`[1024, 2048, 4096]` and epochs `[1, 2, 5, 10]`, unlike sequence-task choices.
+
+Run one evaluation at a time. Token features and train+validation refit
+temporaries consume host RAM proportional to dataset size and hidden width;
+all-layer caches can exceed 64 GB. `max_cache_gb` is a disk-write limit, not a
+RAM cap. Pseudo-perplexity's expanded Arrow cache can require substantial disk
+space even with one tokenizer process. Full-chain contact attention and
+Jacobians remain expensive; Jacobian mutation batches reduce automatically
+after CUDA OOM, but the full FP32 Jacobian must still fit on the GPU.
+
+Supported defaults do not implement every planned benchmark: stability still
+uses pooled Spearman, ProtParams evaluates one selected property per run,
+and HMD-ARG is provisional 14-class classification. Composition, MMseqs k-NN,
+contact separation-prior and amino-acid-frequency baselines remain deferred.
 
 Task overlays explicitly select the reported metric and the validation
 selection metric/direction: Macro-F1 for classification, R² for regression
@@ -214,9 +327,14 @@ To use fixed training settings instead, set
 `steps.tune.learning_rate`, `weight_decay`, `max_epochs`, and `batch_size` then
 apply. During HPO, searched values replace their fixed counterparts, not cap them.
 Classical-estimator overlays retain their estimator-specific spaces.
-Calibration, pseudo-perplexity, and categorical Jacobian task overlays disable
-caching, HPO, and refitting. The live contact probe disables cached refitting and
-MLP architecture/batch search; its replacement CASP protocol remains pending.
+Calibration and pseudo-perplexity task overlays disable caching, HPO, and
+refitting. CASP predictor overlays fix their feature extraction or fitting
+protocols and reject generic HPO and controls.
+
+`datasets/` selects the source, label contract and default scientific task.
+`tasks/` owns task data handling and scoring. `predictors/` selects how predictions
+are produced across preparation, optional fitting and inference, including future
+zero-shot contact predictors; it is not restricted to tuning.
 
 | File | Use |
 |---|---|
@@ -225,7 +343,7 @@ MLP architecture/batch search; its replacement CASP protocol remains pending.
 | `configs/models/*.yaml` | One overlay per evaluated model (name, repo) |
 | `configs/tasks/*.yaml` | Task type, behavior, and default controls |
 | `configs/datasets/*.yaml` | One overlay per dataset; see the [catalog](docs/datasets.md) |
-| `configs/tuning/*.yaml` | Explicit alternatives to the default cached MLP |
+| `configs/predictors/*.yaml` | Explicit prediction approaches, including CASP embeddings and alternative probes |
 | `configs/accelerate/*.yaml` | `accelerate launch` configs (e.g. single-process local runs) |
 
 Dataset overlays declare `workspace.default_task_type`, for example
@@ -244,8 +362,10 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
 ```
 
 An explicit task YAML takes precedence over the dataset default, in either
-order. This allows a contact dataset to run both `contact_prediction` and
-`categorical_jacobian`. `pseudo_perplexity` works with any compatible sequence
+order. The CASP dataset defaults to `contact_prediction` and requires
+an explicit predictor overlay such as `contact_embedding.yaml`,
+`contact_attention.yaml`, or `contact_jacobian.yaml`. Ordinary tasks retain
+their default MLP behavior without a predictor overlay. `pseudo_perplexity` works with any compatible sequence
 dataset; `uniprot_ur100p_test` selects the AMPLIFY paper's UniProt test set.
 Without an explicit task YAML, a CLI `workspace.task_type=...` selects a
 different task overlay. The baseline Slurm launcher accepts dataset-only rows
@@ -278,8 +398,7 @@ uv run python -m modules.evaluate.src.run_evaluate --baselines \
 ```
 
 Model scoring loads these artifacts without fitting them. Use
-`baselines.names=[]` to disable shared baselines, including for CV, which is
-not supported by the baseline runner yet. See [Shared sequence
+`baselines.names=[]` to disable shared baselines. See [Shared sequence
 baselines](docs/controls.md#shared-sequence-baselines).
 
 CUDA evaluation enables TensorFloat-32 by default with top-level `tf32: true`,
@@ -349,12 +468,11 @@ Append these overrides to any launch command, or put them in an overlay YAML.
 | Goal | Overrides |
 |---|---|
 | Skip tuning and score the checkpoint as-is | `steps.mode=evaluate_as_is steps.prepare.embedding_cache.enabled=false steps.tune.hyperparameter_search.enabled=false steps.tune.refit_on_train_validation=false`. For supervised tasks the head comes from the checkpoint; a pretrained-only checkpoint gets a randomly initialized head, so use this for fine-tuned checkpoints or zero-shot tasks |
-| Fine-tune the trunk and native MLP head | Append `configs/tuning/mlp_finetuning.yaml`; it disables caching/refitting and clears cached-MLP search dimensions |
+| Fine-tune the trunk and native MLP head | Append `configs/predictors/mlp_finetuning.yaml`; it disables caching/refitting and clears cached-MLP search dimensions |
 | Bootstrap confidence intervals and control tests | `steps.score.bootstrap_enabled=true` |
 | Disable TF32 for CUDA FP32 operations | `tf32=false` (default: `tf32=true`) |
 | Use a generated split instead of the default | `steps.prepare.split.name=stratified` (see [Named benchmark splits](#named-benchmark-splits)) |
-| K-fold cross-validated probe scores | `cross_validation.enabled=true` (see [Cross-validation](#cross-validation)) |
-| Classical probe on cached embeddings | Add `modules/evaluate/configs/tuning/random_forest.yaml` after the dataset overlay |
+| Classical probe on cached embeddings | Add `modules/evaluate/configs/predictors/random_forest.yaml` after the dataset overlay |
 | Disable control conditions | `steps.predict.controls=[]` |
 | Disable shared sequence baselines | `baselines.names=[]` |
 | Write results elsewhere | `workspace.base_path=/path/to/eval` |
@@ -373,14 +491,13 @@ builder parameters belong in `workspace.model_kwargs`.
 
 ### Config schema
 
-All config classes are Pydantic models composed into a single `EvaluationConfig` (`src/config.py`):
+All config classes are Pydantic models composed into a single `EvaluationConfig` (`src/contracts/config.py`):
 
 ```
 EvaluationConfig
 ├── tf32:      bool (default: true)
 ├── workspace: EvaluationWorkspaceConfig
 ├── wandb:     WandbConfig
-├── cross_validation: CrossValidationConfig
 ├── external_test_sets: list[ExternalTestSetConfig]
 └── steps:     StepsConfig
     ├── layerwise: LayerwiseConfig
@@ -415,9 +532,9 @@ For positional labels, tokenization preserves ambiguous residues by disabling
 
 | Field | Schema default | Description |
 |---|---|---|
-| `batch_size` | `16` | Examples per dataloader batch, unless a packed token budget is set |
-| `dataloader_num_workers` | `8` | Workers per rank and loader; `0` loads batches in the main process |
-| `tokenize_num_proc` | `8` | Positive process count for up-front tokenization, independent of dataloader workers |
+| `batch_size` | `8` | Examples per dataloader batch, unless a packed token budget is set |
+| `dataloader_num_workers` | `0` | Workers per rank and loader; `0` loads batches in the main process |
+| `tokenize_num_proc` | `4` | Positive process count for up-front tokenization, independent of dataloader workers |
 | `max_length` | `512` | Maximum tokenized sequence length |
 | `split.name` | `default` | Select `train_<name>`, `validation_<name>`, and `test_<name>` for a named split method |
 | `validation_fraction` | `0.1` | Share of train held out when validation is missing or explicitly unset |
@@ -588,8 +705,8 @@ pooled embeddings; token tasks use valid training residues, excluding ignored
 labels. Constant features use a standard-deviation floor of `1e-6`. Validation
 and HPO trials reuse the training transformation; final refitting recomputes it
 on train+validation. Random-trunk probes fit their own transformation on random
-features. Test data never contributes statistics. Each CV fold fits its own training
-statistics. Set `steps.tune.standardize_features=false` to use raw features.
+features. Test data never contributes statistics. Set
+`steps.tune.standardize_features=false` to use raw features.
 
 The fitted statistics are saved in `probe_head.pt`, and
 `probe_head_config.json` records `standardize_features` for reconstruction.
@@ -633,7 +750,6 @@ conditions sharing a forward pass; validation loops remain quiet.
 | `scrambled_sequences` | Residues shuffled within each sequence |
 | `scrambled_labels` | Trained predictions scored against permuted labels |
 | `majority_class` | Train class prior; inside Predict for token tasks only |
-| `separation_prior` | Train contact rate per residue separation |
 
 Per-task presets, invalid combinations, and how to read the results are in
 [Controls](docs/controls.md).
@@ -646,12 +762,12 @@ Per-task presets, invalid combinations, and how to read the results are in
 | `predictions_filename` | `predictions.parquet` | Output filename directly under the run directory |
 | `persist_to_disk` | `true` | Write predictions and the prediction manifest; disable for fast in-process evaluation |
 | `store_sequences` | `false` | Decode and include source sequences in the main predictions table |
-| `controls` | `[random_trunk]` | Per-model controls; token/contact presets add their existing priors. Sequence priors use top-level `baselines.names` and the separate `--baselines` route |
+| `controls` | `[random_trunk]` | Per-model controls. Sequence priors use top-level `baselines.names` and the separate `--baselines` route |
 | `embedding_batch_size` | `null` | Cached-feature rows per prediction batch, including model-based controls; `null` inherits the prepared loader size. Does not change live trunk batches. |
 
 Cached token probes batch **residues**, not proteins. The token-classification
-task overlay sets `steps.tune.batch_size=1024` for cached training/validation and
-`steps.predict.embedding_batch_size=16384` for cached prediction and control
+task overlay sets `steps.tune.batch_size=2048` for cached training/validation and
+`steps.predict.embedding_batch_size=8192` for cached prediction and control
 heads. Protein batches remain controlled by `steps.prepare.batch_size` (live
 inference) and `steps.prepare.embedding_batch_size` (feature extraction).
 Changing the training batch size changes optimization and the learning-rate
@@ -662,7 +778,7 @@ training or inference. Layerwise controls that require live trunk features
 continue to use protein batches.
 
 For cached sequence classification, multilabel classification, and regression,
-the task overlays set prediction batches to 1,024 examples. Cached probe tuning
+the base config sets prediction batches to 1,024 examples. Cached probe tuning
 uses the searched batch size by default. With HPO disabled, it uses
 `steps.tune.batch_size`, falling back to the prepared loader batch size when
 null. Embedding extraction has its own `steps.prepare.embedding_batch_size` setting.
@@ -673,6 +789,12 @@ null. Embedding extraction has its own `steps.prepare.embedding_batch_size` sett
 ---
 
 ## Step 4 — Score
+
+All tasks implement `score(predictions, config, seed=...)` without filesystem
+access. Tasks select metrics, aggregation and supported uncertainty methods;
+`metrics/scoring.py` supplies flat-task scoring and paired statistical analysis.
+`ScoreStep` loads baseline artifacts, invokes that common contract, then publishes
+the returned flat or structured results. It has no contact-specific dispatch.
 
 **Purpose:** Compute task-specific metrics from the Predict step's output and, optionally, bootstrap confidence intervals for those metrics plus a statistical comparison between the trained model and each configured control condition, to quantify how much of its performance is attributable to learning from the data rather than model/data artifacts.
 
@@ -735,7 +857,7 @@ groups outputs by **benchmark root -> task -> dataset -> baselines/models -> run
 └── models/<model_name>/
     ├── workspace_manifest.json
     ├── tmp/embeddings/                 ← reusable across model runs
-    └── <variant>-<run_id>/
+    └── <variant>-<run_id>/seed_<seed>/
         ├── model/
         ├── predictions.parquet
         ├── controls/random_trunk/
@@ -767,12 +889,16 @@ A non-default `steps.prepare.split.name` is appended to the variant.
 
 Ordinary pipeline runs refuse existing variant outputs, including interrupted
 evaluations. Choose a new `workspace.run_id` to retain both experiments, or
-explicitly pass `--overwrite` to replace only that variant/run and its derived
+explicitly pass `--overwrite` to replace only that variant/run seed and its derived
 layer outputs. Nested controls and run-local comparison tables are replaced too;
-other variants, models, caches, and shared baselines are preserved. Matching
+other seeds, variants, models, caches, and shared baselines are preserved. Matching
 concurrent jobs fail rather than overwriting an active run. There is no
-ordinary-run resume mode. CV retains its existing fold-resume behavior;
-`--overwrite` is rejected for CV.
+ordinary-run resume mode.
+
+Ordinary CLI runs isolate artifacts under `seed_<seed>`. The experiment directory
+also records seed-independent settings; sibling seeds cannot use different
+settings or, for CASP embeddings, different dataset/backbone content. Historical
+unseeded outputs are not migrated or removed: choose a new run ID.
 
 Even with `--overwrite`, a model/dataset label already associated with a
 different input source cannot be reused in the same workspace: choose a new
@@ -822,17 +948,14 @@ Outputs use the external dataset's own workspace and the same variant:
 `<task>/<external.name>/models/<model>/<variant>-<run_id>/`.
 Its comparison table lives directly inside that run.
 All requested output targets are checked before training or replacement. Sets are
-skipped with a warning under `evaluate_as_is` (no fitted probe) and ignored by
-cross-validation.
+skipped with a warning under `evaluate_as_is` (no fitted probe).
 
 ### Reading results
 
 `<workspace>/scores/scores_long.parquet` is the table for comparing runs.
 Every row carries the run identity (`model_name`, `dataset_name`, `task_type`,
 `split`, `model_repo_id`, `dataset_repo_id`, `head_type`, `layer_index`,
-`variant`, `seed`) plus a `metric`. Cross-validation fold (`-fold_<k>`) and
-pooled (`-oof`) runs also set `cv_id`, `fold_id`, and `split_seed` (see
-[Cross-validation](#cross-validation)):
+`variant`, `seed`) plus a `metric`:
 
 | Row | `control` | Filled columns |
 |---|---|---|
@@ -876,7 +999,7 @@ across layers per metric.
 These build on the steps above; each is a few extra overlays or overrides on a
 normal run.
 
-### Frozen-trunk probe overlays (`configs/tuning/`)
+### Predictor overlays (`configs/predictors/`)
 
 Cached MLP probing is already the base default. Each alternative probe overlay
 (`knn.yaml`, `sklearn_linear.yaml`, `random_forest.yaml`,
@@ -890,11 +1013,20 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
     modules/evaluate/configs/models/amplify_120m.yaml \
     modules/evaluate/configs/tasks/sequence_classification.yaml \
     modules/evaluate/configs/datasets/localization_prediction.yaml \
-    modules/evaluate/configs/tuning/random_forest.yaml
+    modules/evaluate/configs/predictors/random_forest.yaml
 ```
 
 The exception is `mlp_finetuning.yaml`, which trains the trunk too and so does
 not use the embedding cache.
+
+These are composable presets over existing `steps.prepare`, `steps.tune` and
+`steps.predict` settings, not a separate selector or registry. Later overlays
+and CLI overrides remain authoritative, subject to normal task/protocol validation.
+Existing metadata and output variants identify the head and trunk condition;
+contacts use `bilinear512-frozen_trunk` under the shared `contact_prediction` task.
+The former `configs/tuning/` paths and
+`contact_prediction_embedding` task identity are removed, without aliases.
+Calibration, pseudo-perplexity and the separate ProteinGym runners are unchanged.
 
 ### Layerwise linear probes
 
@@ -966,113 +1098,13 @@ batches (`packed=true` needs CUDA; token-budget batches are single-process).
   one protein are resampled together, and its cost grows with the number of
   layers.
 
-### Cross-validation
+### Contact predictor presets
 
-Set `cross_validation.enabled=true` to wrap Prepare → Tune → Predict →
-Score in an outer K-fold loop (`src/runners/cross_validation.py`). Folds are
-planned on raw data (`src/dataset/folds.py`) from `pool_roles`, which defaults
-to `[train, validation]`; the official test split is never pooled. Both source
-splits must exist. Set `cross_validation.pool_roles=[train]` to use training
-data only (including datasets without a source validation split). Each fold
-trains a fresh probe on its
-train role, selects on an inner validation holdout (one fold of an inner
-`round(1 / inner_validation_fraction)`-fold split with the same strategy, so
-groups and strata are respected), and predicts its held-out outer fold.
-
-```bash
-uv run python -m modules.evaluate.src.run_evaluate \
-    modules/evaluate/configs/config.yaml <model/task/dataset overlays> \
-    cross_validation.enabled=true \
-    cross_validation.strategy=stratified_group_kfold \
-    cross_validation.group_column=sequence_cluster_id
-```
-
-CV settings live at the top level because they orchestrate the entire pipeline,
-rather than configuring an individual step. Replace the former
-`steps.cross_validation.*` overrides with `cross_validation.*`.
-
-**Restrictions:** `steps.mode=tune_probe`, scalar `sequence_classification` /
-`sequence_regression` tasks, layerwise disabled, `bootstrap_enabled=false`,
-`persist_to_disk=true`, no `variance_seeds`, and a single process. The pool
-must have finite scalar labels, non-null groups (group strategies), no
-duplicate sequences across groups, and enough examples per class for
-stratification.
-
-Fold membership depends only on the data, split config, and `split_seed`
-(not the training `seed`), so heads and models are compared on identical folds.
-The assignments' fingerprint gives the `cv_id`.
-
-**Outputs.** Each fold plan has a `cv_id`; each full configuration, including
-the training seed and hyperparameters, also gets a distinct `config_hash` in
-its output path. This lets runs share fold assignments without overwriting
-each other's results:
-
-| Path under `<workspace>/runs/` | Contents |
-| --- | --- |
-| `<variant>-cv_<cv_id>-run_<config_hash>/cv_manifest.json` | Status, config, per-fold counts and scores, fold summary (mean/std), OOF and control OOF scores |
-| `<variant>-cv_<cv_id>-run_<config_hash>/assignments.parquet` | One row per (pool row, fold) with `fold_id` and `role` |
-| `<variant>-cv_<cv_id>-run_<config_hash>/scores/scores_long.parquet` | Long-format fold + OOF rows with `cv_id`, `fold_id` (null for OOF), `split_seed` |
-| `<variant>-cv_<cv_id>-run_<config_hash>-fold_<k>/` | Ordinary run for fold `k` |
-| `<variant>-cv_<cv_id>-run_<config_hash>-oof/` | Pooled out-of-fold predictions and scores |
-
-A completed experiment is not overwritten. Rerunning an interrupted one
-reuses its finished folds when the fold plan and full config are unchanged
-(`fingerprint`/`config_hash` in the manifest). Different configs get separate
-paths, while configs with the same fold assignments retain the same `cv_id`.
-Older output directories without the config hash are left untouched and are
-not automatically resumed.
-
-**Interpretation:** the fold std is descriptive spread, not a confidence
-interval (folds share training data). Pooled OOF scores generally differ from
-the mean of fold scores, especially for rank or threshold metrics.
-
-### Categorical-Jacobian contact prediction
-
-A zero-shot contact predictor: nothing is trained. The idea is that if mutating
-residue *i* changes what the model predicts at residue *j*, the two are likely
-in contact. Concretely, for each residue the model scores all 20 canonical
-substitutions and records the change in its 20 canonical output logits at every
-position, relative to the wild type. The `(L, 20, L, 20)` Jacobian is centered
-on all four axes, symmetrized, Frobenius-reduced to `(L, L)`, and Average
-Product Corrected (diagonal excluded). Scores are rankings, not calibrated
-probabilities.
-
-This bounded example keeps sequence length and batch small for a local check:
-
-```bash
-uv run accelerate launch modules/evaluate/src/run_evaluate.py \
-    modules/evaluate/configs/config.yaml \
-    modules/evaluate/configs/models/amplify_120m.yaml \
-    modules/evaluate/configs/tasks/categorical_jacobian.yaml \
-    modules/evaluate/configs/datasets/contact_prediction_binary.yaml \
-    steps.prepare.max_length=32 \
-    steps.prepare.batch_size=64 \
-    steps.prepare.dataloader_num_workers=0 \
-    steps.prepare.dataloader_persistent_workers=false \
-    steps.prepare.dataloader_pin_memory=false \
-    steps.prepare.tokenize_num_proc=1 \
-    steps.prepare.length_grouped_sampling=false \
-    steps.prepare.pad_to_multiple_of=null \
-    steps.predict.controls=[] \
-    steps.score.bootstrap_enabled=false \
-    workspace.base_path=./eval/smoke_test
-```
-
-For a full run, drop the bounded overrides:
-
-```bash
-uv run accelerate launch modules/evaluate/src/run_evaluate.py \
-    modules/evaluate/configs/config.yaml \
-    modules/evaluate/configs/models/amplify_120m.yaml \
-    modules/evaluate/configs/tasks/categorical_jacobian.yaml \
-    modules/evaluate/configs/datasets/contact_prediction_binary.yaml
-```
-
-Sequences are processed one at a time, with `20 * L` mutant inputs batched by
-`workspace.model_kwargs.mutant_batch_size`. The Jacobian is held in float32,
-falls back to float16, and the run fails before allocation if it still exceeds
-`workspace.model_kwargs.max_jacobian_bytes`. On limited hardware, lower
-`steps.prepare.max_length` or `mutant_batch_size`.
+The CASP contact predictors are composable overlays on the shared
+`contact_prediction` task. Use `contact_embedding.yaml` for the fitted
+bilinear512 head, `contact_attention.yaml` for the fitted attention readout,
+or `contact_jacobian.yaml` for zero-shot masked-LM mutation effects. The
+obsolete standalone `categorical_jacobian` task has been removed.
 
 ---
 
@@ -1085,43 +1117,76 @@ modules/evaluate/
 ├── README.md                        ← this file
 ├── docs/                            ← controls, dataset catalog, dataset sourcing, ProteinGym guides
 ├── configs/                         ← base config + overlays; see Config files above
-├── scripts/dataset_sourcing/        ← dataset sourcing entry points (docs/dataset-sourcing.md)
+├── scripts/dataset_sourcing/        ← sourcing entry points; reusable helpers in shared/ (docs/dataset-sourcing.md)
 └── src/
-    ├── config.py                    ← EvaluationConfig: top-level Pydantic schema
-    ├── run_evaluate.py              ← CLI entry point: runs the four steps in order
+    ├── run_evaluate.py              ← CLI entry point: runs the stage lifecycle
     ├── run_proteingym_*.py          ← ProteinGym zero-shot and supervised runners
-    ├── runners/                     ← orchestration: shared step pipeline, cross-validation
-    ├── dataset/                     ← workspace path layout, dataset loading, collation, CV folds
-    ├── dataset_sourcing/            ← sourcing pipeline used by scripts/dataset_sourcing
+    ├── contracts/                   ← configuration/loading/validation and typed handoffs
+    ├── runners/                     ← shared step pipeline
+    ├── dataset/                     ← loading/alignment, feature datasets/cache, baseline artifacts, workspaces
     ├── proteingym/                  ← ProteinGym sourcing, baselines, scoring
-    ├── schemas/artifacts.py         ← typed handoffs between steps
-    ├── model/                       ← probe heads, contact head, categorical Jacobian, layerwise probes
-    ├── steps/                       ← prepare.py, tune.py, predict.py, score.py
-    ├── tasks/                       ← one TaskHandler per task_type (see Adding a Task Type)
-    ├── metrics/                     ← metric callables, separation-binned contact metrics
-    └── utils/                       ← controls, bootstrap/permutation stats, embedding cache,
-                                       HPO, config validation, I/O, tracking
+    ├── model/                       ← architectures, extraction, inference, weight ablations
+    ├── trainers/                    ← selection/HPO/refit and Torch/classical/contact/layerwise fitting
+    ├── steps/                       ← stage lifecycle, cache access and publication
+    ├── tasks/                       ← scientific preparation/fitting/inference/scoring and capabilities
+    ├── metrics/                     ← scoring, hierarchical aggregation, bootstrap/comparisons, tables
+    └── utils/                       ← storage, I/O, seeds, tracking, amino acids;
+                                       narrow ProteinGym pooling compatibility export
 ```
 
 Shared config loading helpers live in `modules/core/utils/config_loader.py`.
 
 ### Pipeline Architecture & Distributed Execution
 
-The four steps are separate objects (`PrepareStep`/`TuneStep`/`PredictStep`/`ScoreStep`) chained by `run_evaluate.py`:
+The runner chains `PrepareStep`, optional `TuneStep`, `ControlsStep`,
+`PredictStep` and `ScoreStep`:
 
-- **Prepare → Tune → Predict** share an in-memory `PreparedArtifacts` (`schemas/artifacts.py`): model, tokenizer, and train/validation/test dataloaders. With embedding caching, `embedding_backend` retains the frozen trunk and token loaders: Tune trains a separate random-trunk probe on development features, and Predict re-embeds test tokens for model-based controls.
+- **Prepare → Tune → Predict** share an in-memory `PreparedArtifacts` (`contracts/artifacts.py`). Execution-specific state lives in `embedding`, `layerwise`, or `contact` payloads; incompatible contact/loader combinations fail at construction. The embedding backend retains the frozen trunk and token loaders. Fitting services return `FitResult`; the stage owns publication. Independently fitted random-trunk probes reuse those services without nested stages.
 - **Score** runs on rank 0 only, as a plain CPU step. `run_evaluate.py` passes it the in-memory `PredictOutput`; without one, it rebuilds predictions from `run_manifest.json` and the parquet files it lists, so scoring can be rerun standalone.
+- **Controls** owns independent cached, layerwise and task-specific control
+  preparation/fitting. Tune fits only the primary predictor. The control stage
+  shares existing cache/trainer/publication APIs without nested training runs;
+  Predict retains shared extraction for inference-only ablations.
+- **Tasks** coordinate scientific preparation, trainer selection, observations
+  and scoring. Contact declares development feature requests; Prepare
+  materializes/caches them before Tune invokes task fitting. Tasks never receive
+  workspace objects or manage cache paths, distributed lifecycle or publication.
+  Fixed CASP/predictor validation belongs to `ContactPredictionTask.validate_config`.
+  Independent control preparation runs even in `evaluate_as_is`.
+  The run manifest's `score` section includes primary and control metric summaries
+  with CASP settings and paths to aggregate/unit Parquet files. Contact bootstrap
+  is unavailable until complex-level resampling is implemented.
+- **Results** use `PipelineResult.evaluations`: records carrying the workspace,
+  prediction metadata, and optional score. The original layer-keyed
+  `predictions` and `scores` properties remain compatibility views.
+
+Cache and result files publish through unique same-directory temporary files
+and atomic replacement. Independent contact-feature/baseline jobs coordinate
+with atomic directory creation, not POSIX advisory locks or rank barriers.
+Waiting times out after five minutes. A killed owner leaves `<lock>.d/owner`;
+confirm that host/PID has terminated before manually removing that specific
+lock directory. Workspace reservation locks are unchanged. These guarantees
+depend on the filesystem's atomic mkdir/rename semantics; local concurrency
+tests do not certify NFS/GPFS deployments, and publication is not power-loss
+durability.
+
+Contact backbone compatibility is isolated in `model/adapters.py`. Current
+position-aware backbones use original `position_ids`; old ESM rotary and legacy
+AMPLIFY checkpoints still require contained table adaptation. Tables are restored
+after success or exceptions. Jacobian inference composes supported public encoders
+and FP32 MLM heads without replacing `forward`.
 
 #### Distributed execution (`accelerate`) patterns
 
-Under `accelerate launch`, several processes (ranks) run the same code, usually one per GPU. These patterns recur across `tune.py`, `predict.py`, `utils/controls.py`, and `utils/hpo.py`:
+Under `accelerate launch`, several processes (ranks) run the same code, usually one per GPU. These patterns recur across stages and `trainers/selection.py`, `trainers/torch.py`, and `trainers/selection_helpers.py`:
 
 1. **Every rank must reach every collective call.** `accelerator.gather_for_metrics()`, `broadcast()`, and `broadcast_object_list()` are collective operations: every process must call them, in the same order, or the ranks that do call them hang forever waiting for the ones that don't. So a branch that looks like it should be gated on `if accelerator.is_main_process:` (e.g. "only build this control's model") often *can't* be, if anything inside it issues a collective call. `ControlBuilder.build`'s docstring shows a branch that is deliberately *not* wrapped in error handling for this reason.
 2. **Decide once on rank 0, then broadcast the decision.** For a choice that must be identical on every rank (e.g. "does a cached file exist," "should this HPO trial be pruned"), only rank 0 evaluates the condition; the boolean is wrapped in a tensor and sent to every rank via `broadcast(..., from_process=0)` before anyone branches on it. Letting each rank decide independently can split them, because filesystem state, floating-point rounding, or the Optuna `trial` object (which exists only on rank 0) can differ.
 3. **Freeze/unfreeze parameters *before* `accelerator.prepare()`, never after.** Changing `requires_grad` on a model already wrapped for DDP leaves its gradient-reduction buckets built around the wrong parameter set. `configure_trainable_params()` always runs before `accelerator.prepare(model)` in `TuneStep`.
 4. **Classical probes fit identically on every rank.** Each rank holds the full gathered training embeddings and fits the estimator with the same seed, so no live sklearn object has to be broadcast; only rank 0 saves it.
 
-Before adding a control condition, training-loop branch, or cross-rank decision, search for `broadcast(` and `is_main_process` in `utils/controls.py` and `steps/tune.py`; the pattern you need likely exists already.
+Before adding a control condition, training-loop branch, or cross-rank decision,
+inspect collectives in the existing stage and trainer implementation.
 
 ### Adding a Task Type
 
@@ -1131,7 +1196,8 @@ and delegates all task-specific behavior to it. Adding a new task type means
 adding one handler module, not editing the steps.
 
 1. Create `modules/evaluate/src/tasks/<your_task>.py` with a class that
-   subclasses `TaskHandler`, sets `name` to the `task_type` string, and is
+   subclasses `FlatMetricsTask` (or `StructuredTask` for structured scoring), sets
+   `name` to the `task_type` string, and is
    decorated with `@register_task`. Override only what differs from the
    defaults in `TaskHandler` (see its docstrings): typically
    `auto_model_class`/`build_model`, `label_dtype`/`collate_labels`,
@@ -1156,24 +1222,21 @@ adding one handler module, not editing the steps.
    is parametrized over every registered task, so the new handler is also
    exercised by the shared contract suite automatically.
 
-`contact_prediction` is the non-standard example: it overrides the model
-builder, pairwise label collation, ragged prediction-row handling, and contact
-metrics. Its labels are sparse positive `[i, j]` residue pairs, with implicit
-negative labels for valid pairs at separation six or greater. It uses a
-symmetric low-rank pairwise head and stores ragged per-sequence pairs, so
-separation-binned precision-at-L is computed without materializing dense pair
-features. See
+`contact_prediction` supplies the structured scoring contract: original-coordinate
+units, fixed CASP protocols and hierarchical aggregation. Dataset preparation
+and candidate pairs live in `dataset/contact.py`; fitted and zero-shot predictors
+share the observation/scoring semantics. See
 [`contact_prediction.py`](src/tasks/contact_prediction.py) and
 [`contact_model.py`](src/model/contact_model.py).
 
-`categorical_jacobian` reuses the contact label and metric contract but swaps
-the trainable head for the frozen MLM; see
+The `categorical_jacobian` predictor reuses the contact label and metric
+contract but replaces a fitted head with the frozen MLM; see
 [Categorical-Jacobian contact prediction](#categorical-jacobian-contact-prediction).
 
-No changes to `prepare.py`/`collator.py`/`dataloader.py`/`predict.py`/`score.py`
-are needed unless the task requires something genuinely new (e.g. a non-HF
-model class, or pairwise/2D labels); in that case, override the relevant
-`TaskHandler` hook rather than adding a branch in the step.
+Declare supported heads, controls, modes and data behavior on the task. Reuse
+existing services where possible. A genuinely new execution strategy may require
+explicit stage selection; do not introduce task lifecycle hooks or callbacks
+into stages from trainers.
 
 #### Minimal example
 
@@ -1185,12 +1248,12 @@ only by accuracy, is roughly:
 from transformers import AutoModelForSequenceClassification
 
 from modules.evaluate.src.metrics import metrics
-from modules.evaluate.src.tasks.base import TaskHandler
+from modules.evaluate.src.tasks.base import FlatMetricsTask
 from modules.evaluate.src.tasks.registry import register_task
 
 
 @register_task
-class MyTask(TaskHandler):
+class MyTask(FlatMetricsTask):
     name = "my_task"
     auto_model_class = AutoModelForSequenceClassification
     metrics = {"accuracy": metrics.accuracy}
@@ -1216,7 +1279,7 @@ overrides the ragged-label hooks (`is_ragged`, `aligns_labels`,
 | `One of the subprocesses has abruptly died during map operation` | A tokenization worker exited, often because the job exceeded its CPU RAM allocation. Check Slurm/cgroup OOM counters; `steps.prepare.tokenize_num_proc=1` disables map multiprocessing for diagnosis (Accelerate's `--num_processes` does not). Pseudo-perplexity expands each protein into one masked row per residue, so it uses one source protein per map batch to bound RAM; the expanded on-disk dataset can still be large. |
 | `ValueError: Configured <role> source split '...' was not found` | The dataset doesn't publish that split; check `steps.prepare.split` against the listed available splits (see [Named benchmark splits](#named-benchmark-splits)) |
 | `ValueError: Packed evaluation requires CUDA.` | `steps.prepare.packed=true` on a machine without a GPU; set it to `false` |
-| `head_type='...' requires steps.prepare.embedding_cache.enabled=True` | Classical probes fit on cached pooled embeddings; add `steps.prepare.embedding_cache.enabled=true` or use a `configs/tuning/` overlay |
+| `head_type='...' requires steps.prepare.embedding_cache.enabled=True` | Classical probes fit on cached pooled embeddings; add `steps.prepare.embedding_cache.enabled=true` or use a `configs/predictors/` overlay |
 | Multi-GPU run hangs | A rank skipped a collective call; see [Distributed execution patterns](#distributed-execution-accelerate-patterns) |
 
 ---

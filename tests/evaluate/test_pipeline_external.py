@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import polars as pl
 import pytest
+import torch
 
-from modules.evaluate.src.config import EvaluationConfig
+from modules.evaluate.src.contracts.config import EvaluationConfig
 from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.runners import pipeline
+from modules.evaluate.src.contracts.artifacts import EvaluationMetadata, PredictOutput, ScoreOutput
 
 
 def _config(mode: str) -> EvaluationConfig:
@@ -34,7 +37,10 @@ def _config(mode: str) -> EvaluationConfig:
 
 
 def _stub_steps(monkeypatch, calls):
-    prepared = SimpleNamespace(model=object(), test_dataloader="main")
+    prepared = SimpleNamespace(
+        contact=None, embedding=None, layerwise=None,
+        model=object(), test_dataloader="main",
+    )
 
     class Prepare:
         def __init__(self, config):
@@ -44,7 +50,7 @@ def _stub_steps(monkeypatch, calls):
             return prepared
 
         def prepare_external_test(self, workspace, base, external, **kwargs):
-            return SimpleNamespace(model=base.model, test_dataloader=external.name)
+            return SimpleNamespace(contact=None, model=base.model, test_dataloader=external.name)
 
     class Tune:
         def __init__(self, *args, **kwargs):
@@ -67,14 +73,22 @@ def _stub_steps(monkeypatch, calls):
                     workspace.variant,
                 )
             )
-            return SimpleNamespace()
+            return PredictOutput(
+                metadata=EvaluationMetadata(
+                    model_name=workspace.model_name,
+                    dataset_name=workspace.dataset_name,
+                    task_type=workspace.task_type,
+                    variant=workspace.variant,
+                ),
+                predictions=pl.DataFrame(),
+            )
 
     class Score:
         def __init__(self, config):
             pass
 
         def run(self, workspace, **kwargs):
-            return SimpleNamespace(scores={}, summary_path=None)
+            return ScoreOutput(scores={})
 
     for name, cls in (
         ("PrepareStep", Prepare),
@@ -87,6 +101,7 @@ def _stub_steps(monkeypatch, calls):
 
 class _Accelerator:
     is_main_process = True
+    device = torch.device("cpu")
 
     def prepare(self, model):
         return model
@@ -113,8 +128,38 @@ def test_external_set_reuses_fitted_model_without_retuning(
     assert calls[1][2] == calls[2][2] == calls[0][1]
     assert calls[1][3] == calls[2][3] == "mlp-frozen_trunk"
     assert set(result.external) == {"sethard"}
-    assert "Starting Prepare Step" in (workspace.run_root / "log").read_text()
+    assert result.evaluations[0].prediction is result.predictions[None]
+    assert result.evaluations[0].score is result.scores[None]
+    assert "Preparing evaluation inputs" in (workspace.run_root / "log").read_text()
     assert not list(tmp_path.rglob("logs"))
+
+
+@pytest.mark.parametrize("mode", ["tune_probe", "evaluate_as_is"])
+def test_controls_step_runs_once_before_prediction(monkeypatch, tmp_path, mode):
+    calls = []
+    _stub_steps(monkeypatch, calls)
+
+    class Controls:
+        def __init__(self, config, prepare_config):
+            pass
+
+        def run(self, workspace, prepared, *, fitted, controls, **kwargs):
+            assert fitted == (mode == "tune_probe")
+            assert controls == ["random_trunk"]
+            calls.append(("controls", id(prepared.model)))
+            return prepared
+
+    monkeypatch.setattr(pipeline, "ControlsStep", Controls)
+    config = _config(mode)
+    config.workspace.base_path = str(tmp_path)
+    workspace = get_evaluation_workspace(config.workspace, variant=config.variant)
+    pipeline.run_pipeline(config, workspace, _Accelerator())
+    stages = [call[0] for call in calls]
+    assert stages == (
+        ["tune", "controls", "org/loc", "org/sethard"]
+        if mode == "tune_probe" else ["controls", "org/loc"]
+    )
+    assert len({call[1] for call in calls if call[0] in {"tune", "controls"}}) == 1
 
 
 def test_external_sets_skipped_without_fitted_probe(monkeypatch, tmp_path):

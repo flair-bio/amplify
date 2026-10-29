@@ -31,15 +31,17 @@ import polars as pl
 from pydantic import Field, model_validator
 
 from modules.core.utils.hf_download import resolve_hf_token
-from modules.evaluate.src.dataset_sourcing.config import HubUploadConfig
-from modules.evaluate.src.dataset_sourcing.downloads import download_url
-from modules.evaluate.src.dataset_sourcing.hf_io import upload_dataset_artifact
-from modules.evaluate.src.dataset_sourcing.outputs import (
+from modules.evaluate.scripts.dataset_sourcing.shared.config import HubUploadConfig
+from modules.evaluate.scripts.dataset_sourcing.shared.downloads import download_url
+from modules.evaluate.scripts.dataset_sourcing.shared.hf_io import (
+    upload_dataset_artifact,
+)
+from modules.evaluate.scripts.dataset_sourcing.shared.outputs import (
     generated_utc_date,
     write_dataset_stats,
 )
-from modules.evaluate.src.dataset_sourcing.pipeline import run_script
-from modules.evaluate.src.dataset_sourcing.preprocess import (
+from modules.evaluate.scripts.dataset_sourcing.shared.pipeline import run_script
+from modules.evaluate.scripts.dataset_sourcing.shared.preprocess import (
     create_split_subsets,
     random_partition_indices,
 )

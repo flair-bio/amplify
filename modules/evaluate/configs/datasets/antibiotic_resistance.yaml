@@ -1,7 +1,9 @@
 workspace:
+  # Provisional HMD-ARG: 14 single-label drug classes, not binary resistance.
   default_task_type: sequence_classification
   dataset_name: antibiotic_resistance
-  dataset_repo_id: flair-bio/amr_hmd_arg
+  dataset_repo_id: flair-bio/evaluation-suite
+  dataset_config_name: antibiotic_resistance
   target_type: categorical
   label_format: scalar
   num_labels: 14

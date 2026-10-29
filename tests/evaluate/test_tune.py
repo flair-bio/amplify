@@ -9,20 +9,20 @@ from accelerate import Accelerator
 from torch import nn
 from torch.utils.data import DataLoader
 
-from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
-from modules.evaluate.src.config import LayerwiseConfig
+from modules.evaluate.src.contracts.config import LayerwiseConfig
 from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
+from modules.evaluate.src.model.heads import EmbeddingProbeHead
+from modules.evaluate.src.contracts.config import HeadConfig
 from modules.evaluate.src.model.layerwise import LayerwiseProbeModel
-from modules.evaluate.src.steps.tune import (
-    HyperparameterSearchConfig,
-    HyperparameterSearchSpaceConfig,
-    TuneConfig,
-    TuneStep,
-    _improves,
-)
-from modules.evaluate.src.utils.embed import EmbeddingCache, EmbeddingCacheConfig
-from modules.evaluate.src.model.heads import EmbeddingProbeHead, HeadConfig
-from modules.evaluate.src.utils.hpo import (
+from modules.evaluate.src.contracts.artifacts import FitResult, PreparedArtifacts
+from modules.evaluate.src.contracts.config import HyperparameterSearchConfig, HyperparameterSearchSpaceConfig, TuneConfig
+from modules.evaluate.src.trainers.selection import PredictorSelection
+from modules.evaluate.src.steps.tune import TuneStep
+from modules.evaluate.src.trainers.layerwise import LayerwiseProbeTrainer, improves
+from modules.evaluate.src.dataset.embedding_cache import EmbeddingCache
+from modules.evaluate.src.dataset.embeddings import EmbeddingDataset
+from modules.evaluate.src.contracts.config import EmbeddingCacheConfig
+from modules.evaluate.src.trainers.selection_helpers import (
     build_optimizer,
     build_scheduler,
     checkpoint_state,
@@ -30,9 +30,39 @@ from modules.evaluate.src.utils.hpo import (
     sample_candidates,
     split_decay_parameters,
 )
-from modules.evaluate.src.utils.embed import EmbeddingDataset
 
 from .test_prepare import _make_workspace, _run_prepare
+
+
+def test_tune_step_validates_and_invokes_fit_service(monkeypatch, tmp_path):
+    from modules.evaluate.src.trainers import selection as selection_module
+    prepared = PreparedArtifacts(
+        model=nn.Linear(2, 1),
+        tokenizer=None,
+        train_dataloader=object(),
+        val_dataloader=None,
+        test_dataloader=None,
+    )
+    workspace = _make_workspace(tmp_path, "sequence_regression")
+    config = TuneConfig(save_best_model=False)
+    calls = []
+
+    def fit_predictor(**kwargs):
+        calls.append(kwargs)
+        return FitResult(
+            model=prepared.model,
+            seed=42,
+        )
+
+    monkeypatch.setattr(selection_module, "fit_predictor", fit_predictor)
+    actual = TuneStep(config).run(workspace, prepared, seed=42, accelerator=Accelerator(cpu=True))
+
+    assert actual is prepared
+    assert calls[0]["config"] is config
+    assert calls[0]["seed"] == 42
+    assert calls[0]["workspace"] is workspace.config
+    assert not hasattr(TuneStep, "_search_hyperparameters")
+    assert not hasattr(TuneStep, "_refit_cached_probe")
 
 
 @pytest.mark.parametrize("cached", [False, True])
@@ -75,11 +105,11 @@ def test_validation_f1_keeps_configured_classes_and_token_masks(
         [[0, 0], []] if task_type == "token_classification" else labels.tolist()
     )
     monkeypatch.setattr(
-        "modules.evaluate.src.steps.tune.run_inference",
+        "modules.evaluate.src.trainers.torch.run_inference",
         lambda *args, **kwargs: ([], live_labels, live_labels, None, None),
     )
-    step = TuneStep(TuneConfig(metric_aggregation="macro"))
-    score = step._evaluate_validation(
+    step = PredictorSelection(TuneConfig(metric_aggregation="macro"))
+    score = step._torch_trainer.evaluate_validation(
         _make_workspace(tmp_path, task_type, num_labels=num_labels),
         prepared,
         Accelerator(cpu=True),
@@ -151,7 +181,18 @@ def test_online_layerwise_tuning_saves_independent_heads(
             early_stopping_patience=None,
         )
     )
+    layerwise_fit = LayerwiseProbeTrainer.fit
+    fit_calls = []
+
+    def record_fit(self, *args, **kwargs):
+        fit_calls.append(args[0])
+        return layerwise_fit(self, *args, **kwargs)
+
+    monkeypatch.setattr(LayerwiseProbeTrainer, "fit", record_fit)
     trained = step.run(workspace, prepared, accelerator=Accelerator(cpu=True))
+    assert fit_calls == [workspace.config]
+    assert not hasattr(PredictorSelection, "_train_layerwise_heads")
+    assert not hasattr(PredictorSelection, "_fit_layerwise")
     assert isinstance(trained.model, LayerwiseProbeModel)
     assert all(parameter.grad is None for parameter in trained.model.trunk.parameters())
     for layer in (0, 2):
@@ -178,7 +219,7 @@ def test_online_layerwise_tuning_saves_independent_heads(
     ],
 )
 def test_layerwise_improvement_ignores_nan(score, best, direction, expected):
-    assert _improves(score, best, direction) is expected
+    assert improves(score, best, direction) is expected
 
 
 def test_checkpoint_state_is_independent_cpu_copy() -> None:
@@ -198,6 +239,7 @@ def test_checkpoint_state_is_independent_cpu_copy() -> None:
 @pytest.mark.parametrize("load_checkpoint", [False, True])
 def test_finetuning_norm_weight_decay(norm_type, load_checkpoint, tmp_path):
     from transformers import AutoModelForSequenceClassification
+
     from modules.pretrain.src.model.configuration_amplify import AMPLIFYConfig
     from modules.pretrain.src.model.modeling_amplify import (
         AMPLIFYForSequenceClassification,
@@ -264,7 +306,7 @@ def test_random_candidates_are_unique_and_bounded_by_grid() -> None:
         weight_decay=[0.0],
         max_epochs=[1, 2],
     )
-    step = TuneStep(
+    step = PredictorSelection(
         TuneConfig(
             hyperparameter_search=HyperparameterSearchConfig(search_space=search_space)
         )
@@ -299,7 +341,7 @@ def test_tpe_samples_weight_decay_continuously_and_reproducibly(
         else [{"labels": 0}],
         batch_size=2,
     )
-    step = TuneStep(
+    step = PredictorSelection(
         TuneConfig(
             hyperparameter_search=HyperparameterSearchConfig(
                 enabled=True,
@@ -323,7 +365,7 @@ def test_tpe_samples_weight_decay_continuously_and_reproducibly(
         samples.append(hparams["weight_decay"])
         return hparams["weight_decay"]
 
-    monkeypatch.setattr(step, "_train", train)
+    monkeypatch.setattr(step._torch_trainer, "train", train)
     for _ in range(2):
         prepared = PreparedArtifacts(
             model=EmbeddingProbeHead(3, 2, "sequence_classification"),
@@ -343,7 +385,7 @@ def test_tpe_samples_weight_decay_continuously_and_reproducibly(
 def test_categorical_weight_decay_preserves_zero_and_grid_candidates():
     trial = MagicMock()
     trial.suggest_categorical.return_value = 0.0
-    step = TuneStep(
+    step = PredictorSelection(
         TuneConfig(
             hyperparameter_search=HyperparameterSearchConfig(
                 search_space=HyperparameterSearchSpaceConfig(
@@ -402,7 +444,7 @@ def test_gather_embeddings_unwraps_accelerate_dataset_wrappers() -> None:
     wrapped_loader = LoaderWrapper(DatasetWrapper(embedding_dataset))
     accelerator = MagicMock()
 
-    actual_embeddings, actual_labels = TuneStep._gather_embeddings(
+    actual_embeddings, actual_labels = PredictorSelection._gather_embeddings(
         wrapped_loader, accelerator
     )
 
@@ -414,22 +456,22 @@ def test_gather_embeddings_unwraps_accelerate_dataset_wrappers() -> None:
 def test_resolve_direction_flips_to_minimize_for_lower_is_better_metric() -> None:
     # "mse" (the sequence_regression default metric) is lower-is-better, so
     # an unset direction must resolve to minimize.
-    step = TuneStep(TuneConfig())
+    step = PredictorSelection(TuneConfig())
 
-    assert step._resolve_direction("mse") == "minimize"
-    assert step._resolve_direction("f1") == "maximize"
+    assert step._torch_trainer.resolve_direction("mse") == "minimize"
+    assert step._torch_trainer.resolve_direction("f1") == "maximize"
 
 
 def test_resolve_direction_respects_explicit_direction() -> None:
     # An explicitly-set direction (even one that seems mismatched) must be
     # honored rather than overridden.
-    step = TuneStep(
+    step = PredictorSelection(
         TuneConfig(
             hyperparameter_search=HyperparameterSearchConfig(direction="maximize")
         )
     )
 
-    assert step._resolve_direction("mse") == "maximize"
+    assert step._torch_trainer.resolve_direction("mse") == "maximize"
 
 
 def test_resolve_search_direction_uses_metric_default_unless_explicit() -> None:
@@ -437,74 +479,63 @@ def test_resolve_search_direction_uses_metric_default_unless_explicit() -> None:
     assert resolve_search_direction("mse", "maximize") == "maximize"
 
 
-def test_save_model_persists_model_and_tokenizer_on_main_process(tmp_path) -> None:
-    step = TuneStep(TuneConfig())
-    workspace = MagicMock(model_path=tmp_path / "model")
+@pytest.mark.parametrize("is_main_process", [False, True])
+def test_tune_stage_publishes_pretrained_model_and_settings(
+    monkeypatch, tmp_path, is_main_process
+) -> None:
+    from modules.evaluate.src.trainers import selection as selection_module
+    from modules.evaluate.src.contracts.artifacts import FitResult
 
-    model = MagicMock()
+    class PretrainedLike(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(1))
+            self.save_pretrained = MagicMock()
+
+    model = PretrainedLike()
     tokenizer = MagicMock()
     prepared = PreparedArtifacts(
         model=model,
         tokenizer=tokenizer,
-        train_dataloader=None,
+        train_dataloader=object(),
         val_dataloader=None,
         test_dataloader=None,
     )
-
-    accelerator = MagicMock(is_main_process=True)
-    accelerator.unwrap_model.return_value = model
-
+    workspace = _make_workspace(tmp_path, "sequence_classification")
+    config = TuneConfig()
     best_hparams = {"learning_rate": 1e-4, "weight_decay": 1e-4, "max_epochs": 10}
-    step._save_model(workspace, prepared, model, accelerator, best_hparams, seed=710019)
+    accelerator = MagicMock(is_main_process=is_main_process)
+    accelerator.unwrap_model.return_value = model
+    accelerator.get_state_dict.return_value = model.state_dict()
+    monkeypatch.setattr(
+        selection_module,
+        "fit_predictor",
+        lambda **kwargs: FitResult(
+            model=model,
+            seed=710019,
+            selected_hyperparameters=best_hparams,
+        ),
+    )
+
+    TuneStep(config).run(workspace, prepared, accelerator=accelerator)
 
     assert workspace.model_path.is_dir()
-    accelerator.unwrap_model.assert_called_once_with(model)
     model.save_pretrained.assert_called_once_with(
         workspace.model_path,
-        is_main_process=True,
+        is_main_process=is_main_process,
         save_function=accelerator.save,
         state_dict=accelerator.get_state_dict.return_value,
     )
-    tokenizer.save_pretrained.assert_called_once_with(workspace.model_path)
+    if is_main_process:
+        tokenizer.save_pretrained.assert_called_once_with(workspace.model_path)
+        metadata = json.loads((workspace.model_path / "tune_config.json").read_text())
+        assert metadata["seed"] == 710019
+        assert metadata["best_hyperparameters"] == best_hparams
+        assert metadata["config"]["head"]["head_type"] == "mlp"
+    else:
+        tokenizer.save_pretrained.assert_not_called()
+        assert not (workspace.model_path / "tune_config.json").exists()
     accelerator.wait_for_everyone.assert_called_once()
-
-    tune_config_path = workspace.model_path / "tune_config.json"
-    assert tune_config_path.exists()
-    on_disk = json.loads(tune_config_path.read_text())
-    assert on_disk["seed"] == 710019
-    assert on_disk["best_hyperparameters"] == best_hparams
-    assert on_disk["config"]["head"]["head_type"] == "mlp"
-
-
-def test_save_model_skips_tokenizer_save_on_non_main_process(tmp_path) -> None:
-    step = TuneStep(TuneConfig())
-    workspace = MagicMock(model_path=tmp_path / "model")
-
-    model = MagicMock()
-    tokenizer = MagicMock()
-    prepared = PreparedArtifacts(
-        model=model,
-        tokenizer=tokenizer,
-        train_dataloader=None,
-        val_dataloader=None,
-        test_dataloader=None,
-    )
-
-    accelerator = MagicMock(is_main_process=False)
-    accelerator.unwrap_model.return_value = model
-
-    best_hparams = {"learning_rate": 1e-4, "weight_decay": 1e-4, "max_epochs": 10}
-    step._save_model(workspace, prepared, model, accelerator, best_hparams, seed=710019)
-
-    model.save_pretrained.assert_called_once_with(
-        workspace.model_path,
-        is_main_process=False,
-        save_function=accelerator.save,
-        state_dict=accelerator.get_state_dict.return_value,
-    )
-    tokenizer.save_pretrained.assert_not_called()
-    accelerator.wait_for_everyone.assert_called_once()
-    assert not (workspace.model_path / "tune_config.json").exists()
 
 
 class TestVarianceSeeds:
@@ -526,7 +557,7 @@ class TestVarianceSeeds:
             model_path=tmp_path / "model",
             num_labels=2,
         )
-        step = TuneStep(
+        step = PredictorSelection(
             TuneConfig(
                 head=HeadConfig(head_type="mlp"),
                 max_epochs=1,
@@ -568,7 +599,7 @@ class TestVarianceSeeds:
             model_path=tmp_path / "model",
             num_labels=2,
         )
-        step = TuneStep(
+        step = PredictorSelection(
             TuneConfig(
                 head=HeadConfig(head_type="sklearn_linear"),
                 save_best_model=False,
@@ -605,7 +636,7 @@ class TestBohbAcrossTaskTypesAndSettings:
         workspace = MagicMock(
             task_type=task_type, model_path=tmp_path / "model", num_labels=2
         )
-        step = TuneStep(
+        step = PredictorSelection(
             TuneConfig(
                 head=HeadConfig(head_type=head_type),
                 max_epochs=1,
@@ -630,7 +661,7 @@ class TestBohbAcrossTaskTypesAndSettings:
 
 # Search spaces small enough to run quickly under bohb's real Optuna study,
 # but with >1 candidate value so bohb actually has something to search over
-# (sweep_classical_head's bohb branch is a no-op without one -- see heads.py).
+# (sweep_classical_head's bohb branch is a no-op without one -- see the classical trainer).
 _CLASSICAL_HEAD_SEARCH_SPACES: dict[str, dict[str, list]] = {
     "knn": {"n_neighbors": [1, 3]},
 }
@@ -654,7 +685,7 @@ class TestBohbAcrossClassicalHeadTypes:
         workspace = MagicMock(
             task_type=task_type, model_path=tmp_path / "model", num_labels=2
         )
-        step = TuneStep(
+        step = PredictorSelection(
             TuneConfig(
                 head=HeadConfig(
                     head_type=head_type,
@@ -685,25 +716,25 @@ def test_cached_validation_features_are_prepared_once_per_training_run(
     )
     workspace = _make_workspace(tmp_path, "sequence_classification")
     accelerator = Accelerator(cpu=True)
-    step = TuneStep(
+    step = PredictorSelection(
         TuneConfig(
             max_epochs=3,
             early_stopping_patience=5 if monitor else None,
             save_best_model=False,
         )
     )
-    prepare_split = MagicMock(wraps=step._cached_embedding_split)
-    evaluate_validation = step._evaluate_validation
+    prepare_split = MagicMock(wraps=step._torch_trainer._cached_embedding_split)
+    evaluate_validation = step._torch_trainer.evaluate_validation
     validation_calls = MagicMock(wraps=evaluate_validation)
-    monkeypatch.setattr(step, "_cached_embedding_split", prepare_split)
-    monkeypatch.setattr(step, "_evaluate_validation", validation_calls)
+    monkeypatch.setattr(step._torch_trainer, "_cached_embedding_split", prepare_split)
+    monkeypatch.setattr(step._torch_trainer, "evaluate_validation", validation_calls)
     hparams = {"learning_rate": 1e-3, "weight_decay": 0.0, "max_epochs": 3}
     previous_cached_val = None
 
     for _ in range(2):
         prepare_split.reset_mock()
         validation_calls.reset_mock()
-        score = step._train(workspace, prepared, accelerator, hparams)
+        score = step._torch_trainer.train(workspace, prepared, accelerator, hparams)
 
         validation_preparations = [
             call
@@ -730,7 +761,7 @@ def test_cached_validation_features_are_prepared_once_per_training_run(
                     workspace,
                     prepared,
                     accelerator,
-                    step._resolve_metric_name(workspace),
+                    step._torch_trainer.resolve_metric_name(workspace),
                 )
             assert validation_forward.called
             assert all(
@@ -753,15 +784,15 @@ def test_cached_training_features_are_transferred_only_when_training(
     )
     workspace = _make_workspace(tmp_path, "sequence_classification")
     accelerator = Accelerator(cpu=True)
-    step = TuneStep(
+    step = PredictorSelection(
         TuneConfig(
             max_epochs=1,
             early_stopping_patience=None,
             save_best_model=False,
         )
     )
-    prepare_split = MagicMock(wraps=step._cached_embedding_split)
-    monkeypatch.setattr(step, "_cached_embedding_split", prepare_split)
+    prepare_split = MagicMock(wraps=step._torch_trainer._cached_embedding_split)
+    monkeypatch.setattr(step._torch_trainer, "_cached_embedding_split", prepare_split)
 
     result = step.run(workspace, prepared, accelerator=accelerator)
 
@@ -795,7 +826,7 @@ def test_cached_probe_batch_size_honors_loader_and_override(
         val_dataloader=val_loader,
         test_dataloader=None,
     )
-    step = TuneStep(
+    step = PredictorSelection(
         TuneConfig(
             batch_size=batch_size,
             max_epochs=2,
@@ -813,14 +844,16 @@ def test_cached_probe_batch_size_honors_loader_and_override(
     scheduler = MagicMock(wraps=build_scheduler)
     forward = MagicMock(wraps=model.forward)
     monkeypatch.setattr(
-        "modules.evaluate.src.steps.tune.build_optimizer", track_optimizer
+        "modules.evaluate.src.trainers.torch.build_optimizer", track_optimizer
     )
-    monkeypatch.setattr("modules.evaluate.src.steps.tune.build_scheduler", scheduler)
+    monkeypatch.setattr(
+        "modules.evaluate.src.trainers.torch.build_scheduler", scheduler
+    )
     monkeypatch.setattr(model, "forward", forward)
     workspace = MagicMock(task_type="sequence_classification", num_labels=2)
     hparams = {"learning_rate": 1e-3, "weight_decay": 0.0, "max_epochs": 2}
 
-    step._train(workspace, prepared, accelerator, hparams)
+    step._torch_trainer.train(workspace, prepared, accelerator, hparams)
 
     assert [
         call.kwargs["inputs_embeds"].shape[0] for call in forward.call_args_list
@@ -830,7 +863,7 @@ def test_cached_probe_batch_size_honors_loader_and_override(
     assert scheduler.call_args.kwargs["num_training_steps"] == expected_steps
 
     forward.reset_mock()
-    step._evaluate_validation(workspace, prepared, accelerator, "f1")
+    step._torch_trainer.evaluate_validation(workspace, prepared, accelerator, "f1")
     assert [
         call.kwargs["inputs_embeds"].shape[0] for call in forward.call_args_list
     ] == val_batch_sizes
@@ -873,7 +906,7 @@ def test_cached_mlp_checkpoint_reloads_trained_head(
     reloaded.load_state_dict(state, strict=True)
     for name, tensor in trained.model.state_dict().items():
         torch.testing.assert_close(state[name], tensor)
-    features, _ = step._cached_embedding_split(prepared.val_dataloader)
+    features = prepared.val_dataloader.dataset.embeddings
     with torch.inference_mode():
         torch.testing.assert_close(
             reloaded(inputs_embeds=features).logits,

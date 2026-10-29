@@ -1,4 +1,4 @@
-"""Tests for modules.evaluate.src.utils.embed (frozen-trunk embedding cache).
+"""Tests for frozen-trunk extraction, feature loaders, and representation caches.
 
 Unit tests cover the storage/key primitives in isolation; the integration
 tests reuse ``PrepareStep`` via ``tests.evaluate.test_prepare._run_prepare``
@@ -17,30 +17,161 @@ from accelerate.data_loader import BatchSamplerShard
 from torch import nn
 from torch.utils.data import DataLoader
 
-from modules.evaluate.src.config import EvaluationConfig, LayerwiseConfig
-from modules.evaluate.src.dataset.workspace import (
-    EvaluationWorkspaceConfig,
-    get_evaluation_workspace,
-)
+from modules.evaluate.src.contracts.config import EvaluationConfig, LayerwiseConfig
+from modules.evaluate.src.contracts.config import EvaluationWorkspaceConfig
+from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.model.heads import EmbeddingProbeHead
 from modules.evaluate.src.model.layerwise import LayerwiseProbeModel, resolve_layers
-from modules.evaluate.src.utils.layerwise import run_layerwise_conditions
-from modules.evaluate.src.utils.embed import (
-    EmbeddingCache,
-    EmbeddingCacheConfig,
+from modules.evaluate.src.model.layerwise import run_layerwise_conditions
+from modules.evaluate.src.dataset.embedding_cache import EmbeddingCache, embedding_cache_key
+from modules.evaluate.src.dataset.embeddings import (
     EmbeddingDataset,
     build_embedding_dataloaders,
     embedding_collate_fn,
+)
+from modules.evaluate.src.model.embeddings import (
     extract_embeddings,
-    embedding_cache_key,
     pool_hidden_state_layers,
     pool_hidden_states,
     residue_attention_mask,
 )
+from modules.evaluate.src.contracts.config import EmbeddingCacheConfig
 
 from .test_prepare import _run_prepare
 
 import pytest
+
+
+def test_tensor_cache_reuses_identity_and_refreshes(tmp_path):
+    from modules.evaluate.src.dataset.embedding_cache import load_tensor_cache
+
+    calls = []
+
+    def extract():
+        calls.append(None)
+        return {"features": torch.tensor([[float(len(calls))]])}
+
+    def validate(values):
+        assert values["features"].shape == (1, 1)
+
+    options = dict(
+        cache_dir=tmp_path,
+        namespace="features",
+        identity={"weights": "abc", "rows": [1]},
+        extract=extract,
+        validate=validate,
+    )
+    first, key = load_tensor_cache(**options)
+    reused, reused_key = load_tensor_cache(**options)
+    assert key == reused_key
+    assert len(calls) == 1
+    torch.testing.assert_close(first["features"], reused["features"])
+    refreshed, _ = load_tensor_cache(**options, refresh=True)
+    assert len(calls) == 2
+    assert refreshed["features"].item() == 2
+    _, changed_key = load_tensor_cache(
+        **{**options, "identity": {"weights": "different", "rows": [1]}}
+    )
+    assert changed_key != key
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("cache_dir_enabled", [False, True])
+def test_tensor_cache_validates_before_persisting(tmp_path, cache_dir_enabled):
+    from modules.evaluate.src.dataset.embedding_cache import load_tensor_cache
+
+    def reject(values):
+        raise ValueError("invalid features")
+
+    with pytest.raises(ValueError, match="invalid features"):
+        load_tensor_cache(
+            cache_dir=tmp_path if cache_dir_enabled else None,
+            namespace="features",
+            identity={},
+            extract=lambda: {"features": torch.tensor([float("nan")])},
+            validate=reject,
+        )
+    assert not list(tmp_path.glob("*.safetensors"))
+
+
+def test_tensor_cache_validates_reused_values(tmp_path):
+    from modules.evaluate.src.dataset.embedding_cache import load_tensor_cache
+
+    options = dict(
+        cache_dir=tmp_path,
+        namespace="features",
+        identity={},
+        extract=lambda: {"features": torch.ones(1)},
+    )
+    load_tensor_cache(**options, validate=lambda values: None)
+
+    def reject(values):
+        raise ValueError("invalid cached features")
+
+    with pytest.raises(ValueError, match="invalid cached features"):
+        load_tensor_cache(**options, validate=reject)
+
+
+def test_tensor_cache_budget_keeps_values_in_memory(tmp_path):
+    from modules.evaluate.src.dataset.embedding_cache import load_tensor_cache
+
+    values, _ = load_tensor_cache(
+        cache_dir=tmp_path,
+        namespace="features",
+        identity={},
+        extract=lambda: {"features": torch.ones(4)},
+        validate=lambda values: None,
+        max_cache_gb=0,
+    )
+    torch.testing.assert_close(values["features"], torch.ones(4))
+    assert not list(tmp_path.glob("*.safetensors"))
+
+
+def test_tensor_cache_checks_identity_for_explicit_key(tmp_path):
+    from modules.evaluate.src.dataset.embedding_cache import load_tensor_cache
+
+    options = dict(
+        cache_dir=tmp_path,
+        namespace="features",
+        key="explicit-key",
+        extract=lambda: {"features": torch.ones(1)},
+        validate=lambda values: None,
+    )
+    load_tensor_cache(**options, identity={"rows": [(1, 2)]})
+    load_tensor_cache(**options, identity={"rows": [(1, 2)]})
+    assert (tmp_path / "features-explicit-key.safetensors").exists()
+    with pytest.raises(ValueError, match="identity"):
+        load_tensor_cache(**options, identity={"rows": [(3, 4)]})
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {},
+        {"other": torch.ones(2, 3)},
+        {"features": torch.ones(3, 2)},
+        {"features": torch.ones(2, 3, dtype=torch.float16)},
+        {"features": torch.full((2, 3), float("nan"))},
+        {"features": torch.full((2, 3), float("inf"))},
+    ],
+)
+def test_tensor_cache_validation_rejects_invalid_tensors(values):
+    from modules.evaluate.src.dataset.embedding_cache import validate_tensor_cache
+
+    with pytest.raises(ValueError, match="Tensor cache"):
+        validate_tensor_cache(
+            values, shapes={"features": (2, 3)}, dtype=torch.float32
+        )
+
+
+def test_tensor_cache_validation_accepts_expected_tensors():
+    from modules.evaluate.src.dataset.embedding_cache import validate_tensor_cache
+
+    validate_tensor_cache(
+        {"features": torch.ones(2, 3)},
+        shapes={"features": (2, 3)},
+        dtype=torch.float32,
+    )
 
 
 @pytest.mark.parametrize("config_type", [LayerwiseConfig, EmbeddingCacheConfig])
@@ -686,7 +817,7 @@ class TestExtractEmbeddings:
     def test_extraction_progress_bar_is_scoped_to_main_process(
         self, monkeypatch, label, main
     ):
-        from modules.evaluate.src.utils import embed
+        from modules.evaluate.src.model import embeddings as embed
 
         progress_options = []
 
@@ -855,7 +986,7 @@ class TestPrepareStepWithEmbeddingCache:
             length_grouped_sampling=True,
             embedding_cache=EmbeddingCacheConfig(enabled=True),
         )
-        backend = artifacts.embedding_backend
+        backend = artifacts.embedding.backend
         original = backend.token_test_dataloader
         sharded = DataLoader(
             original.dataset,
@@ -890,16 +1021,16 @@ class TestPrepareStepWithEmbeddingCache:
     def test_layerwise_reuses_multilayer_sequence_cache(
         self, monkeypatch, tmp_path, model_family
     ):
-        from modules.evaluate.src import utils
+        from modules.evaluate.src.dataset import embeddings
 
         calls = []
-        original_extract = utils.embed.extract_embeddings
+        original_extract = embeddings.extract_embeddings
 
         def count_extract(*args, **kwargs):
             calls.append(kwargs["layers"])
             return original_extract(*args, **kwargs)
 
-        monkeypatch.setattr(utils.embed, "extract_embeddings", count_extract)
+        monkeypatch.setattr(embeddings, "extract_embeddings", count_extract)
         config = LayerwiseConfig(enabled=True, layers=[0, -1], autocast_dtype="float32")
         cache = EmbeddingCacheConfig(enabled=True, dtype="float32")
         torch.manual_seed(123)
@@ -990,15 +1121,15 @@ class TestPrepareStepWithEmbeddingCache:
             embedding_cache=EmbeddingCacheConfig(enabled=True, layers=[-1, -2]),
         )
 
-        assert artifacts.embedding_backend is not None
+        assert artifacts.embedding is not None
         assert (
-            artifacts.embedding_backend.hidden_size
+            artifacts.embedding.backend.hidden_size
             == model_family.config_kwargs["hidden_size"] * 2
         )
-        assert artifacts.embedding_backend.layers == [-1, -2]
+        assert artifacts.embedding.backend.layers == [-1, -2]
         batch = next(iter(artifacts.train_dataloader))
         assert (
-            batch["inputs_embeds"].shape[-1] == artifacts.embedding_backend.hidden_size
+            batch["inputs_embeds"].shape[-1] == artifacts.embedding.backend.hidden_size
         )
 
     def test_token_classification_uses_unpooled_per_token_embeddings(

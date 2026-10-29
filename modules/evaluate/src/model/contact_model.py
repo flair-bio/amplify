@@ -1,164 +1,157 @@
-"""
-Symmetric low-rank bilinear contact-prediction head over a frozen/fine-tuned
-trunk.
-
-A dense ``[h_i, h_j, h_i*h_j, |h_i-h_j|]`` pair-feature tensor is
-``O(L^2 * H)`` and prohibitively large (~GiB/sequence). Instead, project each
-residue's hidden state to a small rank ``r`` and score every pair with a
-single symmetric bilinear form -- ``O(L*r)`` feature memory, only the final
-``(L, L)`` score matrix is ever materialized.
-"""
+"""Frozen-trunk models for CASP contact prediction."""
 
 from __future__ import annotations
 
+import inspect
 import json
-from dataclasses import dataclass
+import logging
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any
 
 import torch
-import torch.nn.functional as F
 from torch import nn
-from transformers import AutoModel, PretrainedConfig
+from transformers import AutoConfig, AutoModel, PreTrainedTokenizerBase
 
-from modules.evaluate.src.model.heads import _HeadOutput
+from modules.evaluate.src.model.adapters import contact_positions
+
+if TYPE_CHECKING:
+    from modules.evaluate.src.dataset.contact import ContactChain
+
+logger = logging.getLogger(__name__)
 
 
-@dataclass
-class ContactModelConfig:
-    """Single-argument constructor config for :class:`ContactPredictionModel`.
+class BilinearHead(nn.Module):
+    """Two bias-free projections, averaged directional logits and scalar bias."""
 
-    Mirrors the one-argument ``type(model)(config)`` construction that
-    ``utils.controls.ControlBuilder`` uses to build the
-    ``random_trunk``/``random_head``/``random_both`` controls: it
-    reconstructs a fresh instance from ``copy.deepcopy(model.config)`` alone,
-    then selectively copies the trunk's or head's trained ``state_dict``
-    back in.
-    """
+    def __init__(self, dimension: int) -> None:
+        super().__init__()
+        self.left = nn.Linear(dimension, 512, bias=False, dtype=torch.float32)
+        self.right = nn.Linear(dimension, 512, bias=False, dtype=torch.float32)
+        self.bias = nn.Parameter(torch.zeros((), dtype=torch.float32))
 
-    trunk_config: PretrainedConfig
-    rank: int = 128
-    #: Positive-class weight for BCE; positive contacts are sparse within each
-    #: residue-pair map.
-    pos_weight: float = 30.0
+    def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
+        directional = self.left(embeddings) @ self.right(embeddings).T
+        return (directional + directional.T) / 2 + self.bias
 
 
 class ContactPredictionModel(nn.Module):
-    """Trunk + symmetric low-rank bilinear pairwise contact head.
+    """Frozen backbone plus independently fitted 512-dimensional bilinear head."""
 
-    ``logits[b, i, j] = (W h_i) . (W h_j)``, i.e. the same projection ``W``
-    scores both ends of the pair, so the map is symmetric by construction
-    without an explicit ``(logits + logits.T) / 2`` step.
-    """
-
-    base_model_prefix = "trunk"
-
-    def __init__(self, config: ContactModelConfig) -> None:
+    def __init__(self, trunk: Any) -> None:
         super().__init__()
-        self.config = config
-        self.trunk = AutoModel.from_config(config.trunk_config, trust_remote_code=True)
-        self.query = nn.Linear(config.trunk_config.hidden_size, config.rank)
-        # Not a real class count (this is a per-pair binary score, not a
-        # softmax head); kept only for compatibility with generic pipeline
-        # code that reads a model's `num_labels` (e.g. control building).
-        self.num_labels = 2
+        self.trunk: Any = trunk.float().eval().requires_grad_(False)
+        self.head = BilinearHead(int(trunk.config.hidden_size))
 
-    def save_pretrained(
-        self,
-        save_directory: str | Path,
-        *,
-        is_main_process: bool = True,
-        save_function: Callable[..., Any] = torch.save,
-        state_dict: dict[str, torch.Tensor] | None = None,
-    ) -> None:
-        """Save the trunk, contact head, and contact-specific configuration."""
-        if not is_main_process:
-            return
-        directory = Path(save_directory)
+    @torch.no_grad()
+    def extract(
+        self, chain: ContactChain, tokenizer: PreTrainedTokenizerBase
+    ) -> torch.Tensor:
+        from modules.evaluate.src.dataset.contact import tokenize_contact_chain
+
+        tokens = tokenize_contact_chain(chain, tokenizer)
+        device = next(self.trunk.parameters()).device
+        inputs = {
+            "input_ids": torch.tensor([tokens.input_ids], device=device),
+            "attention_mask": torch.tensor([tokens.attention_mask], device=device),
+        }
+        positions = torch.tensor([tokens.position_ids], device=device)
+        if "position_ids" in inspect.signature(self.trunk.forward).parameters:
+            inputs["position_ids"] = positions
+        self.trunk.eval()
+        with contact_positions(self.trunk, positions):
+            output = self.trunk(**inputs)
+        hidden = output.last_hidden_state
+        if hidden.shape[:2] != inputs["input_ids"].shape:
+            raise ValueError("Backbone changed the full-chain token layout")
+        features = hidden[0, list(tokens.residue_token_indices)].float().cpu()
+        if not torch.isfinite(features).all():
+            raise ValueError("Contact embeddings must be finite")
+        return features
+
+    @torch.no_grad()
+    def predict(
+        self, chain: ContactChain, tokenizer: PreTrainedTokenizerBase
+    ) -> torch.Tensor:
+        features = self.extract(chain, tokenizer).to(self.head.bias.device)
+        self.head.eval()
+        return self.head(features).cpu()
+
+    def save_pretrained(self, directory: str | Path) -> None:
+        directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
-        weights = self.state_dict() if state_dict is None else state_dict
-        self.trunk.save_pretrained(
-            directory,
-            is_main_process=is_main_process,
-            save_function=save_function,
-            state_dict={
-                key.removeprefix("trunk."): value
-                for key, value in weights.items()
-                if key.startswith("trunk.")
-            },
-        )
-        save_function(
-            {
-                key.removeprefix("query."): value
-                for key, value in weights.items()
-                if key.startswith("query.")
-            },
-            directory / "contact_head.pt",
-        )
+        self.trunk.save_pretrained(directory)
+        torch.save(self.head.state_dict(), directory / "contact_head.pt")
         (directory / "contact_config.json").write_text(
             json.dumps(
-                {"rank": self.config.rank, "pos_weight": self.config.pos_weight},
+                {
+                    "protocol": "casp-contact-v1",
+                    "predictor": "bilinear512",
+                    "projection": 512,
+                    "dimension": self.head.left.in_features,
+                },
                 indent=2,
             )
             + "\n"
         )
 
     @classmethod
-    def from_pretrained(cls, model_path: str | Path) -> ContactPredictionModel:
-        """Restore a local contact checkpoint, including its trained head."""
-        directory = Path(model_path)
+    def from_pretrained(cls, directory: str | Path) -> ContactPredictionModel:
+        directory = Path(directory)
         config = json.loads((directory / "contact_config.json").read_text())
-        model = build_contact_model(str(directory), **config)
-        model.query.load_state_dict(
+        if config["protocol"] != "casp-contact-v1" or config["projection"] != 512:
+            raise ValueError("Unsupported contact checkpoint protocol")
+        if config.get("predictor", "bilinear512") != "bilinear512":
+            raise ValueError("Unsupported bilinear contact checkpoint predictor")
+        model = build_contact_model(str(directory))
+        model.head.load_state_dict(
             torch.load(
                 directory / "contact_head.pt", map_location="cpu", weights_only=True
             )
         )
-        model.eval()
-        return model
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        labels: torch.Tensor | None = None,
-        **kwargs: Any,
-    ) -> _HeadOutput:
-        hidden = self.trunk(
-            input_ids=input_ids, attention_mask=attention_mask
-        ).last_hidden_state
-        z = self.query(hidden)  # (B, S, rank)
-        logits = torch.einsum("bid,bjd->bij", z, z)  # (B, S, S), symmetric
-
-        loss = None
-        if labels is not None:
-            mask = labels != -100
-            if mask.any():
-                pos_weight = torch.tensor(self.config.pos_weight, device=logits.device)
-                loss = F.binary_cross_entropy_with_logits(
-                    logits[mask], labels[mask].to(logits.dtype), pos_weight=pos_weight
-                )
-            else:
-                # No valid pair in this batch (e.g. every sequence has only
-                # short-range pairs); a zero loss keeps the training loop's
-                # backward()/optimizer.step() well-defined instead of
-                # branching around it.
-                loss = logits.sum() * 0.0
-        return _HeadOutput(loss=loss, logits=logits)
+        return model.eval()
 
 
 def build_contact_model(
     model_id: str,
-    rank: int = 128,
-    pos_weight: float = 30.0,
-    **from_pretrained_kwargs: Any,
-) -> ContactPredictionModel:
-    """Load a pretrained trunk with a freshly-initialized contact head."""
-    trunk = AutoModel.from_pretrained(
-        model_id, trust_remote_code=True, **from_pretrained_kwargs
+    predictor: str = "bilinear512",
+    *,
+    tokenizer: PreTrainedTokenizerBase | None = None,
+) -> Any:
+    if predictor == "attention_l1":
+        from modules.evaluate.src.model.contact_attention import ContactAttentionModel
+
+        return ContactAttentionModel(load_contact_trunk(model_id))
+    if predictor == "categorical_jacobian":
+        from modules.evaluate.src.model.contact_jacobian import (
+            build_contact_jacobian_model,
+        )
+
+        if tokenizer is None:
+            raise ValueError("The categorical Jacobian predictor requires a tokenizer")
+        return build_contact_jacobian_model(model_id, tokenizer)
+    if predictor != "bilinear512":
+        raise ValueError(f"Unknown CASP contact predictor: {predictor}")
+    return ContactPredictionModel(load_contact_trunk(model_id))
+
+
+def load_contact_trunk(model_id: str) -> Any:
+    config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    # Masked-LM ESM checkpoints have no pooler; it is unused for residue features.
+    kwargs: dict[str, Any] = (
+        {"add_pooling_layer": False} if config.model_type == "esm" else {}
     )
-    model = ContactPredictionModel(
-        ContactModelConfig(trunk.config, rank=rank, pos_weight=pos_weight)
+    return AutoModel.from_pretrained(
+        model_id, config=config, trust_remote_code=True, **kwargs
     )
-    model.trunk = trunk
-    return model
+
+
+def load_contact_model(directory: str | Path) -> Any:
+    directory = Path(directory)
+    config = json.loads((directory / "contact_config.json").read_text())
+    if config.get("predictor", "bilinear512") == "attention_l1":
+        from modules.evaluate.src.model.contact_attention import ContactAttentionModel
+
+        return ContactAttentionModel.from_pretrained(directory)
+    if config.get("predictor", "bilinear512") != "bilinear512":
+        raise ValueError("Unsupported contact checkpoint predictor")
+    return ContactPredictionModel.from_pretrained(directory)
