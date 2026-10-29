@@ -14,35 +14,10 @@ from modules.evaluate.scripts.dataset_sourcing.source_proteingym import (
     _TRACKS,
     write_proteingym_card,
 )
-from modules.evaluate.src.proteingym.aggregate import (
-    aggregate_proteingym_metrics,
-    aggregate_proteingym_scores,
-    bootstrap_standard_error_by_category,
-    compute_all_assay_metrics,
-    compute_assay_auc,
-    compute_assay_mcc,
-    compute_assay_metric,
-    compute_assay_ndcg,
-    compute_assay_spearman,
-    compute_assay_top_recall,
-)
-from modules.evaluate.src.proteingym.baselines import (
-    score_assay_blosum62,
-    score_assay_random,
-)
-from modules.evaluate.src.proteingym.masked_marginal import (
-    _optimal_window,
-    _sequence_log_likelihood,
-    parse_mutant,
-    score_assay_indel,
-    score_assay_masked_marginal,
-)
-from modules.evaluate.src.proteingym.supervised import (
-    OFFICIAL_CV_SCHEMES,
-    pool_embeddings,
-    resolve_folds,
-    run_cv,
-)
+from modules.evaluate.src.proteingym.aggregate import aggregate_proteingym_metrics, aggregate_proteingym_scores, bootstrap_standard_error_by_category, compute_all_assay_metrics, compute_assay_auc, compute_assay_mcc, compute_assay_metric, compute_assay_ndcg, compute_assay_spearman, compute_assay_top_recall
+from modules.evaluate.src.proteingym.baselines import score_assay_blosum62, score_assay_random
+from modules.evaluate.src.proteingym.masked_marginal import _optimal_window, _sequence_log_likelihood, parse_mutant, score_assay_indel, score_assay_masked_marginal
+from modules.evaluate.src.proteingym.supervised import OFFICIAL_CV_SCHEMES, pool_embeddings, resolve_folds, run_cv
 from modules.evaluate.src.proteingym import runner as proteingym_runner
 from modules.evaluate.src.proteingym.runner import run_assay_loop
 

@@ -8,15 +8,17 @@ import torch
 from transformers import AutoModelForMaskedLM
 
 from modules.evaluate.src.metrics import metrics
-from modules.evaluate.src.tasks.base import MetricFn, TaskHandler
+from modules.evaluate.src.tasks.base import FlatMetricsTask, MetricFn
 from modules.evaluate.src.tasks.registry import register_task
 
 IGNORE_INDEX = -100
 
 
 @register_task
-class PseudoPerplexityTask(TaskHandler):
+class PseudoPerplexityTask(FlatMetricsTask):
     """Score each residue by masking it and reading its MLM log-probability."""
+
+    evaluation_modes = frozenset({"evaluate_as_is"})
 
     name = "pseudo_perplexity"
     auto_model_class = AutoModelForMaskedLM

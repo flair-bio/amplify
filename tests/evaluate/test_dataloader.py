@@ -13,22 +13,9 @@ import torch
 from datasets import Dataset, DatasetDict
 
 from modules.evaluate.src.dataset import dataloader as dataloader_module
-from modules.evaluate.src.dataset.collator import (
-    EvaluationCollator,
-    EvaluationCollatorConfig,
-)
-from modules.evaluate.src.dataset.dataloader import (
-    DataLoaderConfig,
-    DatasetSplitConfig,
-    LengthGroupedSampler,
-    TokenBudgetBatchSampler,
-    build_dataloaders,
-    ensure_validation_split,
-    load_evaluation_dataset,
-    select_dataset_splits,
-    tokenize_dataset,
-    token_lengths,
-)
+from modules.evaluate.src.dataset.collator import EvaluationCollator, EvaluationCollatorConfig
+from modules.evaluate.src.dataset.dataloader import DataLoaderConfig, LengthGroupedSampler, TokenBudgetBatchSampler, build_dataloaders, ensure_validation_split, load_evaluation_dataset, select_dataset_splits, tokenize_dataset, token_lengths
+from modules.evaluate.src.contracts.config import DatasetSplitConfig
 from modules.evaluate.src.utils.seed import seed_everything
 from modules.pretrain.src.model.tokenizer import ProteinTokenizer, TokenizerConfig
 
@@ -231,6 +218,62 @@ class TestEnsureValidationSplit:
 # ---------------------------------------------------------------------------
 # tokenize_dataset
 # ---------------------------------------------------------------------------
+
+
+def test_contact_input_check_preserves_generic_tokenization_diagnostic(
+    protein_tokenizer,
+):
+    raw = DatasetDict(
+        {
+            "test": Dataset.from_dict(
+                {
+                    "sequence": [SHORT_SEQUENCE],
+                    "targets": [0],
+                    "positive_pairs": [[]],
+                }
+            )
+        }
+    )
+
+    with pytest.raises(
+        ValueError, match="CASP scoring rows require tokenize_contact_chain"
+    ):
+        tokenize_dataset(
+            raw,
+            tokenizer=protein_tokenizer,
+            task_type="sequence_classification",
+            sequence_column="sequence",
+            label_column="targets",
+            max_length=32,
+        )
+
+
+def test_missing_source_label_reports_split_and_column(protein_tokenizer):
+    raw = DatasetDict(
+        {
+            "train": Dataset.from_dict(
+                {
+                    "sequence": [SHORT_SEQUENCE],
+                    "targets": [[0] * len(SHORT_SEQUENCE)],
+                }
+            ),
+            "validation": Dataset.from_dict({"sequence": [SHORT_SEQUENCE]}),
+        }
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Dataset split 'validation' is missing required label column 'targets'",
+    ):
+        tokenize_dataset(
+            raw,
+            tokenizer=protein_tokenizer,
+            task_type="token_classification",
+            sequence_column="sequence",
+            label_column="targets",
+            max_length=32,
+            num_proc=1,
+        )
 
 
 @pytest.mark.parametrize("num_proc", [1, 2])

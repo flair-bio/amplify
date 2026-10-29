@@ -11,10 +11,7 @@ import math
 
 import torch
 
-from modules.evaluate.src.dataset.collator import (
-    EvaluationCollator,
-    EvaluationCollatorConfig,
-)
+from modules.evaluate.src.dataset.collator import EvaluationCollator, EvaluationCollatorConfig
 
 from .conftest import LONG_SEQUENCE, SHORT_SEQUENCE
 

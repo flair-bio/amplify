@@ -10,7 +10,7 @@ import torch
 from transformers import AutoModelForTokenClassification
 
 from modules.evaluate.src.metrics import metrics
-from modules.evaluate.src.tasks.base import MetricFn, TaskHandler
+from modules.evaluate.src.tasks.base import FlatMetricsTask, MetricFn
 from modules.evaluate.src.tasks.registry import register_task
 
 # Loss/metric ignore index used for special-token and padding positions.
@@ -18,7 +18,7 @@ IGNORE_INDEX = -100
 
 
 @register_task
-class TokenClassificationTask(TaskHandler):
+class TokenClassificationTask(FlatMetricsTask):
     """One class label per residue.
 
     Per-example predictions/labels are variable-length sequences: labels are
@@ -27,6 +27,9 @@ class TokenClassificationTask(TaskHandler):
     time. ``mcc`` complements the accuracy/f1/precision/recall metrics for
     imbalanced token labels.
     """
+
+    supports_layerwise = True
+    prediction_baselines = frozenset({"majority_class"})
 
     name = "token_classification"
     auto_model_class = AutoModelForTokenClassification

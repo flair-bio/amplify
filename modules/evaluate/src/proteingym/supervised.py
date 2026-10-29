@@ -34,13 +34,13 @@ from sklearn.preprocessing import StandardScaler
 from torch import nn
 from transformers import PreTrainedTokenizerBase
 
+from modules.evaluate.src.model.embeddings import pool_hidden_states
 from modules.evaluate.src.model.heads import (
     HeadType,
     build_estimator,
     build_probe_layers,
     sweep_classical_head,
 )
-from modules.evaluate.src.utils.embed import pool_hidden_states
 
 logger = logging.getLogger(__name__)
 

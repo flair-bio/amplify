@@ -1,0 +1,68 @@
+# Source protein-level InterPro labels for UniProtKB proteins.
+
+# Dataset selection: all_datasets=true processes all seven categories and takes
+# precedence over datasets. Set it to false to select specific groups below.
+# Available names: interpro_active_site, interpro_binding_site,
+# interpro_conserved_site, interpro_domain, interpro_family,
+# interpro_homologous_superfamily, interpro_repeat.
+# Example CLI selection: all_datasets=false datasets=[interpro_domain]
+# Seeds split assignment and cluster tie-breaks.
+seed: 1957723
+all_datasets: true
+datasets:
+  - interpro_active_site
+  - interpro_binding_site
+  - interpro_conserved_site
+  - interpro_domain
+  - interpro_family
+  - interpro_homologous_superfamily
+  - interpro_repeat
+
+# Source and preprocessing.
+work_dir: eval_datasets/interpro_sourcing
+preprocess: minimal
+# Longer sequences are dropped, not truncated; null keeps all.
+max_sequence_length: null
+# null selects all organisms; otherwise use an NCBI Taxonomy ID (human: 9606).
+organism_id: 9606
+# reviewed = Swiss-Prot, unreviewed = TrEMBL, all = both.
+review_status: reviewed
+interpro_download_url: https://ftp.ebi.ac.uk/pub/databases/interpro/current_release
+# Minimum source support (min_label_count) and per-split support floors
+# (min_{train,validation,test}_label_count) default to the values in
+# modules/evaluate/scripts/dataset_sourcing/shared/config.py; set them here to override.
+
+# Splits.
+# Whole-cluster split targets; must sum to 1.
+split_fractions:
+  train: 0.8
+  validation: 0.1
+  test: 0.1
+
+# Splits: optionally add pooled random, stratified, and MMseqs cluster splits.
+create_split_subsets: true
+
+# MMseqs2 clustering for splits: --min-seq-id, -c (coverage), and threads.
+cluster_identity_threshold: 0.3
+cluster_coverage_threshold: 0.8
+cluster_num_threads: 1
+
+# Upload: set repo_owner or repo_id to upload; otherwise artifacts stay local.
+upload_layout: per_dataset_repo
+repo_owner: null
+repo_name_prefix: ""
+repo_id: null
+repo_prefix: interpro
+# Hub branch to upload to.
+revision: null
+commit_message: Add sourced InterPro annotation datasets
+# Published repos are public here; the schema default is true.
+private: false
+token: null
+
+# Run controls.
+# force_download re-fetches sources; overwrite_output deletes existing outputs first.
+force_download: false
+overwrite_output: false
+# Threads for SeqKit stats.
+stats_threads: 8

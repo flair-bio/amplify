@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Sequence
+from collections.abc import Sequence
+from typing import Any, ClassVar
 
 import numpy as np
 import torch
@@ -10,7 +11,7 @@ from transformers import AutoModelForSequenceClassification
 
 from modules.evaluate.src.metrics import metrics
 from modules.evaluate.src.metrics.metrics import UndefinedMetricError
-from modules.evaluate.src.tasks.base import MetricFn, TaskHandler
+from modules.evaluate.src.tasks.base import FlatMetricsTask, MetricFn
 from modules.evaluate.src.tasks.registry import register_task
 
 # Undefined on a single example, so they are rejected up front rather than
@@ -20,8 +21,12 @@ _CORRELATION_METRICS = frozenset({"pearsonr", "spearmanr"})
 
 
 @register_task
-class SequenceRegressionTask(TaskHandler):
+class SequenceRegressionTask(FlatMetricsTask):
     """One continuous target per sequence with regression metrics."""
+
+    supports_layerwise = True
+    dataset_baselines = frozenset({"train_mean"})
+    prediction_baselines = frozenset({"train_mean"})
 
     name = "sequence_regression"
     # Same wrapper class as classification; problem_type switches the loss.

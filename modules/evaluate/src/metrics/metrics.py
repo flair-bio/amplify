@@ -2,7 +2,7 @@
 Shared metric callables reused by the task handlers.
 
 Each callable takes the uniform ``(values, labels, average)`` signature that
-:meth:`modules.evaluate.src.tasks.base.TaskHandler.compute_metrics` dispatches
+:meth:`modules.evaluate.src.tasks.base.FlatMetricsTask.compute_metrics` dispatches
 with; ``values`` is the predictions except for probability-based metrics such
 as ``roc_auc``. Which of these a task actually supports is declared by that
 task's handler in ``modules/evaluate/src/tasks/``.
@@ -10,7 +10,8 @@ task's handler in ``modules/evaluate/src/tasks/``.
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 from scipy.stats import pearsonr, spearmanr
@@ -27,6 +28,10 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.utils.validation import check_array
+
+LOWER_IS_BETTER_METRICS = frozenset(
+    {"mse", "mae", "pseudo_perplexity", "kl", "kl_t", "kl_nt"}
+)
 
 
 class UndefinedMetricError(ValueError):

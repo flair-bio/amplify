@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from modules.evaluate.src.tasks.base import TaskHandler
+from modules.evaluate.src.tasks.base import FlatMetricsTask, TaskHandler
 
 _TASK_REGISTRY: dict[str, type[TaskHandler]] = {}
 
@@ -39,4 +39,12 @@ def get_task(task_type: str, num_labels: int | None = None) -> TaskHandler:
     }:
         count = task.resolve_num_labels(num_labels, dataset_name="")
         task.class_labels = tuple(range(count))
+    return task
+
+
+def get_flat_task(task_type: str, num_labels: int | None = None) -> FlatMetricsTask:
+    """Resolve the flat scoring capability or reject structured tasks."""
+    task = get_task(task_type, num_labels)
+    if not isinstance(task, FlatMetricsTask):
+        raise TypeError(f"Task '{task_type}' requires structured scoring.")
     return task

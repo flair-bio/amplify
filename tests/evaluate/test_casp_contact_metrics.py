@@ -5,12 +5,8 @@ from itertools import combinations
 import numpy as np
 import pytest
 
-from modules.evaluate.src.metrics.contact_metrics import (
-    CASP_METRICS,
-    aggregate_contact_scores,
-    score_contact_unit,
-)
-from modules.evaluate.src.tasks.contact_prediction import prepare_contact_dataset
+from modules.evaluate.src.metrics.contact_metrics import CASP_METRICS, aggregate_contact_scores, score_contact_unit
+from modules.evaluate.src.dataset.contact import prepare_contact_dataset
 
 from .test_contact_data import hf_data, row
 
@@ -173,3 +169,77 @@ def test_aggregation_rejects_duplicate_units_and_mixed_run_identities():
         aggregate_contact_scores(
             [dict(record, kind="global"), dict(record, kind="global", unit_id="other")]
         )
+
+
+def test_aggregation_nulls_counts_and_group_order_are_metric_specific():
+    rows = [
+        score_row("B15", "D2", 0.0, edition=15),
+        score_row("A", "D1", 1.0, edition=14),
+        score_row("A", "D2", 0.0, edition=14),
+        score_row("B", "D1", 1.0, edition=14, complex_id="C2"),
+    ]
+    rows[0]["ROC-AUC"] = None
+    rows[1]["AUC"] = None
+    rows[1]["P@L"] = None
+    rows[1]["ROC-AUC"] = None
+    rows[2]["AUC"] = None
+    rows[2]["ROC-AUC"] = None
+    rows[3]["AUC"] = None
+    rows[3]["ROC-AUC"] = None
+
+    summaries = aggregate_contact_scores(rows)
+
+    assert [(row["split"], row["edition"]) for row in summaries] == [
+        ("test", 14),
+        ("test", 15),
+    ]
+    edition14 = summaries[0]
+    assert edition14["AUC"] is None
+    assert edition14["P@L"] == 0.5
+    assert edition14["ROC-AUC"] is None
+    assert edition14["contributing_units"] == {
+        "AUC": 0,
+        "P@L": 2,
+        "P@L/2": 3,
+        "P@L/5": 3,
+        "ROC-AUC": 0,
+    }
+    assert edition14["contributing_sequences"]["AUC"] == 0
+    assert edition14["contributing_complexes"]["P@L"] == 2
+
+
+def test_aggregation_rejects_chain_metadata_inconsistency_across_settings():
+    first = score_row("A", "D1", 1.0, edition=14, complex_id="C1")
+    second = dict(first, minsep=24, complex_id="C2")
+
+    with pytest.raises(ValueError, match="Inconsistent edition/complex metadata"):
+        aggregate_contact_scores([first, second])
+
+
+def test_aggregation_rejects_missing_complex_and_invalid_setting():
+    row = score_row("A", "D1", 1.0, complex_id=None)
+    with pytest.raises(ValueError, match="requires complex_id"):
+        aggregate_contact_scores([row])
+
+    row = score_row("A", "D1", 1.0)
+    row["minsep"] = 12
+    with pytest.raises(ValueError, match="Unknown CASP setting"):
+        aggregate_contact_scores([row])
+
+
+def test_aggregation_empty_input_has_no_summaries():
+    assert aggregate_contact_scores([]) == []
+
+
+def test_aggregation_retains_run_identity_and_rejects_nonfinite_metrics():
+    row = score_row("A", "D1", 1.0)
+    row.update(dataset_fingerprint="fingerprint", model_name="model", seed=3)
+
+    summary = aggregate_contact_scores([row])[0]
+
+    assert summary["dataset_fingerprint"] == "fingerprint"
+    assert summary["model_name"] == "model"
+    assert summary["seed"] == 3
+    row["AUC"] = np.nan
+    with pytest.raises(ValueError, match="must be None, not NaN/infinity"):
+        aggregate_contact_scores([row])

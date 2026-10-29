@@ -24,49 +24,99 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from modules.evaluate.src.dataset.collator import (
-    EvaluationCollator,
-    EvaluationCollatorConfig,
-)
-from modules.evaluate.src.dataset.dataloader import (
-    DataLoaderConfig,
-    build_dataloaders,
-    tokenize_dataset,
-)
-from modules.evaluate.src.dataset.workspace import (
-    EvaluationWorkspaceConfig,
-    get_evaluation_workspace,
-)
-from modules.evaluate.src.metrics.metrics import (
-    _mcc_score,
-    average_precision,
-    multilabel_mcc,
-    roc_auc,
-)
-from modules.evaluate.src.schemas.artifacts import (
-    EvaluationMetadata,
-    PredictOutput,
-    PreparedArtifacts,
-)
-from modules.evaluate.src.steps.predict import PredictConfig, PredictStep
-from modules.evaluate.src.steps.score import ScoreConfig, ScoreStep
+from modules.evaluate.src.dataset.collator import EvaluationCollator, EvaluationCollatorConfig
+from modules.evaluate.src.dataset.dataloader import DataLoaderConfig, build_dataloaders, tokenize_dataset
+from modules.evaluate.src.contracts.config import EvaluationWorkspaceConfig
+from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
+from modules.evaluate.src.metrics.metrics import _mcc_score, average_precision, multilabel_mcc, roc_auc
+from modules.evaluate.src.contracts.artifacts import EvaluationMetadata, PredictOutput, PreparedArtifacts, StructuredScoreOutput
+from modules.evaluate.src.contracts.config import PredictConfig
+from modules.evaluate.src.steps.predict import PredictStep
+from modules.evaluate.src.contracts.config import ScoreConfig
+from modules.evaluate.src.steps.score import ScoreStep
 from modules.evaluate.src.tasks import get_task
-from modules.evaluate.src.utils.bootstrap import (
-    as_indexable_array,
-    benjamini_hochberg,
-    bootstrap_indices,
-    ci_stats,
-    confusion_scores,
-    full_scores,
-    id_groups,
-    permutation_p_values,
-    summarize_controls,
-    token_confusion_matrices,
-)
+from modules.evaluate.src.metrics.bootstrap import as_indexable_array, bootstrap_indices, ci_stats, confusion_scores, full_scores, id_groups, token_confusion_matrices
+from modules.evaluate.src.metrics.comparisons import benjamini_hochberg, permutation_p_values, summarize_controls
 from modules.evaluate.src.utils.io import write_parquet
-from modules.evaluate.src.utils.long_format import build_long_df, upsert_long_df
+from modules.evaluate.src.metrics.tables import build_long_df, upsert_long_df
 
 from .conftest import ModelFamily, build_raw_dataset_dict, build_tiny_model
+
+
+def test_task_scoring_reuses_controls_without_publishing(monkeypatch):
+    from modules.evaluate.src.metrics import scoring
+
+    task = get_task("sequence_classification", 2)
+    labels = [0, 1, 1, 0, 1, 0]
+    predictions = [0, 0, 1, 1, 1, 0]
+    output = PredictOutput(
+        metadata=EvaluationMetadata(
+            model_name="toy", dataset_name="toy", task_type=task.name,
+        ),
+        predictions=pl.DataFrame(
+            {"id": list(range(len(labels))), "prediction": predictions, "label": labels}
+        ),
+        requested_controls=["scrambled_labels"],
+    )
+    collect = MagicMock(wraps=scoring.collect_control_arrays)
+    monkeypatch.setattr(scoring, "collect_control_arrays", collect)
+    config = ScoreConfig(
+        metrics=["accuracy"], bootstrap_enabled=True, n_samples=8, n_permutations=8,
+    )
+    result = task.score(output, config, seed=123)
+
+    assert collect.call_count == 1
+    assert set(result.condition_scores) == {"trained", "scrambled_labels"}
+    assert result.scores_path is None
+    assert result.output_path is None
+    assert result.summary_path is None
+    assert result.long_path is None
+    assert result.confidence_intervals is not None
+    assert result.control_comparisons["scrambled_labels"]
+
+    # Preserve the previous stream: label permutation precedes resampling.
+    rng = np.random.default_rng(123)
+    task.scramble_labels(labels, rng)
+    expected = []
+    for _ in range(config.n_samples):
+        indices = bootstrap_indices(len(labels), None, rng)
+        expected.append(
+            np.mean(np.asarray(predictions)[indices] == np.asarray(labels)[indices])
+        )
+    np.testing.assert_equal(result.resamples["accuracy"].to_numpy(), expected)
+
+
+def test_score_step_publishes_structured_results_without_task_specific_columns(
+    tmp_path, monkeypatch,
+):
+    from modules.evaluate.src.steps import score as score_module
+
+    metadata = EvaluationMetadata(
+        model_name="toy", dataset_name="toy", task_type="custom_structured", seed=123,
+    )
+    predictions = PredictOutput(
+        metadata=metadata,
+        predictions=pl.DataFrame({"observation": ["custom"]}),
+    )
+    result = StructuredScoreOutput(
+        metadata=metadata,
+        unit_scores=pl.DataFrame({"unit": ["a"], "custom_metric": [0.75]}),
+        summaries=pl.DataFrame({"group": ["all"], "custom_metric": [0.75]}),
+    )
+    task = MagicMock()
+    task.score.return_value = result
+    monkeypatch.setattr(score_module, "get_task", lambda *args: task)
+    workspace = _make_workspace(tmp_path, "sequence_classification")
+    config = ScoreConfig()
+
+    published = ScoreStep(config).run(workspace, seed=123, predict_result=predictions)
+
+    task.score.assert_called_once_with(predictions, config, seed=123)
+    assert published is result
+    assert pl.read_parquet(result.unit_scores_path).equals(result.unit_scores)
+    manifest = json.loads(workspace.run_manifest_path.read_text())
+    assert manifest["score"]["scores"] == result.summaries.to_dicts()
+    assert manifest["score"]["metadata"]["task_type"] == "custom_structured"
 
 
 @pytest.mark.parametrize("average", ["micro", "macro", "weighted"])
@@ -164,8 +214,8 @@ def test_score_and_bootstrap_keep_classes_missing_from_test_split(tmp_path, num_
 def test_token_confusion_bootstrap_preserves_results(
     tmp_path, monkeypatch, average, cached_rows
 ):
-    from modules.evaluate.src.steps import score as score_module
-    from modules.evaluate.src.utils import bootstrap as bootstrap_module
+    from modules.evaluate.src.metrics import scoring as score_module
+    from modules.evaluate.src.metrics import comparisons as bootstrap_module
 
     rng = np.random.default_rng(42)
     lengths = [2, 0, 7, 1, 3, 5, 2, 9]
@@ -1210,9 +1260,6 @@ class TestScoreStepLongDf:
                 "layer_index": None,
                 "variant": None,
                 "seed": None,
-                "cv_id": None,
-                "fold_id": None,
-                "split_seed": None,
                 "metric": "accuracy",
                 "control": None,
                 "value": 0.5,
@@ -1380,7 +1427,7 @@ def test_classification_scoring_preserves_list_metrics(task_name, average):
 def test_shared_control_labels_preserve_bootstrap_results(
     tmp_path, monkeypatch, task_name
 ):
-    from modules.evaluate.src.steps import score as score_module
+    from modules.evaluate.src.metrics import scoring as score_module
 
     if task_name == "sequence_multilabel_classification":
         labels = [[1, 0, 1], [0, 1, 0], [0, 0, 1], [1, 1, 0], [1, 0, 0], [0, 1, 1]]

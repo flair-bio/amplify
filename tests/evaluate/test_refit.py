@@ -10,17 +10,16 @@ from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
 from modules.core.utils.config_loader import load_and_parse
-from modules.evaluate.src.config import EvaluationConfig
-from modules.evaluate.src.model.heads import EmbeddingProbeHead, HeadConfig
-from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
-from modules.evaluate.src.steps.tune import (
-    HyperparameterSearchConfig,
-    HyperparameterSearchSpaceConfig,
-    TuneConfig,
-    TuneStep,
-)
-from modules.evaluate.src.utils.embed import EmbeddingDataset
-from modules.evaluate.src.utils.hpo import build_scheduler
+from modules.evaluate.src.contracts.config import EvaluationConfig
+from modules.evaluate.src.model.heads import EmbeddingProbeHead
+from modules.evaluate.src.contracts.config import HeadConfig
+from modules.evaluate.src.contracts.artifacts import PreparedArtifacts
+from modules.evaluate.src.contracts.config import HyperparameterSearchConfig, HyperparameterSearchSpaceConfig, TuneConfig
+from modules.evaluate.src.steps.tune import TuneStep
+from modules.evaluate.src.trainers.selection import PredictorSelection
+from modules.evaluate.src.trainers.torch import TorchProbeTrainer
+from modules.evaluate.src.dataset.embeddings import EmbeddingDataset
+from modules.evaluate.src.trainers.selection_helpers import build_scheduler
 
 from .test_prepare import _make_workspace
 
@@ -92,7 +91,7 @@ def test_fresh_refit_uses_selected_architecture_budget_and_development_statistic
             ),
         ),
     )
-    train = TuneStep._train
+    train = TorchProbeTrainer.train
     trials, refits, schedules = [], [], []
 
     def record_train(self, ws, artifacts, accelerator, hparams, **kwargs):
@@ -134,10 +133,14 @@ def test_fresh_refit_uses_selected_architecture_budget_and_development_statistic
         assert artifacts.val_dataloader is original_loaders[1]
         torch.testing.assert_close(artifacts.model.feature_mean, TRAIN.mean(dim=0))
 
-    monkeypatch.setattr(TuneStep, "_train", record_train)
-    monkeypatch.setattr(TuneStep, "_report_torch_seed_variance", variance)
-    monkeypatch.setattr("modules.evaluate.src.steps.tune.build_scheduler", scheduler)
-    result = TuneStep(config).run(workspace, prepared, seed=42, accelerator=accelerator)
+    monkeypatch.setattr(TorchProbeTrainer, "train", record_train)
+    monkeypatch.setattr(PredictorSelection, "_report_torch_seed_variance", variance)
+    monkeypatch.setattr(
+        "modules.evaluate.src.trainers.torch.build_scheduler", scheduler
+    )
+    result = TuneStep(config).run(
+        workspace, prepared, seed=42, accelerator=accelerator
+    )
     assert len(refits) == 1
     model, hparams = refits[0]
     assert result.model is model
@@ -185,17 +188,17 @@ def test_classical_refit_rebuilds_estimator_and_scaler_on_development_data(
         return estimator
 
     monkeypatch.setattr("modules.evaluate.src.model.heads.build_estimator", build)
-    monkeypatch.setattr("modules.evaluate.src.steps.tune.build_estimator", build)
+    monkeypatch.setattr("modules.evaluate.src.trainers.selection.build_estimator", build)
     prepared = prepared_splits()
     workspace = _make_workspace(tmp_path, "sequence_classification")
-    step = TuneStep(
-        TuneConfig(
+    config = TuneConfig(
             head=HeadConfig(head_type="sklearn_linear", search_space={"C": [0.1, 1.0]}),
             refit_on_train_validation=True,
             metric_aggregation="macro",
-        )
     )
-    result = step.run(workspace, prepared, seed=42, accelerator=Accelerator(cpu=True))
+    result = TuneStep(config).run(
+        workspace, prepared, seed=42, accelerator=Accelerator(cpu=True)
+    )
     assert len(estimators) == 3
     assert result.model is estimators[-1]
     for estimator in estimators[:-1]:
@@ -223,7 +226,7 @@ def test_final_refit_includes_additional_split_after_hyperparameter_selection(
     )
     prepared.refit_dataloaders = {"tuning_excluded": excluded}
     prepared.refit_token_dataloaders = {"tuning_excluded": excluded}
-    original_train = TuneStep._train
+    original_train = TorchProbeTrainer.train
     selection_sizes = []
     refit_ids = []
 
@@ -234,9 +237,11 @@ def test_final_refit_includes_additional_split_after_hyperparameter_selection(
             assert "tuning-excluded" not in train.ids
             return 0.5
         refit_ids.extend(train.ids)
-        return original_train(self, workspace, artifacts, accelerator, hparams, **kwargs)
+        return original_train(
+            self, workspace, artifacts, accelerator, hparams, **kwargs
+        )
 
-    monkeypatch.setattr(TuneStep, "_train", record_train)
+    monkeypatch.setattr(TorchProbeTrainer, "train", record_train)
     config = TuneConfig(
         head=HeadConfig(head_type="mlp", hidden_size=3),
         refit_on_train_validation=True,
@@ -254,12 +259,11 @@ def test_final_refit_includes_additional_split_after_hyperparameter_selection(
         ),
     )
 
-    TuneStep(config).run(
+    PredictorSelection(config).run(
         _make_workspace(tmp_path, "sequence_classification"),
         prepared,
         seed=42,
         accelerator=Accelerator(cpu=True),
-        controls=[],
     )
 
     assert selection_sizes == [len(TRAIN)]
@@ -294,7 +298,7 @@ def test_refit_preserves_target_shapes_masks_and_seed_reproducibility(
             prepared.val_dataloader.dataset.labels = [[1, 1], [0, 0]]
         elif task_type == "token_classification":
             prepared.val_dataloader.dataset.labels = [-100, 0]
-        step = TuneStep(
+        step = PredictorSelection(
             TuneConfig(
                 refit_on_train_validation=True,
                 max_epochs=2,
@@ -332,7 +336,7 @@ def test_refit_rejects_missing_or_empty_validation_before_training(
         else DataLoader(EmbeddingDataset(torch.empty(0, 2), [], []))
     )
     with pytest.raises(ValueError, match="requires nonempty train and validation"):
-        TuneStep(TuneConfig(refit_on_train_validation=True)).run(
+        PredictorSelection(TuneConfig(refit_on_train_validation=True)).run(
             _make_workspace(tmp_path, "sequence_classification"),
             prepared,
             accelerator=Accelerator(cpu=True),

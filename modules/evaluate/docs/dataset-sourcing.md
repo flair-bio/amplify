@@ -49,7 +49,7 @@ overrides (later values win), the same convention as the other modules:
 
 ```bash
 S=modules/evaluate/scripts/dataset_sourcing
-C=modules/evaluate/configs/dataset_sourcing
+C=modules/evaluate/scripts/dataset_sourcing/configs
 
 uv run python             $S/source_biomap_datasets.py     $C/source_biomap_datasets.yaml
 uv run python             $S/source_uniprot_go.py          $C/source_uniprot_go.yaml
@@ -99,18 +99,22 @@ download HF snapshot                       download API/file sources (URL-keyed 
 ```
 
 ```
-modules/evaluate/
-├── configs/dataset_sourcing/source_*.yaml  ← one shipped config per source
-├── scripts/dataset_sourcing/source_*.py    ← one entry point per source
-└── src/dataset_sourcing/
-    ├── config.py      ← shared Pydantic schemas (sourcing, UniProt query, label support, upload)
-    ├── spec.py        ← DatasetSourceSpec: repo-id template + column renames (HF flow)
-    ├── pipeline.py    ← HF flow (run_cli/run_for_dataset), dataset selection, output dir, run_script
-    ├── downloads.py   ← UniProt query/URL building, cached + validated downloads
-    ├── preprocess.py  ← cleaning, dedup, validation synthesis, cluster splits, split subsets
-    ├── outputs.py     ← parquet shards, stats.json (SeqKit), generic dataset card
-    └── hf_io.py       ← HF Hub snapshot download and artifact upload
+modules/evaluate/scripts/dataset_sourcing/
+    ├── configs/*.yaml ← one shipped config per source
+    ├── source_*.py    ← one entry point per source
+    ├── run_hhblits.py ← alignment entry point
+    └── shared/
+        ├── config.py      ← shared Pydantic schemas (sourcing, UniProt query, label support, upload)
+        ├── spec.py        ← DatasetSourceSpec: repo-id template + column renames (HF flow)
+        ├── pipeline.py    ← HF flow (run_cli/run_for_dataset), dataset selection, output dir, run_script
+        ├── downloads.py   ← UniProt query/URL building, cached + validated downloads
+        ├── preprocess.py  ← cleaning, dedup, validation synthesis, cluster splits, split subsets
+        ├── outputs.py     ← parquet shards, stats.json (SeqKit), generic dataset card
+        └── hf_io.py       ← HF Hub snapshot download and artifact upload
 ```
+
+Sourcing helpers are imported from `modules.evaluate.scripts.dataset_sourcing.shared`;
+the evaluation runtime does not import sourcing code.
 
 Each run writes under `work_dir`:
 
@@ -138,14 +142,14 @@ differs, that is noted.
 
 | Shipped config | Builds by default |
 |---|---|
-| [`source_biomap_datasets.yaml`](../configs/dataset_sourcing/source_biomap_datasets.yaml) | All 6 configured Biomap-research datasets |
-| [`source_uniprot_go.yaml`](../configs/dataset_sourcing/source_uniprot_go.yaml) | All 3 GO aspects, human Swiss-Prot |
-| [`source_uniprot_annotations.yaml`](../configs/dataset_sourcing/source_uniprot_annotations.yaml) | All 12 residue-annotation groups, human Swiss-Prot |
-| [`source_interpro.yaml`](../configs/dataset_sourcing/source_interpro.yaml) | All 7 InterPro entry types, human Swiss-Prot |
-| [`source_uniprot_protparams.yaml`](../configs/dataset_sourcing/source_uniprot_protparams.yaml) | `uniprot_protparams`, human Swiss-Prot |
-| [`source_proteingym.yaml`](../configs/dataset_sourcing/source_proteingym.yaml) | `dms_substitutions` track, assays combined |
-| [`run_hhblits.yaml`](../configs/dataset_sourcing/run_hhblits.yaml) | Step 1 of the from-scratch calibration build: HHblits alignments of the human reference proteome (needs HH-suite and a BFD database; one shard per SLURM array task) |
-| [`source_calibration.yaml`](../configs/dataset_sourcing/source_calibration.yaml) | Step 2: `human_calibration` from those alignments (≥ 10 homologs, consensus ≥ 0.70), or from precomputed profile CSVs via overrides |
+| [`source_biomap_datasets.yaml`](../scripts/dataset_sourcing/configs/source_biomap_datasets.yaml) | All 6 configured Biomap-research datasets |
+| [`source_uniprot_go.yaml`](../scripts/dataset_sourcing/configs/source_uniprot_go.yaml) | All 3 GO aspects, human Swiss-Prot |
+| [`source_uniprot_annotations.yaml`](../scripts/dataset_sourcing/configs/source_uniprot_annotations.yaml) | All 12 residue-annotation groups, human Swiss-Prot |
+| [`source_interpro.yaml`](../scripts/dataset_sourcing/configs/source_interpro.yaml) | All 7 InterPro entry types, human Swiss-Prot |
+| [`source_uniprot_protparams.yaml`](../scripts/dataset_sourcing/configs/source_uniprot_protparams.yaml) | `uniprot_protparams`, human Swiss-Prot |
+| [`source_proteingym.yaml`](../scripts/dataset_sourcing/configs/source_proteingym.yaml) | `dms_substitutions` track, assays combined |
+| [`run_hhblits.yaml`](../scripts/dataset_sourcing/configs/run_hhblits.yaml) | Step 1 of the from-scratch calibration build: HHblits alignments of the human reference proteome (needs HH-suite and a BFD database; one shard per SLURM array task) |
+| [`source_calibration.yaml`](../scripts/dataset_sourcing/configs/source_calibration.yaml) | Step 2: `human_calibration` from those alignments (≥ 10 homologs, consensus ≥ 0.70), or from precomputed profile CSVs via overrides |
 
 **Selection and paths**
 
@@ -511,11 +515,11 @@ Choices:
 ```bash
 # All 6 configured datasets, local only
 uv run python modules/evaluate/scripts/dataset_sourcing/source_biomap_datasets.py \
-    modules/evaluate/configs/dataset_sourcing/source_biomap_datasets.yaml
+    modules/evaluate/scripts/dataset_sourcing/configs/source_biomap_datasets.yaml
 
 # One retained dataset, pinned, published to <owner>/biomap-research-localization_prediction
 uv run python modules/evaluate/scripts/dataset_sourcing/source_biomap_datasets.py \
-    modules/evaluate/configs/dataset_sourcing/source_biomap_datasets.yaml \
+    modules/evaluate/scripts/dataset_sourcing/configs/source_biomap_datasets.yaml \
     all_datasets=false 'datasets=[localization_prediction]' \
     source_revision=<upstream-commit-sha> \
     repo_owner=<your-hf-username-or-org>
@@ -614,7 +618,7 @@ each unique sequence. The shipped YAML sets `overwrite_output: true`.
 
 ```bash
 uv run python modules/evaluate/scripts/dataset_sourcing/source_uniprot_go.py \
-    modules/evaluate/configs/dataset_sourcing/source_uniprot_go.yaml \
+    modules/evaluate/scripts/dataset_sourcing/configs/source_uniprot_go.yaml \
     all_datasets=false 'datasets=[molecular_function,biological_process]'
 ```
 
@@ -729,7 +733,7 @@ verified absence.
 
 ```bash
 uv run python modules/evaluate/scripts/dataset_sourcing/source_uniprot_annotations.py \
-    modules/evaluate/configs/dataset_sourcing/source_uniprot_annotations.yaml \
+    modules/evaluate/scripts/dataset_sourcing/configs/source_uniprot_annotations.yaml \
     all_datasets=false 'datasets=[uniprot_secondary_structure]'
 ```
 
@@ -777,7 +781,7 @@ similar composition and random splits would be easier.
 
 ```bash
 uv run --with biopython modules/evaluate/scripts/dataset_sourcing/source_uniprot_protparams.py \
-    modules/evaluate/configs/dataset_sourcing/source_uniprot_protparams.yaml
+    modules/evaluate/scripts/dataset_sourcing/configs/source_uniprot_protparams.yaml
 
 # Frozen-trunk regression on gravy (the default property).
 uv run accelerate launch modules/evaluate/src/run_evaluate.py \
@@ -858,7 +862,7 @@ structure-based remote homology.
 
 ```bash
 uv run python modules/evaluate/scripts/dataset_sourcing/source_interpro.py \
-    modules/evaluate/configs/dataset_sourcing/source_interpro.yaml \
+    modules/evaluate/scripts/dataset_sourcing/configs/source_interpro.yaml \
     all_datasets=false 'datasets=[interpro_domain]'
 ```
 
@@ -879,7 +883,7 @@ choices differ from the other sources:
 
 ```bash
 uv run python modules/evaluate/scripts/dataset_sourcing/source_proteingym.py \
-    modules/evaluate/configs/dataset_sourcing/source_proteingym.yaml \
+    modules/evaluate/scripts/dataset_sourcing/configs/source_proteingym.yaml \
     track=dms_substitutions
 ```
 
@@ -915,7 +919,7 @@ different `fasta`/`database` in step 1.
 
 ```bash
 S=modules/evaluate/scripts/dataset_sourcing
-C=modules/evaluate/configs/dataset_sourcing
+C=modules/evaluate/scripts/dataset_sourcing/configs
 
 # Step 1, on a cluster: 100 array tasks, each aligning 1/100 of the proteome
 sbatch --array=0-99 --cpus-per-task=8 --wrap \
@@ -982,7 +986,7 @@ Decisions to make, and record in the card:
 - **Stratification:** set `stratification_column` if `targets` is missing or
   not meaningful.
 
-Add a YAML under `configs/dataset_sourcing/` and tests under
+Add a YAML under `scripts/dataset_sourcing/configs/` and tests under
 `tests/evaluate/`.
 
 ---

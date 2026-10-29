@@ -12,8 +12,7 @@ import torch
 from modules.evaluate.src.metrics import contact_metrics
 from modules.evaluate.src.tasks import get_task
 from modules.evaluate.src.tasks.contact_prediction import IGNORE_INDEX
-from modules.evaluate.src.utils.controls import ControlBuilder
-from modules.evaluate.src.utils.inference import pad_for_gather
+from modules.evaluate.src.model.inference import pad_for_gather
 
 
 def _task():
@@ -316,48 +315,3 @@ def test_contact_metrics_reject_invalid_labels(value, error):
         contact_metrics.contact_range_auc(
             predictions, labels, "macro", min_sep=24, max_sep=None
         )
-
-
-def test_compute_separation_prior_matches_empirical_rate():
-    labels = torch.full((1, 5, 5), IGNORE_INDEX, dtype=torch.long)
-    # sep=2 pairs: one positive, one negative -> prior[2] == 0.5
-    labels[0, 0, 2] = 1
-    labels[0, 2, 0] = 1
-    labels[0, 1, 3] = 0
-    labels[0, 3, 1] = 0
-    dataloader = [{"labels": labels}]
-
-    prior = ControlBuilder._compute_separation_prior(dataloader, max_sep=4)
-    assert prior[2] == 0.5
-
-
-def test_build_separation_prior_control_supports_dict_pairwise_rows():
-    labels = torch.full((1, 5, 5), IGNORE_INDEX, dtype=torch.long)
-    labels[0, 0, 2] = 1
-    labels[0, 2, 0] = 1
-    labels[0, 1, 3] = 0
-    labels[0, 3, 1] = 0
-
-    class _Prepared:
-        train_dataloader = [{"labels": labels}]
-
-    class _Workspace:
-        task_type = "contact_prediction"
-
-    predictions_df = pl.DataFrame(
-        {
-            "id": ["example-1"],
-            "prediction": pl.Series(
-                "prediction",
-                [{"scores": [0.9, 0.1], "separations": [2, 2]}],
-                strict=False,
-            ),
-        }
-    )
-
-    result = ControlBuilder._build_separation_prior_control(
-        _Workspace(), _Prepared(), predictions_df
-    )
-    row = result["prediction"].to_list()[0]
-    assert row["separations"] == [2, 2]
-    assert row["scores"] == pytest.approx([0.5, 0.5])

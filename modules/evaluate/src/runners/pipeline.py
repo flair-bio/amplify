@@ -1,50 +1,39 @@
-"""Prepare -> Tune -> Predict -> Score for one evaluation run, shared by
-ordinary evaluation and each cross-validation fold."""
+"""Prepare -> optional Tune -> Controls -> Predict -> Score."""
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from accelerate.utils import broadcast_object_list
 from datasets import DatasetDict
 
-from modules.evaluate.src.config import EvaluationConfig
+from modules.evaluate.src.contracts.artifacts import (
+    EvaluationResult,
+    PipelineResult,
+    PredictOutput,
+    PreparedArtifacts,
+)
+from modules.evaluate.src.contracts.config import (
+    EvaluationConfig,
+    ExternalTestSetConfig,
+)
 from modules.evaluate.src.dataset.workspace import (
     EvaluationWorkspace,
     get_evaluation_workspace,
 )
-from modules.evaluate.src.schemas.artifacts import (
-    ContactScoreOutput,
-    CrossValidationIdentity,
-    PredictOutput,
-    PreparedArtifacts,
-    ScoreOutput,
-)
+from modules.evaluate.src.steps.controls import ControlsStep
 from modules.evaluate.src.steps.predict import PredictStep
 from modules.evaluate.src.steps.prepare import PrepareStep
 from modules.evaluate.src.steps.score import ScoreStep
 from modules.evaluate.src.steps.tune import TuneStep
+from modules.evaluate.src.tasks import get_task
 from modules.evaluate.src.utils.io import log_to_file, update_run_manifest
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class PipelineResult:
-    """Outputs keyed by layer index (``None`` for ordinary single-head runs).
-    ``scores`` is populated on the main process only."""
-
-    predictions: dict[int | None, PredictOutput]
-    scores: dict[int | None, ScoreOutput | ContactScoreOutput] = field(
-        default_factory=dict
-    )
-    # Results of the same fitted model on each configured external test set.
-    external: dict[str, PipelineResult] = field(default_factory=dict)
 
 
 def run_pipeline(
@@ -52,34 +41,32 @@ def run_pipeline(
     workspace: EvaluationWorkspace,
     accelerator: Any,
     dataset: DatasetDict | None = None,
-    cross_validation: CrossValidationIdentity | None = None,
     *,
     overwrite: bool = False,
 ) -> PipelineResult:
     """Run every step once for *workspace*, optionally on a supplied dataset."""
-    if config.workspace.task_type == "contact_prediction":
-        if (
-            cross_validation is not None
-            or getattr(accelerator, "num_processes", 1) != 1
-        ):
-            raise ValueError(
-                "Contact embeddings require a single-process fixed-split run"
-            )
-        if workspace.seed != config.seed:
-            raise ValueError(
-                "Contact workspace must be created with the configured seed"
-            )
-    if cross_validation is not None:
-        if overwrite:
-            raise ValueError(
-                "--overwrite is not supported for CV; choose a new run_id."
-            )
-        return _execute_steps(config, workspace, accelerator, dataset, cross_validation)
+    get_task(config.workspace.task_type).validate_pipeline(
+        config,
+        workspace_seed=workspace.seed,
+        num_processes=getattr(accelerator, "num_processes", 1),
+    )
     with _reserve_outputs(config, workspace, accelerator, overwrite=overwrite):
-        result = _execute_steps(
-            config, workspace, accelerator, dataset, cross_validation
-        )
-        return result
+        return _execute_steps(config, workspace, accelerator, dataset)
+
+
+def _external_workspace(
+    workspace: EvaluationWorkspace, external: ExternalTestSetConfig
+) -> EvaluationWorkspace:
+    return get_evaluation_workspace(
+        workspace.config.model_copy(
+            update={
+                "dataset_name": external.name,
+                "dataset_repo_id": external.dataset_repo_id,
+            }
+        ),
+        variant=workspace.variant,
+        seed=workspace.seed,
+    )
 
 
 @contextmanager
@@ -99,16 +86,7 @@ def _reserve_outputs(
                 workspaces = [workspace]
                 if config.steps.mode != "evaluate_as_is":
                     workspaces.extend(
-                        get_evaluation_workspace(
-                            workspace.config.model_copy(
-                                update={
-                                    "dataset_name": external.name,
-                                    "dataset_repo_id": external.dataset_repo_id,
-                                }
-                            ),
-                            variant=workspace.variant,
-                            seed=workspace.seed,
-                        )
+                        _external_workspace(workspace, external)
                         for external in config.external_test_sets
                     )
                 if len({item.run_root.resolve() for item in workspaces}) != len(
@@ -152,38 +130,30 @@ def _execute_steps(
     workspace: EvaluationWorkspace,
     accelerator: Any,
     dataset: DatasetDict | None,
-    cross_validation: CrossValidationIdentity | None,
 ) -> PipelineResult:
-    if workspace.task_type == "contact_prediction":
-        return _execute_contacts(config, workspace, accelerator, dataset)
-    logger.info("=== Starting Prepare Step ===")
-    prepared_artifacts = PrepareStep(config.steps.prepare).run(
+    logger.info("Preparing evaluation inputs")
+    prepared = PrepareStep(config.steps.prepare).run(
         workspace,
         seed=config.seed,
         accelerator=accelerator,
         layerwise_config=config.steps.layerwise,
         dataset=dataset,
-        cross_validation=cross_validation,
         **(
             {"baseline_names": config.baselines.names} if config.baselines.names else {}
         ),
+        head_type=config.steps.tune.head.head_type,
     )
-    logger.info("=== Completed Prepare Step ===")
 
-    # Train in tune_probe or finetune mode. evaluate_as_is evaluates the task
-    # head loaded by PrepareStep without entering TuneStep.
     mode = config.steps.mode
     tuned = mode != "evaluate_as_is"
     if mode != "evaluate_as_is":
-        logger.info("=== Fine-tuning model ===")
-        prepared_artifacts = TuneStep(config.steps.tune, mode=mode).run(
+        logger.info("Fitting predictor (%s)", mode)
+        prepared = TuneStep(config.steps.tune, mode=mode).run(
             workspace,
-            prepared_artifacts,
+            prepared,
             seed=config.seed,
             accelerator=accelerator,
-            controls=config.steps.predict.controls,
         )
-        logger.info("=== Completed Fine-tune Step ===")
     else:
         logger.info(
             "=== Skipping Tune Step (steps.mode=evaluate_as_is; "
@@ -191,226 +161,118 @@ def _execute_steps(
         )
         # evaluate_as_is returns a raw model from PrepareStep, so it still
         # needs accelerator.prepare() before Predict/Score can use it.
-        prepared_artifacts.model = accelerator.prepare(prepared_artifacts.model)
+        prepared.model = accelerator.prepare(prepared.model)
 
-    result = _predict_and_score(
-        config, workspace, prepared_artifacts, accelerator, tuned=tuned
+    logger.info("Preparing independent controls")
+    prepared = ControlsStep(config.steps.tune, config.steps.prepare).run(
+        workspace,
+        prepared,
+        seed=config.seed,
+        accelerator=accelerator,
+        controls=config.steps.predict.controls,
+        fitted=tuned,
     )
+    result = _predict_and_score(config, workspace, prepared, accelerator, tuned=tuned)
+    result.external = _evaluate_external_tests(
+        config, workspace, prepared, accelerator, tuned=tuned
+    )
+    accelerator.wait_for_everyone()
+    return result
 
+
+def _evaluate_external_tests(
+    config: EvaluationConfig,
+    workspace: EvaluationWorkspace,
+    prepared: PreparedArtifacts,
+    accelerator: Any,
+    *,
+    tuned: bool,
+) -> dict[str, PipelineResult]:
+    """Evaluate the same fitted predictor without repeating tuning or controls."""
     if config.external_test_sets and not tuned:
         logger.warning(
             "Skipping external_test_sets: steps.mode=evaluate_as_is has no "
             "fitted probe to transfer."
         )
-    elif config.external_test_sets:
-        prepare_step = PrepareStep(config.steps.prepare)
-        for external in config.external_test_sets:
-            logger.info("=== Starting external test set '%s' ===", external.name)
-            external_prepared = prepare_step.prepare_external_test(
-                workspace,
-                prepared_artifacts,
-                external,
-                accelerator=accelerator,
-                seed=config.seed,
-                layerwise_config=config.steps.layerwise,
-            )
-            external_workspace = get_evaluation_workspace(
-                workspace.config.model_copy(
-                    update={
-                        "dataset_name": external.name,
-                        "dataset_repo_id": external.dataset_repo_id,
-                    }
-                ),
-                variant=workspace.variant,
-                seed=workspace.seed,
-            )
-            external_workspace.setup_directories()
-            result.external[external.name] = _predict_and_score(
-                config, external_workspace, external_prepared, accelerator, tuned=tuned
-            )
-            logger.info("=== Completed external test set '%s' ===", external.name)
-    accelerator.wait_for_everyone()
-    return result
-
-
-def _execute_contacts(
-    config: EvaluationConfig,
-    workspace: EvaluationWorkspace,
-    accelerator: Any,
-    dataset: DatasetDict | None,
-) -> PipelineResult:
-    from transformers import AutoTokenizer
-
-    from modules.evaluate.src.model.contact_attention import ContactAttentionModel
-    from modules.evaluate.src.model.contact_jacobian import ContactJacobianModel
-    from modules.evaluate.src.model.contact_model import (
-        ContactPredictionModel,
-        build_contact_model,
-        fit_random_trunk_contact_control,
-    )
-    from modules.evaluate.src.tasks.contact_prediction import prepare_contact_dataset
-    from modules.evaluate.src.utils.io import write_json
-
-    source = workspace.config.dataset_repo_id
-    if source is None or workspace.config.model_repo_id is None:
-        raise ValueError(
-            "Contact prediction requires dataset_repo_id and model_repo_id"
-        )
-    if dataset is None:
-        contacts = PrepareStep(config.steps.prepare).run_contacts(
-            source,
-            revision=workspace.config.dataset_revision,
-            edition=workspace.config.edition,
-        )
-    else:
-        contacts = prepare_contact_dataset(
-            dataset,
-            source=source,
-            revision=workspace.config.dataset_revision,
-            edition=workspace.config.edition,
-        )
-    tokenizer = AutoTokenizer.from_pretrained(
-        workspace.config.model_repo_id, trust_remote_code=True
-    )
-    head_type = config.steps.tune.head.head_type
-    model = build_contact_model(
-        workspace.config.model_repo_id,
-        predictor=head_type,
-        tokenizer=tokenizer,
-    ).to(accelerator.device)
-    if head_type != "categorical_jacobian":
-        TuneStep(config.steps.tune).run_contacts(
+    if not tuned or not config.external_test_sets:
+        return {}
+    results = {}
+    prepare_step = PrepareStep(config.steps.prepare)
+    for external in config.external_test_sets:
+        logger.info("Evaluating external test set '%s'", external.name)
+        external_prepared = prepare_step.prepare_external_test(
             workspace,
-            contacts,
-            model,
-            tokenizer,
+            prepared,
+            external,
+            accelerator=accelerator,
             seed=config.seed,
-            device=accelerator.device,
-            cache_config=config.steps.prepare.embedding_cache,
+            layerwise_config=config.steps.layerwise,
         )
-    random_trunk_model = None
-    random_trunk_seed = None
-    if "random_trunk" in config.steps.predict.controls:
-        random_trunk_model, control_settings = fit_random_trunk_contact_control(
-            model,
-            contacts,
-            tokenizer,
-            seed=config.seed,
-            max_epochs=config.steps.tune.max_epochs,
-            device=accelerator.device,
-            cache_dir=(
-                workspace.embeddings_path
-                if config.steps.prepare.embedding_cache.cache_policy != "off"
-                else None
-            ),
-            refresh_cache=(
-                config.steps.prepare.embedding_cache.cache_policy == "refresh"
-            ),
-            max_cache_gb=config.steps.prepare.embedding_cache.max_cache_gb,
+        external_workspace = _external_workspace(workspace, external)
+        external_workspace.setup_directories()
+        results[external.name] = _predict_and_score(
+            config, external_workspace, external_prepared, accelerator, tuned=tuned
         )
-        control_workspace = workspace.control_workspace("random_trunk")
-        control_workspace.setup_directories()
-        if isinstance(random_trunk_model, ContactJacobianModel):
-            random_trunk_model.trunk.save_pretrained(control_workspace.model_path)
-        elif isinstance(
-            random_trunk_model, (ContactPredictionModel, ContactAttentionModel)
-        ):
-            random_trunk_model.save_pretrained(control_workspace.model_path)
-        else:
-            raise TypeError(
-                f"Unsupported random-trunk model: {type(random_trunk_model).__name__}"
-            )
-        tokenizer.save_pretrained(control_workspace.model_path)
-        write_json(
-            control_workspace.stats_path / "contact_training.json",
-            control_settings,
-        )
-        random_trunk_seed = control_settings["trunk_seed"]
-    prepared = PreparedArtifacts(
-        model=model,
-        tokenizer=tokenizer,
-        contact_dataset=contacts,
-        train_dataloader=None,
-        val_dataloader=None,
-        test_dataloader=None,
-        random_trunk_model=random_trunk_model,
-        random_trunk_seed=random_trunk_seed,
-    )
-    predictions = PredictStep(config.steps.predict).run(
-        workspace,
-        prepared,
-        seed=config.seed,
-        head_type=head_type,
-        variant=workspace.variant,
-        accelerator=accelerator,
-    )
-    scores = ScoreStep(config.steps.score).run_contacts(
-        predictions, output_dir=workspace.scores_path
-    )
-    return PipelineResult(predictions={None: predictions}, scores={None: scores})
+    return results
 
 
 def _predict_and_score(
     config: EvaluationConfig,
     workspace: EvaluationWorkspace,
-    prepared_artifacts: PreparedArtifacts,
+    prepared: PreparedArtifacts,
     accelerator: Any,
     *,
     tuned: bool,
 ) -> PipelineResult:
-    """Predict then score on *prepared_artifacts*' test loader."""
-    logger.info("=== Starting Predict Step ===")
+    """Predict on every rank, then score gathered observations on rank zero."""
+    logger.info("Predicting test observations")
     predict_step = PredictStep(config.steps.predict)
     layer_predictions: dict[int, PredictOutput] = {}
-    predictions: dict[int | None, PredictOutput]
     if config.steps.layerwise.enabled:
         layer_predictions = predict_step.run_layerwise(
-            workspace, prepared_artifacts, accelerator, config.seed
+            workspace, prepared, accelerator, config.seed
         )
-        predictions = dict(layer_predictions.items())
-    else:
-        predictions = {
-            None: predict_step.run(
-                workspace,
-                prepared_artifacts,
-                seed=config.seed,
-                accelerator=accelerator,
-                # head_type doesn't apply to the "pretrained" (steps.tune never
-                # ran) condition -- there's no trained head to name.
-                head_type=config.steps.tune.head.head_type if tuned else None,
-                variant=workspace.variant,
+        evaluations = [
+            EvaluationResult(
+                get_evaluation_workspace(
+                    workspace.config,
+                    variant=f"{workspace.variant}-layer_{layer}",
+                    seed=workspace.seed,
+                ),
+                prediction,
             )
-        }
-    logger.info("=== Completed Predict Step ===")
+            for layer, prediction in layer_predictions.items()
+        ]
+    else:
+        prediction = predict_step.run(
+            workspace,
+            prepared,
+            seed=config.seed,
+            accelerator=accelerator,
+            # head_type doesn't apply to the "pretrained" (steps.tune never
+            # ran) condition -- there's no trained head to name.
+            head_type=(
+                config.steps.tune.head.head_type
+                if tuned or get_task(workspace.task_type).uses_predictor_identity
+                else None
+            ),
+            variant=workspace.variant,
+        )
+        evaluations = [EvaluationResult(workspace, prediction)]
 
-    result = PipelineResult(predictions)
+    result = PipelineResult(evaluations)
     # ScoreStep is a plain, single-process step, so only rank 0 runs it.
     # Passing PredictOutput avoids a disk round trip; ScoreStep still supports
     # manifest-based reloading for standalone or restarted scoring.
     if accelerator.is_main_process:
-        logger.info("=== Starting Score Step ===")
+        logger.info("Scoring test observations")
         score_step = ScoreStep(config.steps.score)
-        for layer, prediction in predictions.items():
-            # Separate layer workspaces keep per-depth scores and manifests apart.
-            score_workspace = (
-                workspace
-                if layer is None
-                else get_evaluation_workspace(
-                    workspace.config,
-                    variant=f"{workspace.variant}-layer_{layer}",
-                    seed=workspace.seed,
-                )
+        for evaluation in result.evaluations:
+            evaluation.score = score_step.run(
+                evaluation.workspace,
+                seed=config.seed,
+                predict_result=evaluation.prediction,
             )
-            score = score_step.run(
-                score_workspace, seed=config.seed, predict_result=prediction
-            )
-            result.scores[layer] = score
-            label = "Scores" if layer is None else f"Layer {layer} scores"
-            logger.info("%s: %s", label, score.scores)
-            if score.summary_path is not None:
-                logger.info(
-                    "Bootstrap confidence intervals written to %s", score.summary_path
-                )
         if layer_predictions and config.steps.score.bootstrap_enabled:
             comparison_path = score_step.compare_layers(
                 workspace, layer_predictions, seed=config.seed
@@ -419,5 +281,4 @@ def _predict_and_score(
                 logger.info(
                     "Paired cross-layer comparison written to %s", comparison_path
                 )
-        logger.info("=== Completed Score Step ===")
     return result

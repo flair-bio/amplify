@@ -6,8 +6,8 @@ import pytest
 from omegaconf import OmegaConf
 
 from modules.core.utils.config_loader import load_and_parse
-from modules.evaluate.src.config import EvaluationConfig
-from modules.evaluate.src.utils.config_loader import load_evaluation_config
+from modules.evaluate.src.contracts.config import EvaluationConfig
+from modules.evaluate.src.contracts.config_loader import load_evaluation_config
 
 CONFIGS = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
 
@@ -59,9 +59,9 @@ def test_predictor_presets_compose_existing_steps_and_allow_overrides(
 @pytest.mark.parametrize(
     "head,error",
     [
-        ("mlp", "supported contact predictor preset"),
-        ("torch_linear", "supported contact predictor preset"),
-        ("sklearn_linear", "supported contact predictor preset"),
+        ("mlp", "not supported for task_type='contact_prediction'"),
+        ("torch_linear", "not supported for task_type='contact_prediction'"),
+        ("sklearn_linear", "not supported for task_type='contact_prediction'"),
     ],
 )
 def test_contact_rejects_unsupported_heads(head, error):
@@ -76,7 +76,7 @@ def test_contact_rejects_unsupported_heads(head, error):
 
 
 def test_contact_predictor_cannot_be_used_for_other_tasks():
-    with pytest.raises(ValueError, match="requires task_type='contact_prediction'"):
+    with pytest.raises(ValueError, match="not supported for task_type='sequence_classification'"):
         load_evaluation_config(
             [
                 CONFIGS / "config.yaml",
@@ -115,7 +115,7 @@ def test_contact_attention_preset_selects_fixed_predictor():
 
 
 def test_contact_attention_predictor_cannot_be_used_for_other_tasks():
-    with pytest.raises(ValueError, match="requires task_type='contact_prediction'"):
+    with pytest.raises(ValueError, match="not supported for task_type='sequence_classification'"):
         load_evaluation_config(
             [
                 CONFIGS / "config.yaml",
@@ -142,7 +142,7 @@ def test_contact_jacobian_preset_selects_zero_shot_predictor():
 
 
 def test_contact_jacobian_predictor_cannot_be_used_for_other_tasks():
-    with pytest.raises(ValueError, match="requires task_type='contact_prediction'"):
+    with pytest.raises(ValueError, match="not supported for task_type='sequence_classification'"):
         load_evaluation_config(
             [
                 CONFIGS / "config.yaml",

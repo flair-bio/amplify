@@ -3,22 +3,15 @@
 import torch
 from transformers import EsmConfig, EsmModel
 
-from modules.evaluate.src.model.contact_attention import (
-    ATTENTION_C,
-    ContactAttentionModel,
-    fit_contact_attention_head,
-)
-from modules.evaluate.src.model.contact_model import (
-    fit_random_trunk_contact_control,
-    load_contact_model,
-)
-from modules.evaluate.src.tasks.contact_prediction import (
-    ContactAlignment,
-    ContactChain,
-    ContactDataset,
-    ContactUnit,
-    candidate_pairs,
-)
+from modules.evaluate.src.model.contact_attention import ATTENTION_C, ContactAttentionModel
+from modules.evaluate.src.model.contact_model import load_contact_model
+from modules.evaluate.src.dataset.contact import ContactAlignment, ContactChain, ContactDataset, ContactUnit, candidate_pairs
+from modules.evaluate.src.trainers.contact import fit_contact_attention_head
+from dataclasses import replace
+from accelerate import Accelerator
+from modules.evaluate.src.contracts.artifacts import ContactArtifacts, PreparedArtifacts
+from modules.evaluate.src.contracts.config import EvaluationWorkspaceConfig, TuneConfig
+from modules.evaluate.src.tasks import get_task
 
 
 def small_amplify_trunk():
@@ -157,14 +150,26 @@ def test_random_trunk_attention_control_is_independently_fitted(esm2_tokenizer):
     )
     pretrained = ContactAttentionModel(small_trunk())
 
-    random_model, settings = fit_random_trunk_contact_control(
-        pretrained,
-        dataset,
-        esm2_tokenizer,
-        seed=17,
-        max_epochs=12,
-        device=torch.device("cpu"),
+    prepared = PreparedArtifacts(
+        model=pretrained, tokenizer=esm2_tokenizer,
+        train_dataloader=None, val_dataloader=None, test_dataloader=None,
+        contact=ContactArtifacts(dataset),
     )
+    task = get_task("contact_prediction")
+    inputs = task.independent_controls(
+        prepared, ["random_trunk"], seed=17, device=torch.device("cpu"),
+    )["random_trunk"]
+    control = replace(prepared, model=inputs.model)
+    control.input_identity = task.fitting_identity(control)
+    result = task.fit(
+        control, TuneConfig(max_epochs=12),
+        EvaluationWorkspaceConfig(
+            task_type="contact_prediction", model_name="tiny", dataset_name="casp",
+            target_type="categorical", label_format="contact_pairs", run_id="offline",
+        ),
+        Accelerator(cpu=True), seed=inputs.seed,
+    )
+    random_model, settings = result.model, task.control_settings(inputs, result)
 
     assert isinstance(random_model, ContactAttentionModel)
     assert settings["trunk_seed"] != settings["head_seed"]

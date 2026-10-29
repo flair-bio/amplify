@@ -4,8 +4,8 @@ Pluggable prediction heads for the evaluation probe.
 ``EmbeddingProbeHead`` is a linear or MLP torch probe over precomputed
 embeddings. ``"torch_linear"`` is a single :class:`torch.nn.Linear` layer trained by
 backpropagation through
-:class:`~modules.evaluate.src.steps.tune.TuneStep`'s existing epoch/optimizer
-loop. With ``steps.prepare.embedding_cache.enabled=True``, it uses the
+:class:`~modules.evaluate.src.trainers.torch.TorchProbeTrainer`. With
+``steps.prepare.embedding_cache.enabled=True``, it uses the
 standalone :class:`EmbeddingProbeHead`. Without the cache, it trains the
 model's native head only when that head is itself a plain ``nn.Linear``.
 Layerwise mode instead applies independent linear heads at selected frozen
@@ -19,8 +19,8 @@ head type (``"sklearn_linear"``, ``"knn"``, ``"random_forest"``,
 ``"xgboost"``) is a
 scikit-learn-compatible estimator, fit once (optionally swept over a
 hyperparameter grid, scored on the validation split) directly on cached
-pooled embeddings -- these have no gradient, so they bypass TuneStep's
-training loop entirely. They therefore require
+pooled embeddings -- these have no gradient, so they use the classical
+trainer. They therefore require
 ``steps.prepare.embedding_cache.enabled=True``: a classical estimator needs a
 fixed-size feature vector per example, not a token sequence.
 """
@@ -30,27 +30,22 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from time import monotonic
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 import numpy as np
 import torch
-from pydantic import BaseModel, ConfigDict, Field
 from sklearn.base import BaseEstimator
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LogisticRegression, Ridge
-from sklearn.model_selection import ParameterGrid
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from torch import nn
 from tqdm import tqdm
 
-from modules.evaluate.src.utils.hpo import create_optuna_study, sample_candidates
+from modules.evaluate.src.contracts.config import HeadType
 
 _FEATURE_STANDARDIZATION_CHUNK_SIZE = 65_536
-
-if TYPE_CHECKING:
-    import optuna
 
 logger = logging.getLogger(__name__)
 
@@ -63,22 +58,8 @@ class _HeadOutput:
     logits: torch.Tensor
 
 
-HeadType = Literal[
-    "bilinear512",
-    "attention_l1",
-    "categorical_jacobian",
-    "mlp",
-    "torch_linear",
-    "sklearn_linear",
-    "knn",
-    "random_forest",
-    "xgboost",
-]
-
 # Head types with no gradient: fit once (or swept) on cached embeddings
 # instead of trained through TuneStep's epoch loop.
-CLASSICAL_HEAD_TYPES = frozenset({"sklearn_linear", "knn", "random_forest", "xgboost"})
-TORCH_EMBEDDING_HEAD_TYPES = frozenset({"torch_linear"})
 
 # head_type -> (classifier estimator class, regressor estimator class, default kwargs).
 _ESTIMATOR_REGISTRY: dict[
@@ -117,57 +98,6 @@ def _xgboost_estimator_classes() -> tuple[type[BaseEstimator], type[BaseEstimato
             "via `uv pip install -e '.[evaluate]'` or `pip install xgboost`."
         ) from exc
     return XGBClassifier, XGBRegressor
-
-
-class HeadConfig(BaseModel):
-    """Selects and parameterizes the prediction head trained by TuneStep."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    head_type: HeadType = Field(
-        "mlp",
-        description=(
-            "'torch_linear': one torch.nn.Linear layer trained by gradient "
-            "descent. With embedding_cache.enabled=True it is constructed "
-            "over cached embeddings; without the cache, the loaded native "
-            "task head must itself be a single nn.Linear. 'mlp': existing "
-            "native model-head "
-            "path. 'bilinear512'/'attention_l1': fixed CASP contact predictors. "
-            "'sklearn_linear'/'knn'/'random_forest'/'xgboost': "
-            "classical scikit-learn-compatible estimators fit once on cached "
-            "pooled embeddings -- require "
-            "steps.prepare.embedding_cache.enabled=True in tune_probe mode."
-        ),
-    )
-    hidden_size: int = Field(
-        512,
-        gt=0,
-        description=(
-            "Hidden layer width for an MLP probe over cached embeddings; "
-            "ignored for other head types."
-        ),
-    )
-    hidden_depth: int = Field(
-        1,
-        gt=0,
-        description=(
-            "Number of hidden Linear-GELU layers for a cached MLP probe; "
-            "ignored for other head types and native model heads."
-        ),
-    )
-    hyperparameters: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Constructor kwargs for the chosen estimator (ignored for 'mlp').",
-    )
-    search_space: dict[str, list[Any]] = Field(
-        default_factory=dict,
-        description=(
-            "Hyperparameter grid swept via sklearn.model_selection.ParameterGrid "
-            "(every combination is fit and scored on the validation split; "
-            "ignored for 'mlp'). Empty means no sweep: fit once with "
-            "'hyperparameters'."
-        ),
-    )
 
 
 def build_probe_layers(
@@ -425,6 +355,21 @@ def _filter_classical_search_space(
     }
 
 
+def classical_search_space(
+    head_type: HeadType,
+    task_type: str,
+    search_space: dict[str, list[Any]],
+    default_hyperparameters: dict[str, Any],
+) -> dict[str, list[Any]]:
+    """Resolve the task-compatible search candidates for a classical head."""
+    filtered = _filter_classical_search_space(head_type, task_type, search_space)
+    if filtered:
+        return filtered
+    if not default_hyperparameters:
+        return _DEFAULT_SEARCH_SPACES.get(head_type, {})
+    return {}
+
+
 def has_classical_search_space(
     head_type: HeadType,
     search_space: dict[str, list[Any]],
@@ -455,129 +400,27 @@ def sweep_classical_head(
     num_labels: int | None = None,
     is_main_process: bool = True,
 ) -> tuple[BaseEstimator, dict[str, Any], float]:
-    """Fit and validate classical probe candidates, returning the best one.
+    """Compatibility entry point; classical fitting lives in its trainer."""
+    from modules.evaluate.src.trainers.classical import ClassicalProbeTrainer
 
-    Candidates are selected exclusively on ``val_X``/``val_y``. This helper
-    returns the training-only winner; TuneStep optionally rebuilds it for
-    train+validation final refitting after selection and diagnostics.
-
-    ``grid`` evaluates every ``ParameterGrid`` combination. ``random`` samples
-    up to ``n_trials`` combinations without replacement. ``bohb`` uses the
-    shared Optuna TPE configuration; atomic sklearn fits cannot report
-    intermediate results, so no pruning happens within a trial.
-    """
-    from modules.evaluate.src.tasks import get_task
-
-    effective_search_space = _filter_classical_search_space(
+    return ClassicalProbeTrainer.fit_candidates(
         head_type,
         task_type,
+        train_X,
+        train_y,
+        val_X,
+        val_y,
         search_space,
-    ) or (
-        _DEFAULT_SEARCH_SPACES.get(head_type, {}) if not default_hyperparameters else {}
+        default_hyperparameters,
+        metric_name,
+        direction,
+        search_pattern,
+        n_trials,
+        seed,
+        average,
+        num_labels,
+        is_main_process,
     )
-    candidates: list[dict[str, Any]] = (
-        list(ParameterGrid(effective_search_space))
-        if effective_search_space
-        else [default_hyperparameters]
-    )
-    candidates = [{**default_hyperparameters, **candidate} for candidate in candidates]
-
-    if search_pattern == "random" and len(candidates) > 1:
-        candidates = sample_candidates(candidates, n_trials or len(candidates), seed)
-
-    total_trials = (
-        n_trials or len(candidates)
-        if search_pattern == "bohb" and effective_search_space
-        else len(candidates)
-    )
-    if is_main_process:
-        logger.info(
-            "Starting classical probe search | head_type=%s | pattern=%s | "
-            "trials=%d | metric=%s (%s) | train_rows=%d | validation_rows=%d",
-            head_type,
-            search_pattern,
-            total_trials,
-            metric_name,
-            direction,
-            len(train_y),
-            len(val_y),
-        )
-
-    best_estimator: BaseEstimator | None = None
-    best_hparams: dict[str, Any] | None = None
-    best_score = float("-inf") if direction == "maximize" else float("inf")
-    is_better = (
-        (lambda s: s > best_score)
-        if direction == "maximize"
-        else (lambda s: s < best_score)
-    )
-
-    def evaluate(hparams: dict[str, Any], trial_number: int) -> float:
-        nonlocal best_estimator, best_hparams, best_score
-        trial_started = monotonic()
-        if is_main_process:
-            logger.info(
-                "Classical candidate %d/%d started | head_type=%s | params=%s",
-                trial_number,
-                total_trials,
-                head_type,
-                hparams,
-            )
-        estimator = build_estimator(head_type, task_type, hparams, seed=seed)
-        estimator.fit(train_X, train_y)
-        predictions = estimator.predict(val_X)
-        task = get_task(task_type, num_labels)
-        probabilities = (
-            estimator.predict_proba(val_X)
-            if hasattr(estimator, "predict_proba")
-            else None
-        )
-        score = task.compute_metrics(
-            predictions.tolist(),
-            val_y.tolist(),
-            [metric_name],
-            average=average,
-            probabilities=probabilities.tolist() if probabilities is not None else None,
-        )[metric_name]
-        new_best = is_better(score)
-        if new_best:
-            best_estimator, best_hparams, best_score = estimator, hparams, score
-        if is_main_process:
-            logger.info(
-                "Classical candidate %d/%d complete | val_%s=%.4f | "
-                "best_%s=%.4f | new_best=%s | elapsed=%.1fs",
-                trial_number,
-                total_trials,
-                metric_name,
-                score,
-                metric_name,
-                best_score,
-                new_best,
-                monotonic() - trial_started,
-            )
-        return score
-
-    if search_pattern == "bohb" and effective_search_space:
-
-        def objective(trial: "optuna.Trial") -> float:
-            hparams = {
-                **default_hyperparameters,
-                **{
-                    name: trial.suggest_categorical(name, values)
-                    for name, values in effective_search_space.items()
-                },
-            }
-            return evaluate(hparams, trial.number + 1)
-
-        trials = n_trials or len(candidates)
-        study = create_optuna_study(direction, seed, trials)
-        study.optimize(objective, n_trials=trials)
-    else:
-        for trial_number, hparams in enumerate(candidates, start=1):
-            evaluate(hparams, trial_number)
-
-    assert best_hparams is not None and best_estimator is not None
-    return best_estimator, best_hparams, best_score
 
 
 def _classical_logits(

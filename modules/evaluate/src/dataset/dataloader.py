@@ -23,16 +23,17 @@ from typing import Any
 
 import torch
 from datasets import Dataset, DatasetDict, load_dataset  # type: ignore[attr-defined]
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 from torch.utils.data import DataLoader, Sampler
 from transformers import PreTrainedTokenizerBase
 
-from modules.evaluate.src.dataset.collator import EvaluationCollator
-from modules.evaluate.src.tasks import TaskType, get_task
-from modules.evaluate.src.tasks.contact_prediction import (
-    ContactDataset,
-    prepare_contact_dataset,
+from modules.evaluate.src.contracts.config import (
+    DEFAULT_SPLIT_NAME,
+    DatasetSplitConfig,
 )
+from modules.evaluate.src.dataset.collator import EvaluationCollator
+from modules.evaluate.src.dataset.contact import prepare_contact_dataset
+from modules.evaluate.src.tasks import TaskType, get_task
 
 logger = logging.getLogger(__name__)
 
@@ -44,78 +45,6 @@ _MEGA_BATCH_MULT_CAP = 50
 # Default share of `train` held out to synthesize a `validation` split when
 # the dataset doesn't already have one.
 _DEFAULT_VALIDATION_FRACTION = 0.1
-
-
-DEFAULT_SPLIT_NAME = "default"
-
-
-class ExternalTestSetConfig(BaseModel):
-    """A test-only dataset scored with the model fitted on the main dataset.
-
-    It is never used for training, tuning, or model selection. Its labels must
-    follow the main dataset's label contract (column names and class indices).
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str = Field(
-        ...,
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
-        description="Filesystem-safe label used for this test set's outputs.",
-    )
-    dataset_repo_id: str = Field(..., min_length=1)
-    split: str = Field("test", min_length=1)
-
-
-class DatasetSplitConfig(BaseModel):
-    """Map dataset-specific split names onto evaluation pipeline roles.
-
-    With only ``name`` set, roles resolve to ``<role>_<name>`` (``train``,
-    ``validation``, ``test`` for the ``default`` name). Set a role explicitly
-    to point at a split that doesn't follow that convention.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str = Field(
-        DEFAULT_SPLIT_NAME,
-        min_length=1,
-        description="Name recorded in prediction and score metadata.",
-    )
-    train: str = "train"
-    validation: str | None = "validation"
-    test: str = "test"
-    refit_additional_splits: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Source splits excluded from selection and appended only to the "
-            "final train+validation refit."
-        ),
-    )
-
-    @model_validator(mode="after")
-    def _derive_split_names(self) -> DatasetSplitConfig:
-        """Suffix each role not set explicitly with a non-default split name."""
-        if self.name != DEFAULT_SPLIT_NAME:
-            for role in ("train", "validation", "test"):
-                if role not in self.model_fields_set:
-                    setattr(self, role, f"{role}_{self.name}")
-        if any(not split.strip() for split in self.refit_additional_splits):
-            raise ValueError("refit_additional_splits cannot contain empty names.")
-        if len(self.refit_additional_splits) != len(set(self.refit_additional_splits)):
-            raise ValueError("refit_additional_splits must contain unique split names.")
-        role_sources = {
-            source
-            for source in (self.train, self.validation, self.test)
-            if source is not None
-        }
-        overlap = role_sources.intersection(self.refit_additional_splits)
-        if overlap:
-            raise ValueError(
-                "refit_additional_splits must not repeat train, validation, or "
-                f"test source splits: {sorted(overlap)}."
-            )
-        return self
 
 
 class DataLoaderConfig(BaseModel):
@@ -406,38 +335,6 @@ def load_raw_evaluation_dataset(
     return dataset
 
 
-def load_contact_dataset(
-    path_or_repo: str | Path,
-    *,
-    revision: str | None = None,
-    edition: int | None = None,
-    cache_dir: str | Path | None = None,
-) -> ContactDataset:
-    """Load HF scoring rows without split synthesis or coordinate dependencies."""
-    path = Path(path_or_repo)
-    if path.is_dir():
-        if revision is not None:
-            raise ValueError("revision applies only to Hub datasets")
-        if any(
-            not list((path / "data").glob(f"{split}-*.parquet"))
-            for split in ("train", "validation", "test")
-        ):
-            raise ValueError("Local contact data requires data/{split}-*.parquet")
-    else:
-        if isinstance(path_or_repo, Path) or path.is_absolute():
-            raise FileNotFoundError(path)
-        if revision is None or re.fullmatch(r"[0-9a-fA-F]{40}", revision) is None:
-            raise ValueError(
-                "Hub contact data requires a pinned 40-character commit SHA"
-            )
-    raw = load_raw_evaluation_dataset(
-        path_or_repo, revision=revision, cache_dir=cache_dir
-    )
-    return prepare_contact_dataset(
-        raw, source=str(path_or_repo), revision=revision, edition=edition
-    )
-
-
 def load_evaluation_dataset(
     dataset_repo_id: str,
     seed: int = 710019,
@@ -474,6 +371,36 @@ def load_evaluation_dataset(
     return ensure_validation_split(
         dataset, seed=seed, validation_fraction=validation_fraction
     )
+
+
+def resolve_evaluation_data(
+    dataset_id: str,
+    *,
+    split: DatasetSplitConfig,
+    seed: int,
+    validation_fraction: float,
+    dataset: DatasetDict | None = None,
+) -> DatasetDict:
+    """Load benchmark splits, or use supplied data with already resolved roles."""
+    if dataset is not None:
+        return dataset
+    return load_evaluation_dataset(
+        dataset_id,
+        seed=seed,
+        validation_fraction=validation_fraction,
+        split=split,
+    )
+
+
+def resolve_external_data(dataset_id: str, split: str) -> DatasetDict:
+    """Expose one validated source split as an external test dataset."""
+    raw = load_raw_evaluation_dataset(dataset_id)
+    if split not in raw:
+        raise ValueError(
+            f"External dataset '{dataset_id}' has no split '{split}'. "
+            f"Available splits: {sorted(raw.keys())}."
+        )
+    return DatasetDict({"test": raw[split]})
 
 
 def tokenize_dataset(

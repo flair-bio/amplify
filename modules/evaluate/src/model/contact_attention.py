@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import hashlib
 import inspect
 import json
 import logging
-import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -14,21 +12,15 @@ import joblib
 import numpy as np
 import torch
 from scipy.special import expit
-from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
 from torch import nn
 from transformers import PreTrainedTokenizerBase
 
-from modules.evaluate.src.model.contact_model import (
-    contact_positions,
-    load_contact_trunk,
-)
+from modules.evaluate.src.model.adapters import contact_positions
+from modules.evaluate.src.model.contact_model import load_contact_trunk
 
 if TYPE_CHECKING:
-    from modules.evaluate.src.tasks.contact_prediction import (
-        ContactChain,
-        ContactDataset,
-    )
+    from modules.evaluate.src.dataset.contact import ContactChain
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +86,7 @@ def _extract_attention_features(
     pair_indices: tuple[np.ndarray, np.ndarray] | None = None,
     weights: np.ndarray | None = None,
 ) -> torch.Tensor:
-    from modules.evaluate.src.tasks.contact_prediction import tokenize_contact_chain
+    from modules.evaluate.src.dataset.contact import tokenize_contact_chain
 
     if (pair_indices is None) == (weights is None):
         raise ValueError("Provide either candidate pairs or fitted attention weights")
@@ -261,130 +253,3 @@ class ContactAttentionModel(nn.Module):
         ):
             raise ValueError("Unsupported contact attention head protocol")
         return model.eval()
-
-
-def fit_contact_attention_head(
-    model: ContactAttentionModel,
-    dataset: ContactDataset,
-    tokenizer: PreTrainedTokenizerBase,
-    *,
-    seed: int,
-) -> dict[str, Any]:
-    """Fit the fixed L1 logistic head on every known unordered training pair."""
-    from modules.evaluate.src.tasks.contact_prediction import candidate_pairs
-
-    training = dataset.splits["train"]
-    if len(training) != 20:
-        raise ValueError("Contact attention fitting requires 20 training structures")
-    feature_count = len(_encoder_layers(model.trunk)) * int(
-        model.trunk.config.num_attention_heads
-    )
-    pairs_by_chain = []
-    total_pairs = 0
-    for chain in training:
-        if not chain.units[0].labels_available:
-            raise ValueError("All contact training structures require labels")
-        pairs = candidate_pairs(chain.units[0], chain.alignment, minsep=6)
-        if not len(pairs.i):
-            raise ValueError(f"{chain.record_id}: no eligible training pairs")
-        pairs_by_chain.append((chain, pairs))
-        total_pairs += len(pairs.i)
-
-    X = np.empty((total_pairs, feature_count), dtype=np.float32)
-    y = np.empty(total_pairs, dtype=np.int64)
-    offset = 0
-    for index, (chain, pairs) in enumerate(pairs_by_chain, start=1):
-        values = model.extract(chain, tokenizer, (pairs.i, pairs.j))
-        if (
-            values.shape != (feature_count, len(pairs.i))
-            or not torch.isfinite(values).all()
-        ):
-            raise ValueError(f"{chain.record_id}: invalid attention pair features")
-        end = offset + len(pairs.i)
-        X[offset:end] = values.T.numpy()
-        y[offset:end] = pairs.labels
-        logger.info(
-            "Extracted training attention features %d/%d | record=%s | pairs=%d",
-            index,
-            len(pairs_by_chain),
-            chain.record_id,
-            len(pairs.i),
-        )
-        offset = end
-
-    if len(np.unique(y)) != 2:
-        raise ValueError(
-            "Attention logistic fitting requires positive and negative pairs"
-        )
-    classifier = LogisticRegression(
-        l1_ratio=1.0,
-        C=ATTENTION_C,
-        solver="liblinear",
-        random_state=seed,
-        max_iter=ATTENTION_MAX_ITER,
-    )
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", ConvergenceWarning)
-        classifier.fit(X, y)
-    model.classifier = classifier
-    logger.info(
-        "Fitted CASP attention head | seed=%d | structures=%d | pairs=%d | "
-        "features=%d | C=%.2f | solver=liblinear | iterations=%d",
-        seed,
-        len(training),
-        len(y),
-        X.shape[1],
-        ATTENTION_C,
-        int(classifier.n_iter_[0]),
-    )
-    return {
-        "seed": seed,
-        "predictor": ATTENTION_HEAD_TYPE,
-        "attention_protocol": ATTENTION_PROTOCOL,
-        "training_structures": len(training),
-        "training_pairs": len(y),
-        "positive_pairs": int(y.sum()),
-        "feature_count": int(X.shape[1]),
-        "penalty": "l1",
-        "C": ATTENTION_C,
-        "solver": "liblinear",
-        "max_iter": ATTENTION_MAX_ITER,
-        "iterations": int(classifier.n_iter_[0]),
-        "standardized": False,
-    }
-
-
-def contact_development_attention_fingerprint(
-    model: ContactAttentionModel,
-    tokenizer: PreTrainedTokenizerBase,
-    dataset: ContactDataset,
-) -> str:
-    """Fingerprint train-only inputs without retaining attention maps."""
-    from modules.evaluate.src.tasks.contact_prediction import (
-        tokenize_contact_chain,
-    )
-    from modules.evaluate.src.utils.embed import weights_fingerprint
-
-    training = dataset.splits["train"]
-    token_rows = [tokenize_contact_chain(chain, tokenizer) for chain in training]
-    identity = {
-        "protocol": ATTENTION_PROTOCOL,
-        "dataset_fingerprint": dataset.fingerprint,
-        "weights": weights_fingerprint(model.trunk),
-        "backbone_config": json.loads(model.trunk.config.to_json_string()),
-        "precision": "float32",
-        "tf32": torch.backends.cuda.matmul.allow_tf32,
-        "matmul_precision": torch.get_float32_matmul_precision(),
-        "chains": [
-            (
-                chain.record_id,
-                chain.alignment.sequence,
-                tokens.input_ids,
-                tokens.position_ids,
-                tokens.residue_token_indices,
-            )
-            for chain, tokens in zip(training, token_rows)
-        ],
-    }
-    key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-    return key

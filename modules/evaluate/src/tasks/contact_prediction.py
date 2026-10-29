@@ -4,368 +4,162 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
-from itertools import pairwise
-from numbers import Integral
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import numpy as np
 import polars as pl
 import torch
-from datasets import DatasetDict
-from transformers import PreTrainedTokenizerBase
+from transformers import AutoTokenizer
 
+from modules.evaluate.src.contracts.artifacts import (
+    ContactArtifacts,
+    ContactEvaluationMetadata,
+    ContactScoreOutput,
+    ControlInputs,
+    FeatureRequest,
+    FitResult,
+    PredictOutput,
+    PreparedArtifacts,
+)
+from modules.evaluate.src.dataset.embedding_cache import weights_fingerprint
 from modules.evaluate.src.metrics import contact_metrics
+from modules.evaluate.src.model.contact_attention import (
+    ATTENTION_PROTOCOL,
+    ContactAttentionModel,
+)
+from modules.evaluate.src.model.contact_jacobian import ContactJacobianModel
 from modules.evaluate.src.model.contact_model import (
+    ContactPredictionModel,
     build_contact_model,
     load_contact_model,
 )
-from modules.evaluate.src.tasks.base import MetricFn, TaskHandler
+from modules.evaluate.src.model.controls import (
+    build_random_trunk,
+    contact_random_trunk_seed,
+)
+from modules.evaluate.src.tasks.base import MetricFn, StructuredTask
 from modules.evaluate.src.tasks.registry import register_task
+from modules.evaluate.src.trainers.contact import (
+    BILINEAR_PROTOCOL,
+    fit_contact_attention_head,
+    fit_contact_head,
+)
 
 if TYPE_CHECKING:
-    from modules.evaluate.src.schemas.artifacts import (
-        ContactScoreOutput,
+    from accelerate import Accelerator
+    from datasets import DatasetDict
+
+    from modules.evaluate.src.contracts.artifacts import (
         EvaluationMetadata,
-        PredictOutput,
+    )
+    from modules.evaluate.src.contracts.config import (
+        EvaluationConfig,
+        EvaluationWorkspaceConfig,
+        PredictConfig,
+        PrepareConfig,
+        ScoreConfig,
+        TuneConfig,
     )
 
-SCHEMA_VERSION = "6.0"
-PROTOCOL_VERSION = "casp-contact-v1"
-SPLITS = ("train", "validation", "test")
-CANONICAL = frozenset("ACDEFGHIKLMNPQRSTVWY")
-AMBIGUOUS = frozenset("XBOUZJ")
-REQUIRED_COLUMNS = frozenset(
-    {
-        "id",
-        "record_id",
-        "sequence",
-        "split",
-        "source",
-        "edition",
-        "complex_id",
-        "target",
-        "unit_id",
-        "kind",
-        "positions",
-        "labels_available",
-        "positive_pairs",
-        "valid_positions",
-    }
+from modules.evaluate.src.dataset.contact import (
+    IGNORE_INDEX,
+    PROTOCOL_VERSION,
+    SCHEMA_VERSION,
+    ContactChain,
+    ContactDataset,
+    ContactTokens,
+    load_contact_dataset,
+    prepare_contact_dataset,
+    tokenize_contact_chain,
 )
 
 
-@dataclass(frozen=True)
-class ContactAlignment:
-    sequence: str
-    clean_sequence: str
-    retained_positions: tuple[int, ...]
-    original_to_retained: tuple[int, ...]
-
-
-@dataclass(frozen=True)
-class ContactUnit:
-    id: str
-    unit_id: str
-    kind: str
-    positions: tuple[int, ...] | None
-    labels_available: bool
-    positive_pairs: tuple[tuple[int, int], ...]
-    valid_positions: tuple[int, ...]
-
-
-@dataclass(frozen=True)
-class ContactChain:
-    record_id: str
-    split: str
-    source: str
-    edition: int | None
-    complex_id: str | None
-    target: str | None
-    alignment: ContactAlignment
-    units: tuple[ContactUnit, ...]
-
-
-@dataclass(frozen=True)
-class ContactDataset:
-    splits: dict[str, tuple[ContactChain, ...]]
-    fingerprint: str
-    source: str
-    revision: str | None
-    schema_version: str = SCHEMA_VERSION
-
-
-@dataclass(frozen=True)
-class ContactTokens:
-    input_ids: tuple[int, ...]
-    attention_mask: tuple[int, ...]
-    position_ids: tuple[int, ...]
-    residue_token_indices: tuple[int, ...]
-
-
-def align_contact_sequence(sequence: str) -> ContactAlignment:
-    """Derive both runtime mappings; deleted original positions map to -1."""
-    if not isinstance(sequence, str) or not sequence:
-        raise ValueError("Expected a nonempty uppercase protein sequence")
-    if set(sequence) - CANONICAL - AMBIGUOUS:
-        raise ValueError("Expected an uppercase protein sequence")
-    retained = tuple(i for i, aa in enumerate(sequence) if aa in CANONICAL)
-    inverse = [-1] * len(sequence)
-    for clean, original in enumerate(retained):
-        inverse[original] = clean
-    return ContactAlignment(
-        sequence, "".join(sequence[i] for i in retained), retained, tuple(inverse)
-    )
-
-
-def tokenize_contact_chain(
-    chain: ContactChain, tokenizer: PreTrainedTokenizerBase
-) -> ContactTokens:
-    """Tokenize the whole cleaned chain, preserving original positional gaps."""
-    alignment = chain.alignment
-    if not alignment.retained_positions:
-        raise ValueError(f"{chain.record_id}: no retained residues to tokenize")
-    encoded = tokenizer(
-        alignment.clean_sequence,
-        add_special_tokens=True,
-        truncation=False,
-        padding=False,
-        return_special_tokens_mask=True,
-    )
-    ids = tuple(encoded["input_ids"])
-    special = encoded["special_tokens_mask"]
-    residues = tuple(i for i, masked in enumerate(special) if not masked)
-    expected_ids = tokenizer.convert_tokens_to_ids(list(alignment.clean_sequence))
-    if (
-        len(residues) != len(alignment.retained_positions)
-        or not residues
-        or residues != tuple(range(residues[0], residues[-1] + 1))
-        or [ids[i] for i in residues] != expected_ids
-        or tokenizer.unk_token_id in expected_ids
-    ):
-        raise ValueError(
-            f"{chain.record_id}: contact inputs require one unchanged token per residue"
-        )
-    positions = list(range(len(ids)))
-    for token, original in zip(residues, alignment.retained_positions):
-        positions[token] = residues[0] + original
-    # EOS and any other suffix tokens follow the full original sequence.
-    for token in range(residues[-1] + 1, len(ids)):
-        positions[token] += len(alignment.sequence) - len(alignment.clean_sequence)
-    return ContactTokens(ids, (1,) * len(ids), tuple(positions), residues)
-
-
-def _positions(value: Any, length: int, field: str) -> tuple[int, ...]:
-    if not isinstance(value, (list, tuple)):
-        raise TypeError(f"{field} must be an integer list")
-    if any(
-        isinstance(i, bool) or not isinstance(i, Integral) or not 0 <= int(i) < length
-        for i in value
-    ):
-        raise ValueError(f"{field} contains a noninteger or out-of-bounds index")
-    result = tuple(int(i) for i in value)
-    if any(a >= b for a, b in pairwise(result)):
-        raise ValueError(f"{field} must be strictly increasing")
-    return result
-
-
-def _unit(row: dict[str, Any]) -> ContactUnit:
-    length = len(row["sequence"])
-    kind = row["kind"]
-    if kind not in ("global", "intra_eu"):
-        raise ValueError("kind must be global or intra_eu")
-    if (kind == "global") != (row["positions"] is None):
-        raise ValueError("Only global rows must have null positions")
-    if kind == "global" and row["unit_id"] != "chain":
-        raise ValueError("Global unit_id must be chain")
-    if row["id"] != f"{row['record_id']}/{kind}/{row['unit_id']}":
-        raise ValueError("Scoring id must equal record_id/kind/unit_id")
-    members = (
-        None
-        if row["positions"] is None
-        else _positions(row["positions"], length, "positions")
-    )
-    valid = _positions(row["valid_positions"], length, "valid_positions")
-    if members is not None and not set(valid).issubset(members):
-        raise ValueError("valid_positions must be restricted to EU members")
-    if not isinstance(row["labels_available"], bool):
-        raise TypeError("labels_available must be boolean")
-    raw_pairs = row["positive_pairs"]
-    if not isinstance(raw_pairs, (list, tuple)):
-        raise TypeError("positive_pairs must be a list of [i, j] pairs")
-    pairs = []
-    known = set(valid)
-    for pair in raw_pairs:
-        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
-            raise ValueError(
-                "Each positive_pairs entry must contain exactly two indices"
-            )
-        i, j = _positions(pair, length, "positive_pairs entry")
-        if i not in known or j not in known:
-            raise ValueError("Positive contacts require two valid positions")
-        pairs.append((i, j))
-    if len(set(pairs)) != len(pairs):
-        raise ValueError("Duplicate positive pair within a scoring row")
-    if not row["labels_available"] and (pairs or valid):
-        raise ValueError("Unavailable labels require empty pairs and valid_positions")
-    return ContactUnit(
-        row["id"],
-        row["unit_id"],
-        kind,
-        members,
-        row["labels_available"],
-        tuple(pairs),
-        valid,
-    )
-
-
-def prepare_contact_dataset(
-    dataset: DatasetDict,
+def contact_development_feature_identity(
+    dataset: ContactDataset,
+    tokens: Sequence[ContactTokens],
     *,
-    source: str = "in-memory",
-    revision: str | None = None,
-    edition: int | None = None,
-) -> ContactDataset:
-    """Validate all splits before optionally selecting a test edition."""
-    if not isinstance(dataset, DatasetDict) or set(dataset) != set(SPLITS):
+    weights: str,
+    backbone_config: Mapping[str, Any],
+    tf32: bool,
+    matmul_precision: str,
+) -> dict[str, Any]:
+    """Scientific identity of deterministic full-chain development features."""
+    chains = [*dataset.splits["train"], *dataset.splits["validation"]]
+    if len(tokens) != len(chains):
         raise ValueError(
-            "Contact data requires fixed train, validation and test splits"
+            "Development feature identity requires one token row per chain"
         )
-    if edition is not None and (
-        isinstance(edition, bool)
-        or not isinstance(edition, Integral)
-        or edition not in (14, 15, 16)
-    ):
-        raise ValueError("edition must be 14, 15 or 16")
-    splits: dict[str, tuple[ContactChain, ...]] = {}
-    seen_rows: set[str] = set()
-    seen_chains: set[str] = set()
-    digest = hashlib.sha256(SCHEMA_VERSION.encode())
-    metadata = ("sequence", "source", "edition", "complex_id", "target")
-    for split in SPLITS:
-        missing = REQUIRED_COLUMNS - set(dataset[split].column_names)
-        if missing:
-            raise ValueError(f"{split}: missing contact columns {sorted(missing)}")
-        grouped: dict[str, list[dict[str, Any]]] = {}
-        for row in dataset[split]:
-            for name in ("id", "record_id", "unit_id", "source"):
-                if not isinstance(row[name], str) or not row[name]:
-                    raise ValueError(f"{name} must be a nonempty string")
-            if row["split"] != split:
-                raise ValueError(
-                    f"{row['id']}: split column differs from dataset split"
-                )
-            if row["id"] in seen_rows:
-                raise ValueError(f"Duplicate scoring id: {row['id']}")
-            seen_rows.add(row["id"])
-            if split == "test":
-                if (
-                    row["source"] != "casp"
-                    or isinstance(row["edition"], bool)
-                    or row["edition"] not in (14, 15, 16)
-                    or not isinstance(row["edition"], Integral)
-                    or any(
-                        not isinstance(row[name], str) or not row[name]
-                        for name in ("complex_id", "target")
-                    )
-                ):
-                    raise ValueError(f"{row['id']}: invalid CASP metadata")
-            elif row["source"] != "trrosetta" or any(
-                row[name] is not None for name in ("edition", "complex_id", "target")
-            ):
-                raise ValueError(f"{row['id']}: invalid development metadata")
-            grouped.setdefault(row["record_id"], []).append(row)
-        chains = []
-        for record_id, rows in grouped.items():
-            if record_id in seen_chains:
-                raise ValueError(f"Chain appears in multiple splits: {record_id}")
-            seen_chains.add(record_id)
-            first = rows[0]
-            alignment = align_contact_sequence(first["sequence"])
-            if any(row[key] != first[key] for row in rows for key in metadata):
-                raise ValueError(
-                    f"{record_id}: inconsistent sequence or chain metadata"
-                )
-            units = tuple(_unit(row) for row in rows)
-            if sum(unit.kind == "global" for unit in units) != 1:
-                raise ValueError(f"{record_id}: expected exactly one global row")
-            if split != "test" and len(units) != 1:
-                raise ValueError("Development structures must have one global row only")
-            if split == "test" and edition is not None and first["edition"] != edition:
-                continue
-            for row in rows:
-                content = {key: row[key] for key in sorted(REQUIRED_COLUMNS)}
-                digest.update(json.dumps(content, separators=(",", ":")).encode())
-                digest.update(b"\n")
-            chains.append(
-                ContactChain(
-                    record_id,
-                    split,
-                    first["source"],
-                    first["edition"],
-                    first["complex_id"],
-                    first["target"],
-                    alignment,
-                    units,
-                )
+    return {
+        "extraction": "casp-final-embeddings-v1",
+        "weights": weights,
+        "backbone_config": dict(backbone_config),
+        "dtype": "float32",
+        "tf32": tf32,
+        "matmul_precision": matmul_precision,
+        "chains": [
+            (
+                chain.split,
+                chain.record_id,
+                chain.alignment.sequence,
+                token.input_ids,
+                token.position_ids,
+                token.residue_token_indices,
             )
-        splits[split] = tuple(chains)
-    return ContactDataset(splits, digest.hexdigest(), source, revision)
+            for chain, token in zip(chains, tokens)
+        ],
+    }
 
 
-@dataclass(frozen=True)
-class CandidatePairs:
-    i: np.ndarray
-    j: np.ndarray
-    original_i: np.ndarray
-    original_j: np.ndarray
-    labels: np.ndarray
-    length: int
+def contact_development_attention_fingerprint(
+    dataset: ContactDataset,
+    tokens: Sequence[ContactTokens],
+    *,
+    weights: str,
+    backbone_config: Mapping[str, Any],
+    tf32: bool,
+    matmul_precision: str,
+) -> str:
+    """Fingerprint train-only attention inputs without retaining attention maps."""
 
-
-def candidate_pairs(
-    unit: ContactUnit, alignment: ContactAlignment, minsep: int = 6
-) -> CandidatePairs:
-    """Shared training/scoring candidates, without combining different EU maps."""
-    if isinstance(minsep, bool) or not isinstance(minsep, int) or minsep < 1:
-        raise ValueError("minsep must be a positive integer")
-    retained = np.asarray(alignment.retained_positions, dtype=np.int64)
-    length = (
-        len(retained)
-        if unit.positions is None
-        else int(np.isin(retained, unit.positions).sum())
-    )
-    inverse = np.asarray(alignment.original_to_retained, dtype=np.int64)
-    valid = np.asarray(unit.valid_positions, dtype=np.int64)
-    valid = valid[inverse[valid] >= 0]
-    a, b = np.triu_indices(len(valid), 1)
-    original_i, original_j = valid[a], valid[b]
-    separated = original_j - original_i >= minsep
-    original_i, original_j = original_i[separated], original_j[separated]
-    codes = original_i * len(alignment.sequence) + original_j
-    positives = np.asarray(unit.positive_pairs, dtype=np.int64).reshape(-1, 2)
-    positive_codes = positives[:, 0] * len(alignment.sequence) + positives[:, 1]
-    return CandidatePairs(
-        inverse[original_i],
-        inverse[original_j],
-        original_i,
-        original_j,
-        np.isin(codes, positive_codes).astype(np.int8),
-        length,
-    )
-
-
-# Loss/metric ignore index for padding and (unscored) short-range pairs.
-IGNORE_INDEX = -100
+    training = dataset.splits["train"]
+    if len(tokens) != len(training):
+        raise ValueError("Attention identity requires one token row per training chain")
+    identity = {
+        "protocol": ATTENTION_PROTOCOL,
+        "dataset_fingerprint": dataset.fingerprint,
+        "weights": weights,
+        "backbone_config": dict(backbone_config),
+        "precision": "float32",
+        "tf32": tf32,
+        "matmul_precision": matmul_precision,
+        "chains": [
+            (
+                chain.record_id,
+                chain.alignment.sequence,
+                token.input_ids,
+                token.position_ids,
+                token.residue_token_indices,
+            )
+            for chain, token in zip(training, tokens)
+        ],
+    }
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
 @register_task
-class ContactPredictionTask(TaskHandler):
+class ContactPredictionTask(StructuredTask):
     """Fixed-split CASP contact prediction, alignment and scoring."""
 
     name = "contact_prediction"
+    supports_packing = False
+    fixed_protocol = True
+    supported_head_types = frozenset(
+        {"bilinear512", "attention_l1", "categorical_jacobian"}
+    )
+    supported_controls = frozenset({"random_trunk"})
+    uses_predictor_identity = True
     is_ragged = True
     pairwise = True
     aligns_labels = True
@@ -386,6 +180,412 @@ class ContactPredictionTask(TaskHandler):
         *contact_metrics.RANGE_AUC_METRICS,
     )
 
+    def prepare_inputs(
+        self,
+        *,
+        inputs: EvaluationWorkspaceConfig,
+        config: PrepareConfig,
+        device: torch.device,
+        dataset: DatasetDict | None = None,
+        predictor: str | None = None,
+    ) -> PreparedArtifacts:
+
+        source = inputs.dataset_repo_id
+        model_id = inputs.model_repo_id
+        if source is None or model_id is None:
+            raise ValueError(
+                "Contact prediction requires dataset_repo_id and model_repo_id"
+            )
+        if predictor is None:
+            raise ValueError("Contact prediction requires a configured predictor.")
+        if dataset is None:
+            contacts = load_contact_dataset(
+                source,
+                revision=inputs.dataset_revision,
+                edition=inputs.edition,
+            )
+        else:
+            contacts = prepare_contact_dataset(
+                dataset,
+                source=source,
+                revision=inputs.dataset_revision,
+                edition=inputs.edition,
+            )
+        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        model = build_contact_model(
+            model_id,
+            predictor=predictor,
+            tokenizer=tokenizer,
+        ).to(device)
+        return PreparedArtifacts(
+            model=model,
+            tokenizer=tokenizer,
+            train_dataloader=None,
+            val_dataloader=None,
+            test_dataloader=None,
+            contact=ContactArtifacts(dataset=contacts),
+        )
+
+    def validate_pipeline(
+        self,
+        config: EvaluationConfig,
+        *,
+        workspace_seed: int | None,
+        num_processes: int,
+    ) -> None:
+        if num_processes != 1:
+            raise ValueError(
+                "Contact embeddings require a single-process fixed-split run"
+            )
+        if workspace_seed != config.seed:
+            raise ValueError(
+                "Contact workspace must be created with the configured seed"
+            )
+
+    def validate_config(self, config: EvaluationConfig) -> None:
+        """Guard unsupported execution capabilities and ineffective overrides."""
+        steps = config.steps
+        tune = steps.tune
+        self.validate_dataset_config(
+            config.workspace.target_type,
+            config.workspace.label_format,
+            config.workspace.dataset_name,
+        )
+        if (
+            config.external_test_sets
+            or steps.layerwise.enabled
+            or config.baselines.names
+            or steps.predict.baselines
+        ):
+            raise ValueError(
+                "Contact prediction requires fixed CASP splits, without generic external tests/layers/baselines"
+            )
+        if steps.prepare.packed or steps.prepare.split.model_dump() != {
+            "name": "default",
+            "train": "train",
+            "validation": "validation",
+            "test": "test",
+            "refit_additional_splits": [],
+        }:
+            raise ValueError(
+                "Contact prediction requires unchanged fixed splits and unpadded full chains"
+            )
+        unsupported_controls = (
+            set[str](steps.predict.controls) - self.supported_controls
+        )
+        if unsupported_controls:
+            raise ValueError(
+                "Contact prediction supports only the random_trunk control; "
+                f"got {sorted(unsupported_controls)}"
+            )
+        if steps.predict.collect_probabilities:
+            raise ValueError("CASP contact prediction does not collect probabilities")
+        if steps.score.bootstrap_enabled:
+            raise ValueError("Contact bootstrap requires complex-level resampling")
+        if steps.score.metrics is not None and set(steps.score.metrics) != set(
+            contact_metrics.CASP_METRICS
+        ):
+            raise ValueError("Contact prediction reports fixed CASP metrics")
+
+        predictor = tune.head.head_type
+        self.validate_head(predictor)
+        expected_mode = (
+            "evaluate_as_is" if predictor == "categorical_jacobian" else "tune_probe"
+        )
+        if steps.mode != expected_mode:
+            raise ValueError(
+                f"Contact predictor '{predictor}' requires steps.mode='{expected_mode}'"
+            )
+        if steps.prepare.embedding_cache.enabled:
+            raise ValueError(
+                "Contact predictors do not use the generic pooled embedding cache"
+            )
+        if (
+            tune.hyperparameter_search.enabled
+            or tune.refit_on_train_validation
+            or tune.variance_seeds
+            or tune.head.hyperparameters
+            or tune.head.search_space
+            or config.workspace.model_kwargs
+        ):
+            raise ValueError(
+                "Contact predictors use fixed protocols without HPO, refit, "
+                "seed sweeps or head/model overrides"
+            )
+        if predictor != "categorical_jacobian" and tune.standardize_features:
+            raise ValueError("Contact predictors do not standardize features")
+        if predictor == "bilinear512":
+            supplied = tune.model_dump()
+            conflicts = [
+                name
+                for name, value in asdict(BILINEAR_PROTOCOL).items()
+                if supplied[name] != value
+            ]
+            if conflicts:
+                raise ValueError(
+                    "The bilinear512 protocol fixes these settings: "
+                    f"{', '.join(conflicts)}. Only max_epochs is a fitting override."
+                )
+            if tune.optimizer_kwargs or tune.scheduler_kwargs:
+                raise ValueError(
+                    "The bilinear512 protocol has no optimizer/scheduler overrides"
+                )
+            if tune.max_epochs <= BILINEAR_PROTOCOL.early_stopping_patience:
+                raise ValueError(
+                    "Contact epoch limit must allow validation patience 10"
+                )
+
+    def feature_requests(
+        self, prepared: PreparedArtifacts
+    ) -> dict[str, FeatureRequest]:
+
+        model, tokenizer = prepared.model, prepared.tokenizer
+        if not isinstance(model, ContactPredictionModel):
+            return {}
+        if prepared.contact is None or tokenizer is None:
+            raise ValueError("Contact fitting features require data and a tokenizer.")
+        dataset = prepared.contact.dataset
+        chains = [*dataset.splits["train"], *dataset.splits["validation"]]
+        tokens = [tokenize_contact_chain(chain, tokenizer) for chain in chains]
+        identity = contact_development_feature_identity(
+            dataset,
+            tokens,
+            weights=weights_fingerprint(model.trunk),
+            backbone_config=json.loads(model.trunk.config.to_json_string()),
+            tf32=torch.backends.cuda.matmul.allow_tf32,
+            matmul_precision=torch.get_float32_matmul_precision(),
+        )
+
+        def extract() -> dict[str, torch.Tensor]:
+            return {
+                str(index): model.extract(chain, tokenizer)
+                for index, chain in enumerate(chains)
+            }
+
+        return {
+            "development": FeatureRequest(
+                namespace="contact-development",
+                identity=identity,
+                extract=extract,
+                shapes={
+                    str(index): (
+                        len(chain.alignment.clean_sequence),
+                        model.head.left.in_features,
+                    )
+                    for index, chain in enumerate(chains)
+                },
+            )
+        }
+
+    def fitting_identity(self, prepared: PreparedArtifacts) -> dict[str, Any]:
+
+        model = prepared.model
+        if prepared.contact is None or prepared.tokenizer is None:
+            raise ValueError("Contact fitting identity requires data and a tokenizer.")
+        dataset = prepared.contact.dataset
+        if isinstance(model, ContactPredictionModel):
+            key = prepared.features["development"].fingerprint
+            protocol = PROTOCOL_VERSION
+        elif isinstance(model, ContactAttentionModel):
+            key = contact_development_attention_fingerprint(
+                dataset,
+                [
+                    tokenize_contact_chain(chain, prepared.tokenizer)
+                    for chain in dataset.splits["train"]
+                ],
+                weights=weights_fingerprint(model.trunk),
+                backbone_config=json.loads(model.trunk.config.to_json_string()),
+                tf32=torch.backends.cuda.matmul.allow_tf32,
+                matmul_precision=torch.get_float32_matmul_precision(),
+            )
+            protocol = ATTENTION_PROTOCOL
+        else:
+            return {}
+        return {
+            "dataset_fingerprint": dataset.fingerprint,
+            "development_features": key,
+            "protocol": protocol,
+        }
+
+    def fit(
+        self,
+        prepared: PreparedArtifacts,
+        config: TuneConfig,
+        inputs: EvaluationWorkspaceConfig,
+        accelerator: Accelerator,
+        *,
+        seed: int,
+        mode: Literal["tune_probe", "finetune"] = "tune_probe",
+    ) -> FitResult:
+
+        if prepared.contact is None or prepared.tokenizer is None:
+            raise ValueError("Contact fitting requires data and a tokenizer.")
+        model, tokenizer, dataset = (
+            prepared.model,
+            prepared.tokenizer,
+            prepared.contact.dataset,
+        )
+        if isinstance(model, ContactJacobianModel):
+            return FitResult(
+                model=model,
+                seed=seed,
+                checkpoint_settings={"fitting": "zero_shot"},
+                statistics={"contact_training.json": {"fitting": "zero_shot"}},
+                serialization="local",
+            )
+        if isinstance(model, ContactAttentionModel):
+            settings = dict(
+                fit_contact_attention_head(model, dataset, tokenizer, seed=seed)
+            )
+        elif isinstance(model, ContactPredictionModel):
+            if "development" not in prepared.features:
+                raise ValueError(
+                    "Contact development features must be prepared before fitting."
+                )
+            development = prepared.features["development"]
+            chains = [*dataset.splits["train"], *dataset.splits["validation"]]
+            features = {
+                chain.record_id: development.values[str(index)]
+                for index, chain in enumerate(chains)
+            }
+            settings = dict(
+                fit_contact_head(
+                    model,
+                    dataset,
+                    features,
+                    seed=seed,
+                    max_epochs=config.max_epochs,
+                    device=accelerator.device,
+                )
+            )
+        else:
+            raise TypeError("Unsupported contact predictor.")
+        return FitResult(
+            model=model,
+            seed=seed,
+            input_identity=prepared.input_identity,
+            statistics={"contact_training.json": settings},
+            checkpoint_settings=settings,
+            serialization="local",
+        )
+
+    def independent_controls(
+        self,
+        prepared: PreparedArtifacts,
+        controls: Sequence[str],
+        *,
+        seed: int,
+        device: torch.device,
+    ) -> dict[str, ControlInputs]:
+
+        if "random_trunk" not in controls:
+            return {}
+        model = prepared.model
+        if not isinstance(
+            model, (ContactPredictionModel, ContactAttentionModel, ContactJacobianModel)
+        ):
+            raise TypeError("Contact controls require a contact predictor.")
+        trunk_seed = contact_random_trunk_seed(seed, "trunk")
+        head_seed = contact_random_trunk_seed(seed, "head")
+        trunk = build_random_trunk(model.trunk, trunk_seed)
+        if isinstance(model, ContactJacobianModel):
+            random_model = ContactJacobianModel(
+                trunk,
+                prepared.tokenizer,
+                mutant_batch_size=model.mutant_batch_size,
+            ).to(device)
+        else:
+            devices = [device.index or 0] if device.type == "cuda" else []
+            with torch.random.fork_rng(devices=devices):
+                torch.manual_seed(head_seed)
+                random_model = type(model)(trunk).to(device)
+        return {
+            "random_trunk": ControlInputs(
+                model=random_model,
+                seed=head_seed,
+                serialization_model=trunk
+                if isinstance(model, ContactJacobianModel)
+                else random_model,
+                metadata={
+                    "control": "random_trunk",
+                    "protocol": "contact-random-trunk-v1",
+                    "trunk_initialization": "random_from_config",
+                    "trunk_seed": trunk_seed,
+                    "head_seed": None
+                    if isinstance(model, ContactJacobianModel)
+                    else head_seed,
+                },
+            )
+        }
+
+    def control_settings(
+        self, inputs: ControlInputs, result: FitResult
+    ) -> dict[str, Any]:
+
+        return {
+            **inputs.metadata,
+            "development_features": result.input_identity.get("development_features")
+            if isinstance(inputs.model, ContactPredictionModel)
+            else None,
+            "fit": result.checkpoint_settings,
+        }
+
+    def prediction_metadata(self, values: Mapping[str, Any]) -> EvaluationMetadata:
+
+        return ContactEvaluationMetadata.model_validate(values)
+
+    def predict(
+        self,
+        prepared: PreparedArtifacts,
+        metadata: EvaluationMetadata,
+        config: PredictConfig,
+    ) -> PredictOutput:
+        if prepared.contact is None:
+            raise TypeError("Contact observations require contact data.")
+        unsupported = set[str](config.controls) - self.supported_controls
+        if unsupported:
+            raise ValueError(
+                f"CASP contact prediction only supports random_trunk; got {sorted(unsupported)}"
+            )
+        if config.collect_probabilities:
+            raise ValueError(
+                "CASP contacts consume pair scores, not class probabilities"
+            )
+        for name in config.controls:
+            if name not in prepared.controls.independent_models:
+                raise ValueError(
+                    f"{name} was requested but no fitted contact control is available"
+                )
+        output = self.predict_units(
+            prepared.contact.dataset,
+            lambda chain: prepared.model.predict(chain, prepared.tokenizer),
+            metadata,
+        )
+        for name in config.controls:
+            control = prepared.controls.independent_models[name]
+            output.controls[name] = self.predict_units(
+                prepared.contact.dataset,
+                lambda chain: control.predict(chain, prepared.tokenizer),
+                metadata,
+            ).predictions
+        output.requested_controls = list(config.controls)
+        return output
+
+    def score(
+        self,
+        predictions: PredictOutput,
+        config: ScoreConfig,
+        *,
+        seed: int = 710019,
+    ) -> ContactScoreOutput:
+        if config.bootstrap_enabled:
+            raise ValueError("CASP bootstrap must resample complexes, not flat rows")
+        if config.metrics is not None and set(config.metrics) != set(
+            contact_metrics.CASP_METRICS
+        ):
+            raise ValueError("Contact scoring reports the fixed CASP metrics")
+        return self.score_units(predictions)
+
     def default_metrics(self) -> list[str]:
         if self.name == "contact_prediction":
             return list(contact_metrics.CASP_METRICS)
@@ -398,37 +598,6 @@ class ContactPredictionTask(TaskHandler):
         if unknown:
             raise KeyError(f"Unknown CASP contact metrics: {sorted(unknown)}")
 
-    def compute_metrics(
-        self,
-        predictions: Sequence,
-        labels: Sequence,
-        metric_names: Sequence[str],
-        average: str = "weighted",
-        probabilities: Sequence | None = None,
-    ) -> dict[str, float]:
-        if self.name == "contact_prediction":
-            raise ValueError(
-                "Use score_units: CASP aggregation requires unit, chain and complex identities"
-            )
-        return super().compute_metrics(
-            predictions, labels, metric_names, average, probabilities
-        )
-
-    def prepare_dataset(
-        self,
-        path_or_repo: str | Path,
-        *,
-        revision: str | None = None,
-        edition: int | None = None,
-        cache_dir: str | Path | None = None,
-    ) -> ContactDataset:
-        """Load fixed HF scoring rows, without generic cropping or split synthesis."""
-        from modules.evaluate.src.dataset.dataloader import load_contact_dataset
-
-        return load_contact_dataset(
-            path_or_repo, revision=revision, edition=edition, cache_dir=cache_dir
-        )
-
     def predict_units(
         self,
         dataset: ContactDataset,
@@ -438,11 +607,7 @@ class ContactPredictionTask(TaskHandler):
         split: str = "test",
     ) -> PredictOutput:
         """Coordinate full-chain extraction and preserve every unit's identity."""
-        from modules.evaluate.src.schemas.artifacts import (
-            ContactEvaluationMetadata,
-            PredictOutput,
-        )
-        from modules.evaluate.src.utils.inference import run_contact_inference
+        from modules.evaluate.src.model.inference import run_contact_inference
 
         if metadata.seed is None:
             raise ValueError("Contact predictions require an explicit run seed")
@@ -491,10 +656,6 @@ class ContactPredictionTask(TaskHandler):
 
     def score_units(self, predictions: PredictOutput) -> ContactScoreOutput:
         """Score all CASP settings, then aggregate EUs, chains and complexes."""
-        from modules.evaluate.src.schemas.artifacts import (
-            ContactEvaluationMetadata,
-            ContactScoreOutput,
-        )
 
         metadata = predictions.metadata
         if (
@@ -711,6 +872,22 @@ class ContactPredictionTask(TaskHandler):
             label_row = {"length": length, "values": values}
             rows.append((pred_row, label_row))
         return rows
+
+    def split_batch_rows_with_context(
+        self,
+        predictions: torch.Tensor,
+        labels: torch.Tensor,
+        *,
+        batch_metadata: Mapping[str, Any] | None = None,
+    ) -> list[tuple[Any, Any]]:
+        residue_lengths = (
+            batch_metadata.get("residue_lengths")
+            if batch_metadata is not None
+            else None
+        )
+        return self.split_batch_rows(
+            predictions, labels, residue_lengths=residue_lengths
+        )
 
     def flatten_for_metrics(self, values: list[Any]) -> list[Any]:
         # Precision-at-L needs each sequence's own top-scored candidates and

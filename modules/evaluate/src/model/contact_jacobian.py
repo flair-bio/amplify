@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -13,11 +11,11 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import AutoModelForMaskedLM, PreTrainedTokenizerBase
 
-from modules.evaluate.src.model.contact_model import contact_positions
+from modules.evaluate.src.model.adapters import contact_positions, masked_lm_logits
 from modules.evaluate.src.utils.amino_acids import resolve_aa_token_ids
 
 if TYPE_CHECKING:
-    from modules.evaluate.src.tasks.contact_prediction import ContactChain
+    from modules.evaluate.src.dataset.contact import ContactChain
 
 logger = logging.getLogger(__name__)
 
@@ -74,29 +72,6 @@ def _canonical_log_probabilities(
     return F.log_softmax(logits[:, residue_ids].float(), dim=-1)[:, :, aa_token_ids]
 
 
-@contextmanager
-def _jacobian_precision(model: nn.Module, device: torch.device) -> Iterator[None]:
-    """Autocast trunk inference on CUDA while keeping the MLM head in FP32."""
-    head = getattr(model, "lm_head", None)
-    if head is None:
-        head = getattr(model, "decoder", None)
-    native_forward = getattr(head, "forward", None)
-    use_cuda = device.type == "cuda"
-    if use_cuda and head is not None and native_forward is not None:
-
-        def full_precision_head(values: torch.Tensor) -> Any:
-            with torch.autocast("cuda", enabled=False):
-                return native_forward(values.float())
-
-        head.forward = full_precision_head
-    try:
-        with torch.autocast("cuda", dtype=torch.float16, enabled=use_cuda):
-            yield
-    finally:
-        if use_cuda and head is not None and native_forward is not None:
-            head.forward = native_forward
-
-
 class ContactJacobianModel(nn.Module):
     """Frozen masked-LM wrapper producing full-chain contact score matrices."""
 
@@ -122,7 +97,7 @@ class ContactJacobianModel(nn.Module):
     def predict(
         self, chain: ContactChain, tokenizer: PreTrainedTokenizerBase
     ) -> torch.Tensor:
-        from modules.evaluate.src.tasks.contact_prediction import tokenize_contact_chain
+        from modules.evaluate.src.dataset.contact import tokenize_contact_chain
 
         tokens = tokenize_contact_chain(chain, tokenizer)
         device = next(self.trunk.parameters()).device
@@ -162,15 +137,13 @@ class ContactJacobianModel(nn.Module):
             ) from error
 
         def log_probabilities(batch: dict[str, torch.Tensor]) -> torch.Tensor:
-            output = self.trunk(**batch)
-            logits = output.logits if hasattr(output, "logits") else output[0]
+            logits = masked_lm_logits(self.trunk, batch)
             return _canonical_log_probabilities(logits, residue_ids, self.aa_token_ids)
 
         self.trunk.eval()
         with (
             torch.inference_mode(),
             contact_positions(self.trunk, position_ids),
-            _jacobian_precision(self.trunk, device),
         ):
             baseline = log_probabilities(inputs)
             batch_size = self.mutant_batch_size

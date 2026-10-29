@@ -13,7 +13,7 @@ reference. The guides below cover datasets and dataset-specific workflows.
 | Source or score ProteinGym assays | [ProteinGym](proteingym.md) |
 
 Dataset overlays live in [`configs/datasets/`](../configs/datasets/); sourcing
-configs live in [`configs/dataset_sourcing/`](../configs/dataset_sourcing/).
+configs live in [`scripts/dataset_sourcing/configs/`](../scripts/dataset_sourcing/configs/).
 
 ## Common questions
 
@@ -26,7 +26,7 @@ configs live in [`configs/dataset_sourcing/`](../configs/dataset_sourcing/).
 | Where are my results, and how do I compare models? | [Output disk layout](../README.md#output-disk-layout), [Reading results](../README.md#reading-results) |
 | Did the model learn anything beyond a baseline? | [Interpreting controls](controls.md#interpreting-results) |
 | Which layer carries the signal? | [Layerwise linear probes](../README.md#layerwise-linear-probes) |
-| Why did one run overwrite another? | [Output disk layout](../README.md#output-disk-layout): seeds and hyperparameters are not part of the run path |
+| Why did one run overwrite another? | [Output disk layout](../README.md#output-disk-layout): seeds and variants are isolated; replacing an existing run requires `--overwrite` |
 | How do I add a dataset? | [Adding a new source](dataset-sourcing.md#adding-a-new-source), then a [dataset overlay](../README.md#new-dataset-task-or-model-overlay) |
 | How do I add a task type? | [Adding a task type](../README.md#adding-a-task-type) |
 | My run failed or hung | [Troubleshooting](../README.md#troubleshooting), [sourcing gotchas](dataset-sourcing.md#gotchas) |

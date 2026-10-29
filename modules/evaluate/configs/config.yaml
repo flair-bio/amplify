@@ -27,15 +27,6 @@ wandb:
   run_name: null
   tags: []
 
-cross_validation:
-  enabled: false # outer K-fold over the pool; tune_probe scalar sequence tasks only (see README)
-  n_splits: 5
-  strategy: stratified_kfold # kfold, stratified_kfold, group_kfold, or stratified_group_kfold
-  group_column: null # required for group strategies, e.g. sequence_cluster_id
-  pool_roles: [train, validation] # source development splits; the official test split is never pooled
-  split_seed: 710019 # fold randomness, independent of the training seed
-  inner_validation_fraction: 0.1 # per-fold inner validation holdout, in (0, 0.5]
-
 steps:
   mode: tune_probe # tune_probe, finetune, or evaluate_as_is
   layerwise:
@@ -123,7 +114,8 @@ steps:
     collect_probabilities: false # auto-enabled when effective metrics need probabilities, e.g. roc_auc or multilabel average_precision
     predictions_filename: predictions.parquet
     store_sequences: false # include decoded input sequences in main predictions parquet (larger output)
-    controls: [random_trunk] # model controls; token majority_class/contact separation_prior remain per-model
+    controls: [random_trunk] # model/input/label ablations only
+    baselines: [] # inline token majority_class; sequence baselines use top-level baselines.names
   score:
     metrics: null # task overlays declare reported metrics explicitly
     metric_aggregation: macro # one of micro, macro, weighted, samples

@@ -4,19 +4,16 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from torch import nn
+from transformers import EsmForMaskedLM
 
-from modules.evaluate.src.model.contact_jacobian import (
-    ContactJacobianModel,
-    _canonical_log_probabilities,
-    jacobian_to_contacts,
-)
-from modules.evaluate.src.tasks.contact_prediction import (
-    ContactChain,
-    align_contact_sequence,
-)
+from modules.evaluate.src.model.adapters import masked_lm_logits
+from modules.evaluate.src.model.contact_jacobian import ContactJacobianModel, _canonical_log_probabilities, jacobian_to_contacts
+from modules.evaluate.src.dataset.contact import ContactChain, align_contact_sequence
 from modules.evaluate.src.utils.amino_acids import CANONICAL_AMINO_ACIDS
+from modules.pretrain.src.model.modeling_amplify import AMPLIFYForMaskedLM
 
 
 class _Tokenizer:
@@ -39,6 +36,37 @@ class _Tokenizer:
 
     def convert_tokens_to_ids(self, tokens: list[str]) -> list[int]:
         return [self.ids[token] for token in tokens]
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_masked_lm_composition_preserves_logits_and_head_method(model_family, device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    kwargs = dict(model_family.config_kwargs)
+    config_cls = kwargs.pop("config_cls")
+    model_cls = (
+        AMPLIFYForMaskedLM if model_family.name == "amplify-120m" else EsmForMaskedLM
+    )
+    model = model_cls(config_cls(**kwargs)).to(device).eval()
+    inputs = model_family.tokenizer("ACDEFGH", return_tensors="pt").to(device)
+    original_forward = model.lm_head.forward.__func__
+    head_dtypes = []
+    hook = model.lm_head.register_forward_pre_hook(
+        lambda module, args: head_dtypes.append(args[0].dtype)
+    )
+    with torch.no_grad():
+        expected = model(**inputs).logits
+        actual = masked_lm_logits(model, inputs)
+    hook.remove()
+    torch.testing.assert_close(
+        actual,
+        expected,
+        rtol=2e-2 if device == "cuda" else 1e-5,
+        atol=1e-3 if device == "cuda" else 1e-7,
+    )
+    assert head_dtypes == [torch.float32, torch.float32]
+    assert model.lm_head.forward.__func__ is original_forward
+    assert "forward" not in model.lm_head.__dict__
 
 
 class _ToyMaskedLM(nn.Module):

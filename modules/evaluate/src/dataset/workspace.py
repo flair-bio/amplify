@@ -9,11 +9,14 @@ import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
-from modules.evaluate.src.tasks import TaskType, available_tasks
+from modules.evaluate.src.contracts.config import (
+    DatasetWorkspaceConfig,
+    EvaluationWorkspaceConfig,
+    validate_directory_label,
+)
+from modules.evaluate.src.tasks import TaskType
 from modules.evaluate.src.utils.io import update_run_manifest, write_json
 
 __all__ = [
@@ -23,97 +26,6 @@ __all__ = [
     "TaskType",
     "get_evaluation_workspace",
 ]
-
-
-class DatasetWorkspaceConfig(BaseModel):
-    """Dataset/task settings shared by model and baseline runs."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    dataset_name: str  # dataset name that serves as a mnemonic for the dataset being evaluated, e.g. "stability_prediction"
-    dataset_repo_id: str | None = (
-        None  # path to HuggingFace dataset repo e.g. biomap-research/stability_prediction
-    )
-    dataset_revision: str | None = None
-    edition: Literal[14, 15, 16] | None = None
-    task_type: TaskType
-    default_task_type: TaskType | None = None  # dataset default evaluation method
-    target_type: Literal["categorical", "continuous"]
-    label_format: Literal[
-        "scalar", "per_token", "multilabel", "contact_pairs", "consensus_profile"
-    ]
-    num_labels: int | None = (
-        None  # number of classes for *_classification tasks; unused (forced to 1) for sequence_regression
-    )
-    base_path: str = "./eval"  # base path where the EvaluationWorkspace is stored
-    output_dir: Path | None = None
-
-    @field_validator("dataset_name")
-    @classmethod
-    def _validate_dataset_label(cls, value: str) -> str:
-        return validate_directory_label(value)
-
-    @property
-    def benchmark_root(self) -> Path:
-        return self.output_dir if self.output_dir is not None else Path(self.base_path)
-
-    @property
-    def dataset_root(self) -> Path:
-        return self.benchmark_root / self.task_type / self.dataset_name
-
-    @field_validator("task_type")
-    @classmethod
-    def _validate_task_type(cls, value: str) -> str:
-        if value not in available_tasks():
-            raise ValueError(
-                f"Unknown task_type '{value}'. Available: {available_tasks()}."
-            )
-        return value
-
-    @field_validator("default_task_type")
-    @classmethod
-    def _validate_default_task_type(cls, value: str | None) -> str | None:
-        if value is not None:
-            cls._validate_task_type(value)
-        return value
-
-    @model_validator(mode="after")
-    def _validate_target_metadata(self) -> DatasetWorkspaceConfig:
-        if self.target_type == "continuous":
-            if self.label_format != "scalar" or self.num_labels is not None:
-                raise ValueError(
-                    "target_type='continuous' requires label_format='scalar' and "
-                    "num_labels=null."
-                )
-        elif self.label_format in {"scalar", "per_token", "multilabel"} and (
-            self.num_labels is None or self.num_labels <= 1
-        ):
-            raise ValueError("Categorical targets require num_labels > 1.")
-        return self
-
-
-class EvaluationWorkspaceConfig(DatasetWorkspaceConfig):
-    """Paths and model settings for one model/dataset evaluation."""
-
-    model_name: str
-    run_id: str
-    model_repo_id: str | None = None
-    model_kwargs: dict[str, Any] = Field(default_factory=dict)
-    tmp_path: str | None = None
-
-    @field_validator("run_id", "model_name")
-    @classmethod
-    def _validate_directory_label(cls, value: str) -> str:
-        return validate_directory_label(value)
-
-
-def validate_directory_label(value: str) -> str:
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
-        raise ValueError(
-            "Output labels must start with a letter or digit and contain "
-            "only letters, digits, '.', '_', or '-'."
-        )
-    return value
 
 
 class EvaluationWorkspace:

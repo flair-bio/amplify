@@ -17,20 +17,15 @@ from transformers import EsmConfig, EsmModel
 
 from modules.evaluate.src import run_evaluate
 from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
-from modules.evaluate.src.model.contact_model import (
-    BilinearHead,
-    ContactPredictionModel,
-    fit_contact_head,
-)
+from modules.evaluate.src.steps.prepare import PrepareStep
+from modules.evaluate.src.model.adapters import contact_positions
+from modules.evaluate.src.model.contact_model import BilinearHead, ContactPredictionModel
 from modules.evaluate.src.runners.pipeline import run_pipeline
+from modules.evaluate.src.contracts.artifacts import ContactArtifacts, PreparedArtifacts
 from modules.evaluate.src.tasks import available_tasks, get_task
-from modules.evaluate.src.tasks.contact_prediction import (
-    candidate_pairs,
-    prepare_contact_dataset,
-    tokenize_contact_chain,
-)
-from modules.evaluate.src.utils.config_loader import load_evaluation_config
-from modules.evaluate.src.utils.embed import contact_development_features
+from modules.evaluate.src.dataset.contact import candidate_pairs, prepare_contact_dataset, tokenize_contact_chain
+from modules.evaluate.src.trainers.contact import fit_contact_head
+from modules.evaluate.src.contracts.config_loader import load_evaluation_config
 from modules.pretrain.src.model.modeling_amplify import register_amplify_auto_classes
 
 from .conftest import build_tiny_model
@@ -107,6 +102,83 @@ def config_for(tmp_path, model_path, seed=13):
     )
 
 
+@pytest.mark.parametrize("predictor", ["attention_l1", "categorical_jacobian"])
+@pytest.mark.parametrize("controls", [[], ["random_trunk"]])
+def test_contact_predictor_pipeline_roundtrip(
+    tmp_path, esm2_tokenizer, predictor, controls
+):
+    from transformers import EsmForMaskedLM
+
+    from modules.evaluate.src.contracts.config import ScoreConfig
+    from modules.evaluate.src.steps.score import ScoreStep
+
+    model_path = tmp_path / "trunk"
+    EsmForMaskedLM(small_trunk().config).save_pretrained(model_path)
+    esm2_tokenizer.save_pretrained(model_path)
+    hf = development_dataset()
+    # Logistic fitting requires both positive and negative training pairs.
+    hf["train"] = Dataset.from_list(
+        [
+            row(f"train-{i}", "train", sequence="ACDEFGHIK", positive_pairs=[[0, 6]])
+            for i in range(20)
+        ],
+        features=FEATURES,
+    )
+    hf["test"] = Dataset.from_list([row(sequence="ACXXDEFGHIK")], features=FEATURES)
+    preset = "contact_attention" if predictor == "attention_l1" else "contact_jacobian"
+    config = load_evaluation_config(
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "datasets/contact_prediction_casp.yaml",
+            CONFIGS / f"predictors/{preset}.yaml",
+        ],
+        overrides=[
+            f"workspace.output_dir={tmp_path / 'output'}",
+            "workspace.model_name=tiny",
+            f"workspace.model_repo_id={model_path}",
+            f"workspace.dataset_repo_id={tmp_path / 'dataset'}",
+            "workspace.run_id=offline",
+            "seed=13",
+            f"steps.predict.controls={json.dumps(controls)}",
+        ],
+    )
+    workspace = get_evaluation_workspace(
+        config.workspace, config.variant, seed=config.seed
+    )
+    result = run_pipeline(config, workspace, Accelerator(cpu=True), dataset=hf)
+    prediction = result.predictions[None]
+    assert prediction.metadata.head_type == predictor
+    assert set(prediction.controls) == set(controls)
+    restored = ScoreStep.load_predict_output(workspace)
+    scored = ScoreStep(ScoreConfig()).run(workspace, predict_result=restored)
+    assert scored.summaries.equals(result.scores[None].summaries)
+    assert set(scored.control_summaries) == set(controls)
+    manifest = json.loads(workspace.run_manifest_path.read_text())
+    assert manifest["predict"]["metadata"]["head_type"] == predictor
+    assert manifest["evaluation"]["status"] == "complete"
+    assert manifest["score"]["scores"] == scored.summaries.to_dicts()
+    assert manifest["score"]["scores_path"] == str(scored.summaries_path)
+    assert manifest["score"]["unit_scores_path"] == str(scored.unit_scores_path)
+    assert set(manifest["score"]["controls"]) == set(controls)
+    assert "bootstrap" not in manifest
+    for name in controls:
+        summary = manifest["score"]["controls"][name]
+        assert summary["scores"] == scored.control_summaries[name].to_dicts()
+        assert summary["scores_path"] == str(scored.control_summaries_paths[name])
+        assert summary["unit_scores_path"] == str(scored.control_unit_scores_paths[name])
+    if predictor == "categorical_jacobian":
+        assert not (workspace.stats_path / "contact_training.json").exists()
+    for name in controls:
+        settings = json.loads(
+            (
+                workspace.control_workspace(name).stats_path / "contact_training.json"
+            ).read_text()
+        )
+        assert settings["trunk_seed"] is not None
+        if predictor == "categorical_jacobian":
+            assert settings["fit"] == {"fitting": "zero_shot"}
+
+
 def test_head_directional_symmetry_and_pair_weighted_gradient():
     head = BilinearHead(3)
     first, second = torch.randn(7, 3), torch.randn(9, 3)
@@ -135,15 +207,33 @@ def test_head_directional_symmetry_and_pair_weighted_gradient():
         torch.testing.assert_close(actual.grad, expected.grad)
 
 
-def test_embedding_task_exposes_only_casp_metrics_and_rejects_flat_scoring():
+def test_embedding_task_exposes_only_casp_metrics_and_structured_scoring():
     task = get_task("contact_prediction")
     assert "contact_prediction_embedding" not in available_tasks()
     assert task.default_metrics() == ["AUC", "P@L", "P@L/2", "P@L/5", "ROC-AUC"]
     task.validate_metric_names(task.default_metrics())
     with pytest.raises(KeyError):
         task.validate_metric_names(["contact_auc_long"])
-    with pytest.raises(ValueError, match="Use score_units"):
-        task.compute_metrics([], [], task.default_metrics())
+    from modules.evaluate.src.tasks.base import StructuredTask
+    from modules.evaluate.src.tasks.registry import get_flat_task
+
+    assert isinstance(task, StructuredTask)
+    assert not hasattr(task, "compute_metrics")
+    with pytest.raises(TypeError, match="requires structured scoring"):
+        get_flat_task("contact_prediction")
+
+
+def test_prepared_contact_state_rejects_generic_loaders():
+    dataset = prepare_contact_dataset(hf_data([row()]))
+    with pytest.raises(ValueError, match="cannot be combined"):
+        PreparedArtifacts(
+            model=ContactPredictionModel(small_trunk()),
+            tokenizer=None,
+            train_dataloader=None,
+            val_dataloader=None,
+            test_dataloader=torch.utils.data.DataLoader([1]),
+            contact=ContactArtifacts(dataset=dataset),
+        )
 
 
 def test_extraction_native_parity_gaps_growth_and_freezing(model_family):
@@ -153,7 +243,8 @@ def test_extraction_native_parity_gaps_growth_and_freezing(model_family):
     tokenizer = model_family.tokenizer
     extracted = model.extract(chain, tokenizer)
     tokens = tokenizer(chain.alignment.clean_sequence, return_tensors="pt")
-    with torch.no_grad():
+    positions = torch.arange(tokens["input_ids"].shape[1]).unsqueeze(0)
+    with torch.no_grad(), contact_positions(model.trunk, positions):
         expected = model.trunk(**tokens).last_hidden_state[0, 1:-1]
     torch.testing.assert_close(extracted, expected)
     assert not any(parameter.requires_grad for parameter in model.trunk.parameters())
@@ -186,6 +277,30 @@ def test_extraction_native_parity_gaps_growth_and_freezing(model_family):
     assert model.extract(longest, tokenizer).shape == (3364, 16)
 
 
+def test_positional_adapter_restores_tables_after_exception(model_family):
+    trunk = family_trunk(model_family)
+    saved = {
+        (id(module), name): value
+        for module in trunk.modules()
+        for name in (
+            "rope_cos",
+            "rope_sin",
+            "max_position_embeddings",
+            "_cos_cached",
+            "_sin_cached",
+            "_seq_len_cached",
+        )
+        if (value := getattr(module, name, None)) is not None
+    }
+    with pytest.raises(RuntimeError, match="failed forward"):
+        with contact_positions(trunk, torch.arange(20).unsqueeze(0)):
+            raise RuntimeError("failed forward")
+    for module in trunk.modules():
+        for (identity, name), value in saved.items():
+            if identity == id(module):
+                assert getattr(module, name) is value
+
+
 def test_fixed_fit_determinism_decay_patience_restoration_and_cap(monkeypatch, caplog):
     dataset = prepare_contact_dataset(development_dataset())
     model = ContactPredictionModel(small_trunk())
@@ -210,6 +325,7 @@ def test_fixed_fit_determinism_decay_patience_restoration_and_cap(monkeypatch, c
         model, dataset, features, seed=88, max_epochs=12, device=torch.device("cpu")
     )
     assert settings["best_epoch"] == 1 and len(settings["history"]) == 11
+    assert settings["effective_config"]["max_epochs"] == 12
     assert "Contact fit epoch 1/12 | train BCE=" in caplog.text
     assert "Contact fit early stopping at epoch 11/12" in caplog.text
     assert "restored_best_head=true" in caplog.text
@@ -259,28 +375,103 @@ def test_fixed_fit_determinism_decay_patience_restoration_and_cap(monkeypatch, c
         )
 
 
+def test_development_feature_identity_uses_only_development_metadata(esm2_tokenizer):
+    from modules.evaluate.src.dataset.contact import tokenize_contact_chain
+    from modules.evaluate.src.tasks.contact_prediction import (
+        contact_development_feature_identity,
+        contact_development_attention_fingerprint,
+    )
+
+    dataset = prepare_contact_dataset(development_dataset())
+    development = [*dataset.splits["train"], *dataset.splits["validation"]]
+    tokens = [tokenize_contact_chain(chain, esm2_tokenizer) for chain in development]
+    metadata = dict(
+        weights="weights",
+        backbone_config={"hidden_size": 8},
+        tf32=False,
+        matmul_precision="highest",
+    )
+    identity = contact_development_feature_identity(dataset, tokens, **metadata)
+    assert identity["extraction"] == "casp-final-embeddings-v1"
+    assert {row[0] for row in identity["chains"]} == {"train", "validation"}
+    assert len(identity["chains"]) == len(development)
+    with pytest.raises(ValueError, match="token"):
+        contact_development_feature_identity(dataset, tokens[:-1], **metadata)
+    training_tokens = tokens[:len(dataset.splits["train"])]
+    fingerprint = contact_development_attention_fingerprint(
+        dataset, training_tokens, **metadata
+    )
+    changed = contact_development_attention_fingerprint(
+        dataset, training_tokens, **{**metadata, "weights": "different"}
+    )
+    assert fingerprint != changed
+    dataset.splits["test"] = ()
+    assert contact_development_feature_identity(dataset, tokens, **metadata) == identity
+    assert contact_development_attention_fingerprint(
+        dataset, training_tokens, **metadata
+    ) == fingerprint
+
+
 def test_development_cache_is_seed_independent_and_never_contains_test(
     tmp_path, esm2_tokenizer
 ):
     dataset = prepare_contact_dataset(development_dataset())
     model = ContactPredictionModel(small_trunk())
     model.extract = Mock(wraps=model.extract)
-    first, key = contact_development_features(model, esm2_tokenizer, dataset, tmp_path)
+    config = config_for(tmp_path, tmp_path / "trunk")
+    workspace = get_evaluation_workspace(config.workspace, config.variant, seed=config.seed)
+    workspace.setup_directories()
+    prepared = PreparedArtifacts(
+        model=model, tokenizer=esm2_tokenizer, train_dataloader=None,
+        val_dataloader=None, test_dataloader=None, contact=ContactArtifacts(dataset),
+    )
+    step = PrepareStep(config.steps.prepare)
+    step.prepare_features(workspace, prepared)
+    first = prepared.features["development"].values
+    key = prepared.features["development"].fingerprint
     assert model.extract.call_count == 40
     assert all(call.args[0].split != "test" for call in model.extract.call_args_list)
     model.extract.reset_mock()
-    second, same_key = contact_development_features(
-        model, esm2_tokenizer, dataset, tmp_path
-    )
+    step.prepare_features(workspace, prepared)
+    second = prepared.features["development"].values
+    same_key = prepared.features["development"].fingerprint
     assert same_key == key and model.extract.call_count == 0
     for record_id in first:
         torch.testing.assert_close(first[record_id], second[record_id])
     with torch.no_grad():
         next(model.trunk.parameters()).add_(1)
-    _, changed_key = contact_development_features(
-        model, esm2_tokenizer, dataset, tmp_path
-    )
+    step.prepare_features(workspace, prepared)
+    changed_key = prepared.features["development"].fingerprint
     assert changed_key != key and model.extract.call_count == 40
+
+
+@pytest.mark.parametrize("materialize", [False, True])
+def test_contact_tuning_requires_prepared_features_and_never_extracts(
+    tmp_path, esm2_tokenizer, materialize
+):
+    from modules.evaluate.src.steps.tune import TuneStep
+
+    config = config_for(tmp_path, tmp_path / "trunk")
+    workspace = get_evaluation_workspace(config.workspace, config.variant, seed=config.seed)
+    workspace.setup_directories()
+    model = ContactPredictionModel(small_trunk())
+    prepared = PreparedArtifacts(
+        model=model, tokenizer=esm2_tokenizer,
+        train_dataloader=None, val_dataloader=None, test_dataloader=None,
+        contact=ContactArtifacts(prepare_contact_dataset(development_dataset())),
+    )
+    if materialize:
+        PrepareStep(config.steps.prepare).prepare_features(workspace, prepared)
+    model.extract = Mock(side_effect=AssertionError("Tune must not extract features"))
+    step = TuneStep(config.steps.tune)
+    if materialize:
+        fitted = step.run(workspace, prepared, seed=config.seed, accelerator=Accelerator(cpu=True))
+        assert fitted.model is model
+        assert (workspace.stats_path / "contact_training.json").is_file()
+    else:
+        with pytest.raises(ValueError, match="prepared before fitting"):
+            step.run(workspace, prepared, seed=config.seed, accelerator=Accelerator(cpu=True))
+    model.extract.assert_not_called()
 
 
 def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
@@ -391,6 +582,8 @@ def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
         "steps.tune.refit_on_train_validation=true",
         "steps.tune.standardize_features=true",
         "steps.tune.learning_rate=0.1",
+        "steps.tune.head.hyperparameters.learning_rate=0.1",
+        "steps.tune.head.search_space.learning_rate=[0.1]",
         "steps.tune.head.head_type=mlp",
         "steps.prepare.packed=true",
         "steps.predict.controls=[random_head]",

@@ -9,11 +9,9 @@ import polars as pl
 import pytest
 
 from modules.core.utils.config_loader import load_and_parse
-from modules.evaluate.src.config import EvaluationConfig
-from modules.evaluate.src.dataset.workspace import (
-    EvaluationWorkspace,
-    EvaluationWorkspaceConfig,
-)
+from modules.evaluate.src.contracts.config import EvaluationConfig
+from modules.evaluate.src.dataset.workspace import EvaluationWorkspace
+from modules.evaluate.src.contracts.config import EvaluationWorkspaceConfig
 
 
 def workspace_config(base_dir, **overrides):

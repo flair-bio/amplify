@@ -1,97 +1,37 @@
-"""Explicit, model-free sequence baseline runs."""
+"""Generate and publish model-independent sequence baseline artifacts."""
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import logging
-from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from datasets import DatasetDict
-from omegaconf import OmegaConf
-from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from modules.evaluate.src.dataset.dataloader import ExternalTestSetConfig
-from modules.evaluate.src.dataset.resolution import (
-    resolve_evaluation_data,
-    resolve_external_data,
-)
-from modules.evaluate.src.dataset.workspace import DatasetWorkspaceConfig
-from modules.evaluate.src.steps.prepare import PrepareConfig
-from modules.evaluate.src.tasks import get_task
-from modules.evaluate.src.utils.baselines import (
+from modules.evaluate.src.contracts.config import (
     BaselineName,
-    BaselinesConfig,
+    BaselineRunConfig,
+)
+from modules.evaluate.src.dataset.baseline_data import (
     artifact_directory,
     artifact_identity,
     baseline_context,
-    build_sequence_baseline,
     external_baseline_context,
     load_baseline_artifact,
     sequence_rows,
 )
+from modules.evaluate.src.dataset.dataloader import (
+    resolve_evaluation_data,
+    resolve_external_data,
+)
+from modules.evaluate.src.model.baselines import build_sequence_baseline
 from modules.evaluate.src.utils.io import log_to_file, write_json
+from modules.evaluate.src.utils.storage import cache_lock
 
 logger = logging.getLogger(__name__)
-
-
-class BaselineRunConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    workspace: DatasetWorkspaceConfig
-    prepare: PrepareConfig = Field(
-        default_factory=lambda: PrepareConfig.model_validate({})
-    )
-    baselines: BaselinesConfig = Field(default_factory=BaselinesConfig)
-    external_test_sets: list[ExternalTestSetConfig] = Field(default_factory=list)
-    seed: int = 710019
-
-    @model_validator(mode="after")
-    def validate_baselines(self) -> BaselineRunConfig:
-        self.baselines.validate_task(self.workspace.task_type)
-        if not self.baselines.names:
-            raise ValueError("Select at least one baseline in baselines.names.")
-        names = [external.name for external in self.external_test_sets]
-        if len(set(names)) != len(names):
-            raise ValueError("external_test_sets names must be unique.")
-        task = get_task(self.workspace.task_type)
-        task.validate_dataset_config(
-            self.workspace.target_type,
-            self.workspace.label_format,
-            self.workspace.dataset_name,
-        )
-        return self
-
-
-def load_baseline_config(
-    paths: Sequence[str | Path], overrides: Sequence[str] | None = None
-) -> BaselineRunConfig:
-    from modules.evaluate.src.utils.config_loader import compose_evaluation_config
-
-    raw: Any = OmegaConf.to_container(
-        compose_evaluation_config(paths, overrides), resolve=True
-    )
-    if raw.get("cross_validation", {}).get("enabled"):
-        raise ValueError("Standalone baselines currently support non-CV runs only.")
-    # Model and tuning settings do not apply to the baseline route.
-    workspace = {
-        key: value
-        for key, value in raw["workspace"].items()
-        if key in DatasetWorkspaceConfig.model_fields
-    }
-    return BaselineRunConfig.model_validate(
-        {
-            "workspace": workspace,
-            "prepare": raw.get("steps", {}).get("prepare", {}),
-            "baselines": raw.get("baselines", {}),
-            "external_test_sets": raw.get("external_test_sets", []),
-            "seed": raw.get("seed", 710019),
-        }
-    )
 
 
 def run_baselines(
@@ -145,8 +85,7 @@ def run_baselines(
         for name in config.baselines.names:
             directory = artifact_directory(test_context, name)
             directory.mkdir(parents=True, exist_ok=True)
-            with (directory.parent / ".lock").open("a") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
+            with cache_lock(directory.parent / ".lock"):
                 fit_path = directory.parent / "fit_manifest.json"
                 fit_identity = {"baseline": name, "fit": test_context["fit"]}
                 if fit_path.exists():
