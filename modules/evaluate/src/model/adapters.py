@@ -61,13 +61,21 @@ def contact_positions(model: Any, positions: torch.Tensor) -> Iterator[None]:
                         reset()
                     elif callable(build):
                         build(positions.device)
-                    if old_cos is not None and (
-                        not torch.equal(old_cos, module.rope_cos[: len(old_cos)])
-                        or not torch.equal(old_sin, module.rope_sin[: len(old_sin)])
-                    ):
-                        raise ValueError(
-                            "Native rotary cache growth changed existing positions"
-                        )
+                    if old_cos is not None:
+                        # Rebuilding on another device may differ by float
+                        # rounding; reject only formula changes, then keep the
+                        # original prefix bitwise.
+                        new_cos = module.rope_cos[: len(old_cos)]
+                        new_sin = module.rope_sin[: len(old_sin)]
+                        if not (
+                            torch.allclose(new_cos, old_cos.to(new_cos), atol=1e-4)
+                            and torch.allclose(new_sin, old_sin.to(new_sin), atol=1e-4)
+                        ):
+                            raise ValueError(
+                                "Native rotary cache growth changed existing positions"
+                            )
+                        new_cos.copy_(old_cos)
+                        new_sin.copy_(old_sin)
         # Older HF ESM ignores rotary position_ids; no public equivalent exists there.
         for module in rotary:
             saved.append(
