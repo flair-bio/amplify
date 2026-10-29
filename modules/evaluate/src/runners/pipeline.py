@@ -62,6 +62,8 @@ def _external_workspace(
             update={
                 "dataset_name": external.name,
                 "dataset_repo_id": external.dataset_repo_id,
+                "dataset_config_name": external.dataset_config_name,
+                "dataset_revision": external.dataset_revision,
             }
         ),
         variant=workspace.variant,

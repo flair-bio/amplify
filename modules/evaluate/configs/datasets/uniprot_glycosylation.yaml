@@ -1,7 +1,8 @@
 workspace:
   default_task_type: token_classification
   dataset_name: uniprot_glycosylation
-  dataset_repo_id: flair-bio/uniprot_glycosylation
+  dataset_repo_id: flair-bio/evaluation-suite
+  dataset_config_name: uniprot_glycosylation
   target_type: categorical
   label_format: per_token
   num_labels: 13

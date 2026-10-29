@@ -136,6 +136,24 @@ def test_run_id_is_required(tmp_path):
         EvaluationWorkspaceConfig.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    "change", [{"dataset_config_name": "other"}, {"dataset_revision": "b" * 40}]
+)
+def test_suite_configs_and_revisions_cannot_reuse_output_labels(tmp_path, change):
+    config = workspace_config(
+        tmp_path, dataset_config_name="main", dataset_revision="a" * 40
+    )
+    workspace = EvaluationWorkspace(config, variant="mlp-frozen_trunk")
+    with workspace.reserve_run():
+        pass
+    changed = EvaluationWorkspace(
+        config.model_copy(update=change), variant="mlp-frozen_trunk"
+    )
+    with pytest.raises(ValueError, match="different inputs"):
+        with changed.reserve_run():
+            pass
+
+
 def test_checkpoint_versions_and_tasks_have_separate_roots(tmp_path):
     first = EvaluationWorkspace(workspace_config(tmp_path), variant="mlp-frozen_trunk")
     second = EvaluationWorkspace(

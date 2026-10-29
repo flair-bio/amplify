@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from datasets import DatasetDict, load_dataset  # type: ignore[attr-defined]
+from datasets import DatasetDict
 from transformers import PreTrainedTokenizerBase
 
 SCHEMA_VERSION = "6.0"
@@ -43,40 +43,28 @@ REQUIRED_COLUMNS = frozenset(
 def load_contact_dataset(
     path_or_repo: str | Path,
     *,
+    config_name: str | None = None,
     revision: str | None = None,
     edition: int | None = None,
     cache_dir: str | Path | None = None,
 ) -> ContactDataset:
     """Load fixed HF scoring splits without synthesis or coordinate dependencies."""
+    from modules.evaluate.src.dataset.dataloader import load_raw_evaluation_dataset
+
     path = Path(path_or_repo)
-    kwargs: dict[str, Any] = {}
-    if cache_dir is not None:
-        kwargs["cache_dir"] = str(cache_dir)
-    if path.is_dir():
-        if revision is not None:
-            raise ValueError("revision applies only to Hub datasets")
-        files = {
-            split: sorted(
-                str(file) for file in (path / "data").glob(f"{split}-*.parquet")
-            )
-            for split in SPLITS
-        }
-        if not all(files.values()):
-            raise ValueError("Local contact data requires data/{split}-*.parquet")
-        raw = load_dataset("parquet", data_files=files, **kwargs)
-    else:
+    if not path.is_dir():
         if isinstance(path_or_repo, Path) or path.is_absolute():
             raise FileNotFoundError(path)
         if revision is None or re.fullmatch(r"[0-9a-fA-F]{40}", revision) is None:
             raise ValueError(
                 "Hub contact data requires a pinned 40-character commit SHA"
             )
-        raw = load_dataset(str(path_or_repo), revision=revision, **kwargs)
-    if not isinstance(raw, DatasetDict):
-        raise ValueError(
-            f"Expected a DatasetDict with train/validation/test splits from "
-            f"'{path_or_repo}', got {type(raw)}."
-        )
+    raw = load_raw_evaluation_dataset(
+        path_or_repo,
+        config_name=config_name,
+        revision=revision,
+        cache_dir=cache_dir,
+    )
     return prepare_contact_dataset(
         raw, source=str(path_or_repo), revision=revision, edition=edition
     )

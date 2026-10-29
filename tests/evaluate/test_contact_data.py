@@ -125,7 +125,7 @@ def test_local_loading_uses_only_parquet_and_preserves_rows(tmp_path, monkeypatc
 
 def test_hub_loading_requires_and_passes_commit_sha(monkeypatch):
     loader = Mock(return_value=hf_data([row()]))
-    monkeypatch.setattr(contact, "load_dataset", loader)
+    monkeypatch.setattr(dataloader, "load_dataset", loader)
     for revision in (None, "main", "v6"):
         with pytest.raises(ValueError, match="commit SHA"):
             load_contact_dataset("flair-bio/contact_prediction_casp", revision=revision)
@@ -134,6 +134,16 @@ def test_hub_loading_requires_and_passes_commit_sha(monkeypatch):
     loaded = load_contact_dataset("flair-bio/contact_prediction_casp", revision=sha)
     loader.assert_called_once_with("flair-bio/contact_prediction_casp", revision=sha)
     assert loaded.revision == sha
+    loader.reset_mock()
+    loaded = load_contact_dataset(
+        "flair-bio/evaluation-suite",
+        config_name="contact_prediction_casp",
+        revision=sha,
+    )
+    loader.assert_called_once_with(
+        "flair-bio/evaluation-suite", name="contact_prediction_casp", revision=sha
+    )
+    assert loaded.fingerprint == prepare_contact_dataset(hf_data([row()])).fingerprint
 
 
 @pytest.mark.parametrize(

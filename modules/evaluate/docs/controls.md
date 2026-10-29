@@ -143,8 +143,8 @@ Each task config ships a preset; override it with `steps.predict.controls`
 | `sequence_classification` | `random_trunk`; shared `majority_class` |
 | `sequence_multilabel_classification` | `random_trunk` |
 | `sequence_regression` | `random_trunk`; shared `train_mean` |
-| `token_classification` | `random_trunk`; optional inline `majority_class` baseline |
-| `contact_prediction` | None; opt in with `controls=[random_trunk]` |
+| `token_classification` | `random_trunk`; inline `majority_class` baseline |
+| `contact_prediction` | `random_trunk` (independent fitted/zero-shot predictor) |
 | `pseudo_perplexity` | `random_trunk` |
 | `calibration` | `random_trunk` |
 

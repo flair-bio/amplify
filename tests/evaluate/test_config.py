@@ -317,14 +317,16 @@ class TestShippedConfigOverlays:
             [
                 self._CONFIG_ROOT / "config.yaml",
                 self._CONFIG_ROOT / "tasks" / "pseudo_perplexity.yaml",
-                self._CONFIG_ROOT / "datasets" / "uniprot_protparams.yaml",
+                self._CONFIG_ROOT / "datasets" / "uniprot_ur100p_test.yaml",
             ],
             EvaluationConfig,
         )
         assert config.steps.mode == "evaluate_as_is"
         assert not config.steps.prepare.embedding_cache.enabled
         split = config.steps.prepare.split
-        assert (split.train, split.validation, split.test) == ("test",) * 3
+        assert (split.train, split.validation, split.test) == (
+            "train", "validation", "test"
+        )
         assert not any(config.steps.prepare.random_truncate_by_split.values())
 
     @pytest.mark.parametrize("dataset_name", ["meltome_mixed", "meltome_human"])
@@ -354,7 +356,8 @@ class TestShippedConfigOverlays:
             ],
             EvaluationConfig,
         )
-        assert config.workspace.dataset_repo_id == "flair-bio/solubility_uesolds_original"
+        assert config.workspace.dataset_repo_id == "flair-bio/evaluation-suite"
+        assert config.workspace.dataset_config_name == "solubility_prediction"
         assert config.workspace.num_labels == 2
         assert config.steps.tune.hyperparameter_search.metric == "f1"
         assert config.steps.score.metrics == ["f1"]

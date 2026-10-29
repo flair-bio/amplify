@@ -4,7 +4,7 @@ workspace:
 
 steps:
   predict:
-    controls: []
+    controls: [random_trunk] # independent fitted head, or zero-shot Jacobian control
     collect_probabilities: false
   score:
     metrics: [AUC, P@L, P@L/2, P@L/5, ROC-AUC]

@@ -190,7 +190,9 @@ def test_short_hash_collisions_reject_different_full_identities(
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("change", ["train", "test", "split", "task_classes"])
+@pytest.mark.parametrize(
+    "change", ["train", "test", "split", "task_classes", "config", "revision"]
+)
 def test_identity_changes_with_data_and_protocol(tmp_path, change):
     config, data = _config(tmp_path), _data()
     context = _context(config, data)
@@ -201,6 +203,10 @@ def test_identity_changes_with_data_and_protocol(tmp_path, change):
         )
     elif change == "split":
         config.prepare.split.train = "another_source"
+    elif change == "config":
+        config.workspace.dataset_config_name = "another_dataset"
+    elif change == "revision":
+        config.workspace.dataset_revision = "a" * 40
     else:
         config.workspace.num_labels = 4
     changed = _context(config, data)
@@ -239,6 +245,38 @@ def test_external_baseline_keeps_source_training_prior(tmp_path, monkeypatch):
     )
     assert manifest["identity"]["test"]["dataset"] == "org/heldout"
     assert manifest["identity"]["fit"] == _context(config, data)["fit"]
+
+
+def test_suite_baseline_loads_main_and_external_configurations(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    config.workspace.dataset_repo_id = "org/suite"
+    config.workspace.dataset_config_name = "main"
+    config.workspace.dataset_revision = "a" * 40
+    config.external_test_sets = [
+        ExternalTestSetConfig(
+            name="heldout",
+            dataset_repo_id="org/suite",
+            dataset_config_name="heldout",
+            dataset_revision="a" * 40,
+        )
+    ]
+    loader = Mock(return_value=_data())
+    monkeypatch.setattr(dataloader, "load_dataset", loader)
+    outputs = run_baselines(config)
+    assert [call.kwargs for call in loader.call_args_list] == [
+        {"name": "main", "revision": "a" * 40},
+        {"name": "heldout", "revision": "a" * 40},
+    ]
+    assert "external/heldout" in outputs
+    main_manifest = json.loads(
+        outputs["test"]["majority_class"].with_name("manifest.json").read_text()
+    )
+    external_manifest = json.loads(
+        outputs["external/heldout"]["majority_class"]
+        .with_name("manifest.json").read_text()
+    )
+    assert main_manifest["identity"]["test"] != external_manifest["identity"]["test"]
+    assert main_manifest["identity"]["fit"] == external_manifest["identity"]["fit"]
 
 
 @pytest.mark.parametrize("regression", [False, True])

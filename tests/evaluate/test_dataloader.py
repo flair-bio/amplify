@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import pytest
 import torch
+import yaml
+from unittest.mock import Mock
 from datasets import Dataset, DatasetDict
 
 from modules.evaluate.src.dataset import dataloader as dataloader_module
@@ -47,7 +49,7 @@ def test_token_budget_sampler_keeps_each_example_once():
 
 class TestDataLoaderConfig:
     def test_default_worker_count(self):
-        assert DataLoaderConfig().num_workers == 8
+        assert DataLoaderConfig().num_workers == 0
 
     @pytest.mark.parametrize("num_workers", [0, 1, 16])
     def test_explicit_worker_count(self, num_workers):
@@ -88,6 +90,123 @@ class TestLoadEvaluationDataset:
         assert set(result.keys()) == {"train", "validation", "test"}
         assert len(result["train"]) + len(result["validation"]) == len(raw["train"])
         assert result["test"] is raw["test"]
+
+
+@pytest.fixture
+def local_suite(tmp_path):
+    root = tmp_path / "suite"
+    configs = []
+    for name, targets, splits in (
+        ("main", [0, 1], ["train", "validation", "test", "tuning_excluded",
+                          "train_cluster", "validation_cluster", "test_cluster"]),
+        ("heldout", [[1, 0], [0, 1]], ["test"]),
+    ):
+        data_dir = root / name / "data"
+        data_dir.mkdir(parents=True)
+        for split in splits:
+            Dataset.from_dict(
+                {"sequence": ["ACD", "EFG"], "targets": targets}
+            ).to_parquet(data_dir / f"{split}-00000-of-00001.parquet")
+        configs.append(
+            {
+                "config_name": name,
+                "data_files": [
+                    {"split": split, "path": f"{name}/data/{split}-*.parquet"}
+                    for split in splits
+                ],
+            }
+        )
+    (root / "README.md").write_text(
+        "---\n" + yaml.safe_dump({"configs": configs}) + "---\n"
+    )
+    return root
+
+
+def test_local_suite_selects_one_schema_and_preserves_protocol_splits(local_suite):
+    raw = dataloader_module.load_raw_evaluation_dataset(
+        local_suite, config_name="main"
+    )
+    assert set(raw) == {
+        "train", "validation", "test", "tuning_excluded",
+        "train_cluster", "validation_cluster", "test_cluster",
+    }
+    assert raw["train"]["targets"] == [0, 1]
+    selected = load_evaluation_dataset(
+        str(local_suite),
+        config_name="main",
+        split=DatasetSplitConfig(
+            name="cluster", refit_additional_splits=["tuning_excluded"]
+        ),
+    )
+    assert set(selected) == {"train", "validation", "test", "tuning_excluded"}
+    assert selected["train"].to_dict() == raw["train_cluster"].to_dict()
+    external = dataloader_module.resolve_external_data(
+        str(local_suite), "test", config_name="heldout"
+    )
+    assert set(external) == {"test"}
+    assert external["test"]["targets"] == [[1, 0], [0, 1]]
+    with pytest.raises(ValueError, match="missing"):
+        dataloader_module.load_raw_evaluation_dataset(
+            local_suite, config_name="missing"
+        )
+
+
+@pytest.mark.parametrize("name", ["main", "heldout"])
+@pytest.mark.parametrize("use_config_name", [False, True])
+def test_standalone_local_config_keeps_all_splits(
+    local_suite, name, use_config_name
+):
+    actual = dataloader_module.load_raw_evaluation_dataset(
+        local_suite / name, config_name=name if use_config_name else None
+    )
+    expected = dataloader_module.load_raw_evaluation_dataset(
+        local_suite, config_name=name
+    )
+    assert set(actual) == set(expected)
+    for split in actual:
+        assert actual[split].to_dict() == expected[split].to_dict()
+
+
+def test_local_suite_rejects_hub_revision(local_suite):
+    with pytest.raises(ValueError, match="only to Hub"):
+        dataloader_module.load_raw_evaluation_dataset(
+            local_suite, config_name="main", revision="a" * 40
+        )
+
+
+def test_standalone_artifact_folder_name_need_not_match_config(local_suite):
+    standalone = local_suite / "renamed"
+    (local_suite / "heldout").rename(standalone)
+    loaded = dataloader_module.load_raw_evaluation_dataset(
+        standalone, config_name="heldout"
+    )
+    assert set(loaded) == {"test"}
+    assert loaded["test"]["targets"] == [[1, 0], [0, 1]]
+
+
+def test_hub_suite_forwards_selected_config_and_revision(monkeypatch):
+    raw = build_raw_dataset_dict("sequence_classification")
+    loader = Mock(return_value=raw)
+    monkeypatch.setattr(dataloader_module, "load_dataset", loader)
+    result = dataloader_module.resolve_evaluation_data(
+        "org/suite",
+        config_name="selected",
+        revision="a" * 40,
+        seed=0,
+        validation_fraction=0.1,
+        split=DatasetSplitConfig(),
+    )
+    assert result["test"] is raw["test"]
+    loader.assert_called_once_with(
+        "org/suite", name="selected", revision="a" * 40
+    )
+    loader.reset_mock()
+    dataloader_module.resolve_external_data(
+        "org/suite", "test", config_name="external", revision="b" * 40
+    )
+    loader.assert_called_once_with(
+        "org/suite", name="external", revision="b" * 40
+    )
 
 
 class TestSelectDatasetSplits:

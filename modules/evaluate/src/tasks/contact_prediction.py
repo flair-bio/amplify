@@ -202,6 +202,7 @@ class ContactPredictionTask(StructuredTask):
             contacts = load_contact_dataset(
                 source,
                 revision=inputs.dataset_revision,
+                config_name=inputs.dataset_config_name,
                 edition=inputs.edition,
             )
         else:

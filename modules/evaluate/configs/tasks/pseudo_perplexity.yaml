@@ -10,11 +10,9 @@ steps:
   score:
     metrics: [pseudo_perplexity]
   prepare:
-    # Prepare still requires three roles; only the test loader is scored.
-    split:
-      train: test
-      validation: test
-      test: test
+    # Keep the suite's test-only roles; do not expand it again as train/validation.
+    batch_size: 8 # one masked residue per row
+    tokenize_num_proc: 1 # expansion can produce millions of rows; avoid parallel copies
     random_truncate_by_split:
       train: false
     embedding_cache:

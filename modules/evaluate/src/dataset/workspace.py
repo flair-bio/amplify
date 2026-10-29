@@ -136,6 +136,10 @@ class EvaluationWorkspace:
                 "model_name": self.model_name,
                 "model_repo_id": self.model_repo_id,
             }
+            if self.config.dataset_config_name is not None:
+                provenance["dataset_config_name"] = self.config.dataset_config_name
+            if self.config.dataset_revision is not None:
+                provenance["dataset_revision"] = self.config.dataset_revision
             with (self.workspace_root / ".workspace.lock").open("a") as workspace_lock:
                 fcntl.flock(workspace_lock, fcntl.LOCK_EX)
                 if provenance_path.exists():

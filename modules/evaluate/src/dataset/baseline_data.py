@@ -17,6 +17,7 @@ from modules.evaluate.src.contracts.config import (
     BaselineName,
     BaselinesConfig,
     DatasetWorkspaceConfig,
+    dataset_source_identity,
 )
 
 
@@ -87,7 +88,11 @@ def baseline_context(
     test_rows = sequence_rows(dataset["test"], **arguments)
     fit = {
         "version": 1,
-        "dataset": workspace.dataset_repo_id or workspace.dataset_name,
+        "dataset": dataset_source_identity(
+            workspace.dataset_repo_id or workspace.dataset_name,
+            workspace.dataset_config_name,
+            workspace.dataset_revision,
+        ),
         "task_type": workspace.task_type,
         "num_labels": workspace.num_labels,
         "fit_policy": "train_only",
@@ -98,7 +103,7 @@ def baseline_context(
     return {
         "fit": fit,
         "test": {
-            "dataset": workspace.dataset_repo_id or workspace.dataset_name,
+            "dataset": fit["dataset"],
             "split": split_roles["test"],
             "fingerprint": identity_hash(test_rows),
         },
@@ -114,6 +119,8 @@ def external_baseline_context(
     *,
     dataset_id: str,
     split: str,
+    config_name: str | None = None,
+    revision: str | None = None,
     sequence_column: str,
     label_column: str,
     id_column: str,
@@ -129,7 +136,7 @@ def external_baseline_context(
     return {
         **context,
         "test": {
-            "dataset": dataset_id,
+            "dataset": dataset_source_identity(dataset_id, config_name, revision),
             "split": split,
             "fingerprint": identity_hash(rows),
         },

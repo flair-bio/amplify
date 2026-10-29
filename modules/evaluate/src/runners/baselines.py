@@ -45,6 +45,8 @@ def run_baselines(
         seed=config.seed,
         validation_fraction=prepare.validation_fraction,
         dataset=dataset,
+        config_name=workspace.dataset_config_name,
+        revision=workspace.dataset_revision,
     )
     context = baseline_context(
         workspace,
@@ -65,13 +67,20 @@ def run_baselines(
     train_rows = sequence_rows(data["train"], **row_options)
     tests: list[tuple[str, dict[str, Any], DatasetDict]] = [("test", context, data)]
     for external in config.external_test_sets:
-        external_data = resolve_external_data(external.dataset_repo_id, external.split)
+        external_data = resolve_external_data(
+            external.dataset_repo_id,
+            external.split,
+            config_name=external.dataset_config_name,
+            revision=external.dataset_revision,
+        )
         external_context = external_baseline_context(
             context,
             workspace,
             external_data,
             dataset_id=external.dataset_repo_id,
             split=external.split,
+            config_name=external.dataset_config_name,
+            revision=external.dataset_revision,
             sequence_column=prepare.sequence_column,
             label_column=prepare.label_column,
             id_column=prepare.id_column,

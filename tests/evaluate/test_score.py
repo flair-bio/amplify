@@ -1200,6 +1200,8 @@ class TestScoreStepLongDf:
     def test_written_without_bootstrap(self, tmp_path, model_family):
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
+        workspace.config.dataset_config_name = "selected"
+        workspace.config.dataset_revision = "a" * 40
         PredictStep(PredictConfig(controls=[])).run(workspace, prepared)
 
         result = ScoreStep(ScoreConfig(metrics=["accuracy", "f1"])).run(workspace)
@@ -1212,6 +1214,8 @@ class TestScoreStepLongDf:
         assert on_disk["control"].is_null().all()
         assert on_disk["model_name"].unique().to_list() == ["toy-model"]
         assert on_disk["dataset_name"].unique().to_list() == ["toy_dataset"]
+        assert on_disk["dataset_config_name"].unique().to_list() == ["selected"]
+        assert on_disk["dataset_revision"].unique().to_list() == ["a" * 40]
         assert set(on_disk.filter(pl.col("metric") == "accuracy")["value"]) == {
             result.scores["accuracy"]
         }
@@ -1254,6 +1258,8 @@ class TestScoreStepLongDf:
                 "model_repo_id": None,
                 "dataset_name": None,
                 "dataset_repo_id": None,
+                "dataset_config_name": None,
+                "dataset_revision": None,
                 "task_type": None,
                 "split": None,
                 "head_type": None,

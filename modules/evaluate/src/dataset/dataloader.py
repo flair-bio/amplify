@@ -7,7 +7,7 @@ fit in memory, so we load the full Hugging Face ``DatasetDict`` first, then
 tokenize every split a single time, and finally hand the pre-tokenized splits
 to PyTorch ``DataLoader`` instances.
 
-Tokenization and dataloading default to eight workers each and can be tuned
+Tokenization defaults to four processes and dataloading to the main process, tuned
 independently. Dataloader worker counts apply per rank and per loader; choose
 them to fit the job's CPU allocation.
 """
@@ -52,23 +52,23 @@ class DataLoaderConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    batch_size: int = Field(16, description="Number of examples per batch.")
+    batch_size: int = Field(8, description="Number of examples per batch.")
     max_tokens_per_batch: int | None = Field(
         None, gt=0, description="Packed token budget per batch."
     )
     num_workers: int = Field(
-        8,
+        0,
         ge=0,
         description=(
             "Number of dataloader worker processes per rank and per loader. "
-            "Defaults to 8; set to 0 to load batches in the main process."
+            "Defaults to 0 to avoid concurrent per-split worker pools."
         ),
     )
     pin_memory: bool = Field(
         True, description="Copy tensors into pinned memory before returning them."
     )
     persistent_workers: bool = Field(
-        True, description="Keep dataloader workers alive between epochs."
+        False, description="Keep dataloader workers alive between epochs."
     )
     seed: int = Field(
         710019,
@@ -297,27 +297,26 @@ def select_dataset_splits(
 def load_raw_evaluation_dataset(
     dataset_repo_id: str | Path,
     *,
+    config_name: str | None = None,
     revision: str | None = None,
     cache_dir: str | Path | None = None,
 ) -> DatasetDict:
-    """Load every source split as-is, without role mapping or synthesized splits."""
+    """Load one dataset configuration, preserving all of its source splits."""
     kwargs: dict[str, Any] = {}
     if cache_dir is not None:
         kwargs["cache_dir"] = str(cache_dir)
     path = Path(dataset_repo_id)
-    files = (
-        {
-            split: sorted(
-                str(file) for file in (path / "data").glob(f"{split}-*.parquet")
-            )
-            for split in ("train", "validation", "test")
-        }
-        if path.is_dir()
-        else {}
-    )
-    if files and all(files.values()):
+    files: dict[str, list[str]] = {}
+    if path.is_dir():
         if revision is not None:
             raise ValueError("revision applies only to Hub datasets")
+        # A standalone artifact can still be passed with its suite config name.
+        # Suite roots instead use the root card's explicit configuration mapping.
+        for file in sorted((path / "data").glob("*.parquet")):
+            match = re.fullmatch(r"(.+)-\d+-of-\d+\.parquet", file.name)
+            if match is not None:
+                files.setdefault(match[1], []).append(str(file))
+    if files:
         dataset = load_dataset("parquet", data_files=files, **kwargs)
     else:
         if not path.exists() and (
@@ -326,6 +325,8 @@ def load_raw_evaluation_dataset(
             raise FileNotFoundError(path)
         if revision is not None:
             kwargs["revision"] = revision
+        if config_name is not None:
+            kwargs["name"] = config_name
         dataset = load_dataset(str(dataset_repo_id), **kwargs)
     if not isinstance(dataset, DatasetDict):
         raise ValueError(
@@ -341,18 +342,20 @@ def load_evaluation_dataset(
     validation_fraction: float = _DEFAULT_VALIDATION_FRACTION,
     split: DatasetSplitConfig | None = None,
     *,
+    config_name: str | None = None,
     revision: str | None = None,
 ) -> DatasetDict:
-    """Load the configured evaluation and final-refit splits from the Hub.
+    """Load the configured evaluation and final-refit splits locally or from the Hub.
 
     If the loaded dataset has no ``validation`` split, one is synthesized
     from ``train`` (see :func:`ensure_validation_split`).
     """
-    dataset = (
-        load_raw_evaluation_dataset(dataset_repo_id, revision=revision)
-        if revision is not None
-        else load_raw_evaluation_dataset(dataset_repo_id)
-    )
+    kwargs: dict[str, Any] = {}
+    if config_name is not None:
+        kwargs["config_name"] = config_name
+    if revision is not None:
+        kwargs["revision"] = revision
+    dataset = load_raw_evaluation_dataset(dataset_repo_id, **kwargs)
     if any("positive_pairs" in data.column_names for data in dataset.values()):
         if not Path(dataset_repo_id).is_dir() and (
             revision is None or re.fullmatch(r"[0-9a-fA-F]{40}", revision) is None
@@ -380,6 +383,8 @@ def resolve_evaluation_data(
     seed: int,
     validation_fraction: float,
     dataset: DatasetDict | None = None,
+    config_name: str | None = None,
+    revision: str | None = None,
 ) -> DatasetDict:
     """Load benchmark splits, or use supplied data with already resolved roles."""
     if dataset is not None:
@@ -389,12 +394,25 @@ def resolve_evaluation_data(
         seed=seed,
         validation_fraction=validation_fraction,
         split=split,
+        config_name=config_name,
+        revision=revision,
     )
 
 
-def resolve_external_data(dataset_id: str, split: str) -> DatasetDict:
+def resolve_external_data(
+    dataset_id: str,
+    split: str,
+    *,
+    config_name: str | None = None,
+    revision: str | None = None,
+) -> DatasetDict:
     """Expose one validated source split as an external test dataset."""
-    raw = load_raw_evaluation_dataset(dataset_id)
+    kwargs: dict[str, Any] = {}
+    if config_name is not None:
+        kwargs["config_name"] = config_name
+    if revision is not None:
+        kwargs["revision"] = revision
+    raw = load_raw_evaluation_dataset(dataset_id, **kwargs)
     if split not in raw:
         raise ValueError(
             f"External dataset '{dataset_id}' has no split '{split}'. "
@@ -411,7 +429,7 @@ def tokenize_dataset(
     label_column: str,
     max_length: int,
     id_column: str = "id",
-    num_proc: int = 8,
+    num_proc: int = 4,
     random_truncate: bool = True,
     random_truncate_by_split: dict[str, bool] | None = None,
     seed: int = 710019,

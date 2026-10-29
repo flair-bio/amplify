@@ -1,7 +1,8 @@
 workspace:
   default_task_type: sequence_multilabel_classification
   dataset_name: GO_cc
-  dataset_repo_id: flair-bio/uniprot-GO_cc
+  dataset_repo_id: flair-bio/evaluation-suite
+  dataset_config_name: GO_cc
   target_type: categorical
   label_format: multilabel
   num_labels: 440

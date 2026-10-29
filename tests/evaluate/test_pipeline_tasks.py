@@ -58,14 +58,10 @@ def test_task_pipeline_roundtrip(
         data = Dataset.from_dict(
             {"id": ["protein"], "sequence": ["ACDE"], "targets": [[[1.0, *profile]]]}
         )
-        dataset = DatasetDict(
-            {split: data for split in ("train", "validation", "test")}
-        )
+        dataset = DatasetDict({"test": data})
     elif task == "pseudo_perplexity":
         data = Dataset.from_dict({"id": ["protein"], "sequence": ["ACDE"]})
-        dataset = DatasetDict(
-            {split: data for split in ("train", "validation", "test")}
-        )
+        dataset = DatasetDict({"test": data})
     else:
         dataset = build_raw_dataset_dict(task)
     label_format = {

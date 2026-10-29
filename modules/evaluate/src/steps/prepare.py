@@ -31,6 +31,7 @@ from modules.evaluate.src.contracts.config import (
     EmbeddingCacheConfig,
     ExternalTestSetConfig,
     PrepareConfig,
+    dataset_source_identity,
 )
 from modules.evaluate.src.dataset.baseline_data import (
     baseline_context,
@@ -141,6 +142,8 @@ class PrepareStep:
             validation_fraction=self.config.validation_fraction,
             split=self.config.split,
             dataset=dataset,
+            config_name=workspace.config.dataset_config_name,
+            revision=workspace.config.dataset_revision,
         )
         shared_context = (
             baseline_context(
@@ -416,7 +419,12 @@ class PrepareStep:
             external.dataset_repo_id,
             external.split,
         )
-        dataset = resolve_external_data(external.dataset_repo_id, external.split)
+        dataset = resolve_external_data(
+            external.dataset_repo_id,
+            external.split,
+            config_name=external.dataset_config_name,
+            revision=external.dataset_revision,
+        )
         shared_context = (
             external_baseline_context(
                 prepared.baseline_context,
@@ -424,6 +432,8 @@ class PrepareStep:
                 dataset,
                 dataset_id=external.dataset_repo_id,
                 split=external.split,
+                config_name=external.dataset_config_name,
+                revision=external.dataset_revision,
                 sequence_column=self.config.sequence_column,
                 label_column=self.config.label_column,
                 id_column=self.config.id_column,
@@ -509,7 +519,11 @@ class PrepareStep:
             or self.config.embedding_cache
         )
         model_fingerprint = weights_fingerprint(trunk)
-        external_id = external.dataset_repo_id
+        external_id = dataset_source_identity(
+            external.dataset_repo_id,
+            external.dataset_config_name,
+            external.dataset_revision,
+        )
         embedding_dataloader = build_embedding_dataloaders(
             model=trunk,
             splits={
@@ -592,7 +606,11 @@ class PrepareStep:
         layers = cache_config.resolved_layers
         embedding_size = hidden_size * len(layers)
         model_id = workspace.model_repo_id or workspace.model_name
-        dataset_id = workspace.dataset_repo_id or workspace.dataset_name
+        dataset_id = dataset_source_identity(
+            workspace.dataset_repo_id or workspace.dataset_name,
+            workspace.config.dataset_config_name,
+            workspace.config.dataset_revision,
+        )
         cache = EmbeddingCache(workspace.embeddings_path, cache_config.max_cache_gb)
         # The original token-based test dataloader, kept for PredictStep
         # controls/options that need real tokens or a re-embeddable trunk

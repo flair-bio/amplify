@@ -178,6 +178,8 @@ class EvaluationMetadata(BaseModel):
     split: str = "default"
     model_repo_id: str | None = None
     dataset_repo_id: str | None = None
+    dataset_config_name: str | None = None
+    dataset_revision: str | None = None
 
     # Which steps.tune.head.head_type produced these predictions (e.g.
     # "mlp"/"sklearn_linear"/"knn"/"random_forest"/"xgboost"/"torch_linear"),
@@ -211,7 +213,6 @@ class EvaluationMetadata(BaseModel):
 class ContactEvaluationMetadata(EvaluationMetadata):
     """Dataset/protocol identity specific to the HF-only CASP scoring contract."""
 
-    dataset_revision: str | None = None
     dataset_fingerprint: str
     schema_version: str
     protocol_version: str

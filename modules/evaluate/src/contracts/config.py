@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
@@ -50,6 +51,15 @@ EmbeddingDtype = Literal["float16", "float32"]
 EmbeddingAutocastDtype = Literal["float16", "bfloat16", "float32"]
 
 
+def dataset_source_identity(
+    dataset_id: str, config_name: str | None = None, revision: str | None = None
+) -> str:
+    """Distinguish configurations/revisions sharing the same repo or suite root."""
+    if config_name is None and revision is None:
+        return dataset_id
+    return json.dumps([dataset_id, config_name, revision])
+
+
 class ExternalTestSetConfig(BaseModel):
     """A test-only dataset scored with the model fitted on the main dataset.
 
@@ -65,6 +75,8 @@ class ExternalTestSetConfig(BaseModel):
         description="Filesystem-safe label used for this test set's outputs.",
     )
     dataset_repo_id: str = Field(..., min_length=1)
+    dataset_config_name: str | None = Field(None, min_length=1)
+    dataset_revision: str | None = None
     split: str = Field("test", min_length=1)
 
 
@@ -127,6 +139,9 @@ class DatasetWorkspaceConfig(BaseModel):
     dataset_name: str  # dataset name that serves as a mnemonic for the dataset being evaluated, e.g. "stability_prediction"
     dataset_repo_id: str | None = (
         None  # path to HuggingFace dataset repo e.g. biomap-research/stability_prediction
+    )
+    dataset_config_name: str | None = Field(
+        None, min_length=1, description="Named configuration within a dataset suite."
     )
     dataset_revision: str | None = None
     edition: Literal[14, 15, 16] | None = None
@@ -351,12 +366,12 @@ class PrepareConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     dataloader_pin_memory: bool = True
-    dataloader_persistent_workers: bool = True
-    batch_size: int = 16
+    dataloader_persistent_workers: bool = False
+    batch_size: int = 8
     packed: bool = False
     max_tokens_per_batch: int | None = Field(None, gt=0)
     embedding_batch_size: int = Field(
-        128,
+        8,
         gt=0,
         description=(
             "Batch size used only while extracting frozen-trunk embeddings. "
@@ -364,11 +379,11 @@ class PrepareConfig(BaseModel):
         ),
     )
     dataloader_num_workers: int = Field(
-        8,
+        0,
         ge=0,
         description=(
             "Number of dataloader worker processes per rank and per loader. "
-            "Defaults to 8; set to 0 to load batches in the main process."
+            "Defaults to 0 to avoid concurrent per-split worker pools."
         ),
     )
     max_length: int = Field(
@@ -393,11 +408,11 @@ class PrepareConfig(BaseModel):
         ),
     )
     tokenize_num_proc: int = Field(
-        8,
+        4,
         gt=0,
         description=(
             "Number of processes used to tokenize the dataset up front. "
-            "Defaults to 8; must be positive and is independent of dataloader workers."
+            "Defaults to 4; must be positive and is independent of dataloader workers."
         ),
     )
     random_truncate_by_split: dict[str, bool] = Field(

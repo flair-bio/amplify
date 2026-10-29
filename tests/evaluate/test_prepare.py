@@ -189,11 +189,11 @@ def test_prepare_caches_configured_final_refit_split_separately(
 class TestPrepareConfig:
     def test_defaults(self):
         cfg = PrepareConfig()
-        assert cfg.batch_size == 16
+        assert cfg.batch_size == 8
         assert cfg.label_column == "targets"
         assert cfg.sequence_column == "sequence"
-        assert cfg.dataloader_num_workers == 8
-        assert cfg.tokenize_num_proc == 8
+        assert cfg.dataloader_num_workers == 0
+        assert cfg.tokenize_num_proc == 4
 
     def test_worker_counts_can_be_tuned_independently(self):
         cfg = PrepareConfig(dataloader_num_workers=0, tokenize_num_proc=2)

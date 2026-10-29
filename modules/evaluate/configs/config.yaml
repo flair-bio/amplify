@@ -8,6 +8,8 @@ workspace:
   run_id: run01 # appended to the probe/mode variant; change to keep another run
   dataset_name: base_dataset
   dataset_repo_id: null
+  dataset_config_name: null # named config in the suite; independent of the output label
+  dataset_revision: null # optional Hub revision; must be null for local directories
   model_name: base_model
   model_repo_id: null
   task_type: null # explicit task overlays override the dataset default
@@ -38,18 +40,18 @@ steps:
     standardize_features: true # z-score each layer's features with train-split statistics
   prepare:
     dataloader_pin_memory: true
-    dataloader_persistent_workers: true
-    batch_size: 1026
+    dataloader_persistent_workers: false
+    batch_size: 8 # live trunk batches; conservative single-GPU/64-GB-host default
     packed: false # requires CUDA and an AMPLIFY checkpoint with packed forward args
     max_tokens_per_batch: null # optional; requires packed=true and one process
-    embedding_batch_size: 1026
-    dataloader_num_workers: 8 # workers per rank and per loader; 0 loads batches in the main process
+    embedding_batch_size: 8 # frozen-trunk extraction, independent of probe batches
+    dataloader_num_workers: 0 # in-memory data; avoid separate worker pools for each split
     max_length: 512
     pad_to_multiple_of: 8
     sequence_column: sequence
     label_column: targets
     id_column: id # per-example identifier column; falls back to a positional index if absent
-    tokenize_num_proc: 8 # positive process count, independent of dataloader workers
+    tokenize_num_proc: 4 # leave CPU/RAM headroom on an 8-core, 64-GB client
     split: # name is recorded in prediction metadata and scores_long.parquet, so runs over different split methods stay separate
       name: default # any other name loads train_<name>/validation_<name>/test_<name>, e.g. random, stratified, cluster
       # Set train/validation/test explicitly only for splits that don't follow that convention;
@@ -86,7 +88,7 @@ steps:
     warmup_ratio: 0.06
     max_grad_norm: 1.0
     accumulation_steps: 1 # effective batches accumulated per optimizer step
-    batch_size: 1026 # cached-embedding probe batch size; null keeps the prepared loader size
+    batch_size: 128 # HPO overrides this; token tasks count valid residues
     standardize_features: true # train statistics for selection; refit recomputes on train+validation
     refit_on_train_validation: true # fresh cached probe on train+validation after selection
     early_stopping_patience: null # disable early stopping; TPE trials can still be pruned
@@ -110,7 +112,7 @@ steps:
         weight_decay: [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1] # TPE uses min/max bounds; random/grid use listed candidates
         weight_decay_sampling: log # continuous log-scale TPE sampling; categorical also supports zero decay
   predict:
-    embedding_batch_size: 16384 # cached rows per batch (residues for token tasks); null inherits prepare.batch_size
+    embedding_batch_size: 1024 # cached protein rows; token task overrides with residue batches
     collect_probabilities: false # auto-enabled when effective metrics need probabilities, e.g. roc_auc or multilabel average_precision
     predictions_filename: predictions.parquet
     store_sequences: false # include decoded input sequences in main predictions parquet (larger output)

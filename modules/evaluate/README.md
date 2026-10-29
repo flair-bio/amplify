@@ -107,8 +107,8 @@ the existing step classes delegate to that handler and persist its artifacts.
 The data contract/alignment also live in that task module, shared extraction in
 `model/inference.py`, and ranking/aggregation in `metrics/contact_metrics.py`.
 The frozen-embedding, attention, and zero-shot categorical-Jacobian predictors
-run through the normal CLI and prediction entry point. CASP controls remain a
-subsequent stage. The old Biomap contact overlay and embedding head are removed.
+run through the normal CLI and prediction entry point. CASP `random_trunk`
+controls run by default. The old Biomap contact overlay and embedding head are removed.
 The dataset selects the shared `contact_prediction` task; an explicit predictor
 overlay selects extraction, fitting and inference without changing that task.
 
@@ -181,8 +181,9 @@ Score writes `unit_scores.parquet` and `scores.parquet`, reporting both original
 separations (>=6 and >=24), AUC (mean precision at ten length cutoffs), P@L,
 P@L/2, P@L/5 and ROC-AUC. EUs, chains and complexes are averaged equally within
 each edition, with metric-specific contributing counts. Development validation
-averages structures equally. Generic flat bootstrap and controls are rejected
-until their CASP-specific integration is implemented.
+averages structures equally. Generic flat bootstrap and controls other than
+`random_trunk` are rejected. All chain lengths currently remain included,
+including chains of 2,048 residues or longer; the plan's length exclusion is deferred.
 
 ---
 
@@ -222,6 +223,31 @@ metrics per dataset are in the [dataset catalog](docs/datasets.md#evaluation-tas
 
 ### Datasets
 
+Dataset overlays select one named configuration from
+`flair-bio/evaluation-suite`. A run downloads only that configuration's data,
+not the entire suite. `workspace.dataset_config_name` selects the data;
+`workspace.dataset_name` remains an independent output label.
+
+For direct Hub loading, use the dataset overlay as usual and optionally append
+`workspace.dataset_revision=<commit-SHA>` to pin the input. Contact prediction
+requires a full 40-character commit SHA.
+
+For a downloaded suite, append these overrides to the same command:
+
+```bash
+"workspace.dataset_repo_id=/path/to/evaluation-suite" \
+workspace.dataset_revision=null
+```
+
+Keep `workspace.dataset_config_name` from the overlay. This works offline and
+also applies to `--baselines`. Localization's external setHARD test follows
+the same suite root and revision. A single configuration directory such as
+`/path/to/evaluation-suite/meltome_human` is also supported. For a legacy
+standalone Hub repository, override its repo ID and set
+`workspace.dataset_config_name=null`; configure external test sources separately.
+Dataset configuration selection is separate from
+`steps.prepare.split`, which selects the partition/protocol within that dataset.
+
 The [dataset catalog](docs/datasets.md) lists each shipped overlay, what its
 labels represent, and which task uses it; [Dataset Sourcing](docs/dataset-sourcing.md)
 covers building and publishing them. ProteinGym uses per-assay variant tables and
@@ -241,6 +267,29 @@ base, model, and dataset configs; no MLP tuning overlay is needed. Full trunk
 fine-tuning and other probe types remain explicit alternatives in `configs/predictors/`.
 Composition is base → model/task → dataset → optional alternative → smoke
 settings → CLI overrides; later values win.
+
+Compute defaults target one GPU (for example a B200), eight CPU cores and
+64 GB host RAM: eight proteins per live/extraction batch, four tokenizer
+processes, and no dataloader worker pools. Expanded calibration and
+pseudo-perplexity data use one tokenizer process. FP32 extraction/storage is
+retained; these are conservative starting settings, not measured memory guarantees.
+Cached prediction uses 1,024 proteins or 8,192 residues per batch. With HPO
+disabled, cached training uses 128 proteins or 2,048 residues; HPO selects its
+own training batch. Token HPO deliberately retains residue batches
+`[1024, 2048, 4096]` and epochs `[1, 2, 5, 10]`, unlike sequence-task choices.
+
+Run one evaluation at a time. Token features and train+validation refit
+temporaries consume host RAM proportional to dataset size and hidden width;
+all-layer caches can exceed 64 GB. `max_cache_gb` is a disk-write limit, not a
+RAM cap. Pseudo-perplexity's expanded Arrow cache can require substantial disk
+space even with one tokenizer process. Full-chain contact attention and
+Jacobians remain expensive; Jacobian mutation batches reduce automatically
+after CUDA OOM, but the full FP32 Jacobian must still fit on the GPU.
+
+Supported defaults do not implement every planned benchmark: stability still
+uses pooled Spearman, ProtParams evaluates one selected property per run,
+and HMD-ARG is provisional 14-class classification. Composition, MMseqs k-NN,
+contact separation-prior and amino-acid-frequency baselines remain deferred.
 
 Task overlays explicitly select the reported metric and the validation
 selection metric/direction: Macro-F1 for classification, R² for regression
@@ -483,9 +532,9 @@ For positional labels, tokenization preserves ambiguous residues by disabling
 
 | Field | Schema default | Description |
 |---|---|---|
-| `batch_size` | `16` | Examples per dataloader batch, unless a packed token budget is set |
-| `dataloader_num_workers` | `8` | Workers per rank and loader; `0` loads batches in the main process |
-| `tokenize_num_proc` | `8` | Positive process count for up-front tokenization, independent of dataloader workers |
+| `batch_size` | `8` | Examples per dataloader batch, unless a packed token budget is set |
+| `dataloader_num_workers` | `0` | Workers per rank and loader; `0` loads batches in the main process |
+| `tokenize_num_proc` | `4` | Positive process count for up-front tokenization, independent of dataloader workers |
 | `max_length` | `512` | Maximum tokenized sequence length |
 | `split.name` | `default` | Select `train_<name>`, `validation_<name>`, and `test_<name>` for a named split method |
 | `validation_fraction` | `0.1` | Share of train held out when validation is missing or explicitly unset |
@@ -701,7 +750,6 @@ conditions sharing a forward pass; validation loops remain quiet.
 | `scrambled_sequences` | Residues shuffled within each sequence |
 | `scrambled_labels` | Trained predictions scored against permuted labels |
 | `majority_class` | Train class prior; inside Predict for token tasks only |
-| `separation_prior` | Train contact rate per residue separation |
 
 Per-task presets, invalid combinations, and how to read the results are in
 [Controls](docs/controls.md).
@@ -714,12 +762,12 @@ Per-task presets, invalid combinations, and how to read the results are in
 | `predictions_filename` | `predictions.parquet` | Output filename directly under the run directory |
 | `persist_to_disk` | `true` | Write predictions and the prediction manifest; disable for fast in-process evaluation |
 | `store_sequences` | `false` | Decode and include source sequences in the main predictions table |
-| `controls` | `[random_trunk]` | Per-model controls; token/contact presets add their existing priors. Sequence priors use top-level `baselines.names` and the separate `--baselines` route |
+| `controls` | `[random_trunk]` | Per-model controls. Sequence priors use top-level `baselines.names` and the separate `--baselines` route |
 | `embedding_batch_size` | `null` | Cached-feature rows per prediction batch, including model-based controls; `null` inherits the prepared loader size. Does not change live trunk batches. |
 
 Cached token probes batch **residues**, not proteins. The token-classification
-task overlay sets `steps.tune.batch_size=1024` for cached training/validation and
-`steps.predict.embedding_batch_size=16384` for cached prediction and control
+task overlay sets `steps.tune.batch_size=2048` for cached training/validation and
+`steps.predict.embedding_batch_size=8192` for cached prediction and control
 heads. Protein batches remain controlled by `steps.prepare.batch_size` (live
 inference) and `steps.prepare.embedding_batch_size` (feature extraction).
 Changing the training batch size changes optimization and the learning-rate
@@ -730,7 +778,7 @@ training or inference. Layerwise controls that require live trunk features
 continue to use protein batches.
 
 For cached sequence classification, multilabel classification, and regression,
-the task overlays set prediction batches to 1,024 examples. Cached probe tuning
+the base config sets prediction batches to 1,024 examples. Cached probe tuning
 uses the searched batch size by default. With HPO disabled, it uses
 `steps.tune.batch_size`, falling back to the prepared loader batch size when
 null. Embedding extraction has its own `steps.prepare.embedding_batch_size` setting.

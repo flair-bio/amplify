@@ -10,5 +10,3 @@ steps:
     hyperparameter_search:
       enabled: false
     refit_on_train_validation: false
-  predict:
-    controls: []

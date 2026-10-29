@@ -7,9 +7,30 @@ from omegaconf import OmegaConf
 
 from modules.core.utils.config_loader import load_and_parse
 from modules.evaluate.src.contracts.config import EvaluationConfig
-from modules.evaluate.src.contracts.config_loader import load_evaluation_config
+from modules.evaluate.src.contracts.config_loader import load_baseline_config, load_evaluation_config
 
 CONFIGS = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
+
+
+@pytest.mark.parametrize(
+    ("source", "revision"),
+    [("flair-bio/evaluation-suite", "a" * 40), ("/local/suite", None)],
+)
+def test_suite_source_is_shared_with_external_tests_and_baselines(source, revision):
+    paths = [CONFIGS / "config.yaml", CONFIGS / "datasets/localization_prediction.yaml"]
+    overrides = [
+        f"workspace.dataset_repo_id={source}",
+        f"workspace.dataset_revision={revision or 'null'}",
+        "workspace.dataset_name=custom_output",
+    ]
+    model = load_evaluation_config(paths, overrides)
+    baseline = load_baseline_config(paths, overrides)
+    for config in (model, baseline):
+        assert config.workspace.dataset_config_name == "localization_prediction"
+        external = config.external_test_sets[0]
+        assert external.dataset_repo_id == source
+        assert external.dataset_config_name == "sethard"
+        assert external.dataset_revision == revision
 
 
 @pytest.mark.parametrize("predictor", [None, "torch_linear", "mlp_finetuning"])
@@ -138,7 +159,7 @@ def test_contact_jacobian_preset_selects_zero_shot_predictor():
     assert config.steps.mode == "evaluate_as_is"
     assert not config.steps.prepare.embedding_cache.enabled
     assert not config.steps.tune.hyperparameter_search.enabled
-    assert config.steps.predict.controls == []
+    assert config.steps.predict.controls == ["random_trunk"]
 
 
 def test_contact_jacobian_predictor_cannot_be_used_for_other_tasks():
@@ -268,7 +289,7 @@ def test_dataset_default_matches_explicit_task_config(dataset):
         (
             "contact_prediction",
             "contact_prediction_casp",
-            [],
+            ["random_trunk"],
         ),
         ("pseudo_perplexity", "uniprot_protparams", ["random_trunk"]),
         ("calibration", "human_calibration", ["random_trunk"]),
@@ -293,6 +314,9 @@ def test_task_control_defaults(task, dataset, controls):
         "sequence_regression": ["train_mean"],
     }.get(task, [])
     assert config.baselines.names == expected_baselines
+    assert config.steps.predict.baselines == (
+        ["majority_class"] if task == "token_classification" else []
+    )
 
 
 def test_protparams_uses_sequence_regression_r2_defaults():
