@@ -26,7 +26,11 @@ from modules.evaluate.src.tasks import available_tasks, get_task
 from modules.evaluate.src.dataset.contact import candidate_pairs, prepare_contact_dataset, tokenize_contact_chain
 from modules.evaluate.src.trainers.contact import fit_contact_head
 from modules.evaluate.src.contracts.config_loader import load_evaluation_config
-from modules.pretrain.src.model.modeling_amplify import register_amplify_auto_classes
+from modules.pretrain.src.model.modeling_amplify import (
+    AMPLIFYConfig,
+    AMPLIFYModel,
+    register_amplify_auto_classes,
+)
 
 from .conftest import build_tiny_model
 from .test_contact_data import FEATURES, hf_data, row
@@ -299,6 +303,43 @@ def test_positional_adapter_restores_tables_after_exception(model_family):
         for (identity, name), value in saved.items():
             if identity == id(module):
                 assert getattr(module, name) is value
+
+
+@pytest.mark.parametrize("initialized", [False, True])
+def test_legacy_amplify_rotary_growth_and_restoration(initialized):
+    trunk = AMPLIFYModel(
+        AMPLIFYConfig(
+            hidden_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            max_position_embeddings=8,
+        )
+    ).eval()
+    rotary = trunk.rotary_emb
+    rotary.reset_tables = None
+    if not initialized:
+        rotary.rope_cos = rotary.rope_sin = None
+    old_cos, old_sin = rotary.rope_cos, rotary.rope_sin
+    reference = deepcopy(trunk)
+    reference.rotary_emb.max_position_embeddings = 22
+    reference.rotary_emb._build_tables(torch.device("cpu"))
+    inputs = {
+        "input_ids": torch.tensor([[3, 5, 6, 7, 4]]),
+        "position_ids": torch.tensor([[0, 1, 3, 12, 21]]),
+    }
+    with torch.no_grad():
+        expected = reference(**inputs).last_hidden_state
+        with contact_positions(trunk, inputs["position_ids"]):
+            torch.testing.assert_close(trunk(**inputs).last_hidden_state, expected)
+        assert rotary.max_position_embeddings == 8
+        assert rotary.rope_cos is old_cos and rotary.rope_sin is old_sin
+        with pytest.raises(RuntimeError, match="failed forward"):
+            with contact_positions(trunk, inputs["position_ids"]):
+                torch.testing.assert_close(trunk(**inputs).last_hidden_state, expected)
+                raise RuntimeError("failed forward")
+        assert rotary.max_position_embeddings == 8
+        assert rotary.rope_cos is old_cos and rotary.rope_sin is old_sin
 
 
 def test_fixed_fit_determinism_decay_patience_restoration_and_cap(monkeypatch, caplog):

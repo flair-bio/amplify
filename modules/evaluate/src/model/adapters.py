@@ -42,12 +42,14 @@ def contact_positions(model: Any, positions: torch.Tensor) -> Iterator[None]:
     grown = []
     legacy_table = getattr(model, "freqs_cis", None)
     try:
-        # AMPLIFY supports position_ids and public table rebuilding, but has a fixed limit.
+        # Older AMPLIFY exports expose only the device-specific table builder.
         for module in model.modules():
+            reset = getattr(module, "reset_tables", None)
+            build = getattr(module, "_build_tables", None)
             if all(
                 hasattr(module, name)
-                for name in ("rope_cos", "rope_sin", "reset_tables")
-            ):
+                for name in ("rope_cos", "rope_sin", "max_position_embeddings")
+            ) and (callable(reset) or callable(build)):
                 length = int(positions.max()) + 1
                 if length > module.max_position_embeddings:
                     old_cos, old_sin = module.rope_cos, module.rope_sin
@@ -55,7 +57,10 @@ def contact_positions(model: Any, positions: torch.Tensor) -> Iterator[None]:
                         (module, module.max_position_embeddings, old_cos, old_sin)
                     )
                     module.max_position_embeddings = length
-                    module.reset_tables()
+                    if callable(reset):
+                        reset()
+                    elif callable(build):
+                        build(positions.device)
                     if old_cos is not None and (
                         not torch.equal(old_cos, module.rope_cos[: len(old_cos)])
                         or not torch.equal(old_sin, module.rope_sin[: len(old_sin)])
