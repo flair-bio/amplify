@@ -1,6 +1,9 @@
 workspace:
   task_type: pseudo_perplexity
 
+baselines:
+  names: [amino_acid_frequency]
+
 steps:
   mode: evaluate_as_is
   tune:

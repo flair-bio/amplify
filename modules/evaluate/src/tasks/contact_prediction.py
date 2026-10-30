@@ -159,6 +159,7 @@ class ContactPredictionTask(StructuredTask):
         {"bilinear512", "attention_l1", "categorical_jacobian"}
     )
     supported_controls = frozenset({"random_trunk"})
+    dataset_baselines = frozenset({"separation_prior"})
     uses_predictor_identity = True
     is_ragged = True
     pairwise = True
@@ -255,11 +256,10 @@ class ContactPredictionTask(StructuredTask):
         if (
             config.external_test_sets
             or steps.layerwise.enabled
-            or config.baselines.names
             or steps.predict.baselines
         ):
             raise ValueError(
-                "Contact prediction requires fixed CASP splits, without generic external tests/layers/baselines"
+                "Contact prediction requires fixed CASP splits, without generic external tests/layers/inline baselines"
             )
         if steps.prepare.packed or steps.prepare.split.model_dump() != {
             "name": "default",
@@ -504,17 +504,17 @@ class ContactPredictionTask(StructuredTask):
             "random_trunk": ControlInputs(
                 model=random_model,
                 seed=head_seed,
-                serialization_model=trunk
-                if isinstance(model, ContactJacobianModel)
-                else random_model,
+                serialization_model=(
+                    trunk if isinstance(model, ContactJacobianModel) else random_model
+                ),
                 metadata={
                     "control": "random_trunk",
                     "protocol": "contact-random-trunk-v1",
                     "trunk_initialization": "random_from_config",
                     "trunk_seed": trunk_seed,
-                    "head_seed": None
-                    if isinstance(model, ContactJacobianModel)
-                    else head_seed,
+                    "head_seed": (
+                        None if isinstance(model, ContactJacobianModel) else head_seed
+                    ),
                 },
             )
         }
@@ -525,9 +525,11 @@ class ContactPredictionTask(StructuredTask):
 
         return {
             **inputs.metadata,
-            "development_features": result.input_identity.get("development_features")
-            if isinstance(inputs.model, ContactPredictionModel)
-            else None,
+            "development_features": (
+                result.input_identity.get("development_features")
+                if isinstance(inputs.model, ContactPredictionModel)
+                else None
+            ),
             "fit": result.checkpoint_settings,
         }
 
@@ -546,7 +548,8 @@ class ContactPredictionTask(StructuredTask):
         unsupported = set[str](config.controls) - self.supported_controls
         if unsupported:
             raise ValueError(
-                f"CASP contact prediction only supports random_trunk; got {sorted(unsupported)}"
+                "CASP contact prediction supports only random_trunk; "
+                f"got {sorted(unsupported)}"
             )
         if config.collect_probabilities:
             raise ValueError(
@@ -671,8 +674,13 @@ class ContactPredictionTask(StructuredTask):
             )
         if set(predictions.requested_controls) != set(predictions.controls):
             raise ValueError("Every requested CASP control requires prediction rows")
-        if set(predictions.controls) - {"random_trunk"}:
-            raise ValueError("CASP contact prediction only supports random_trunk")
+        if set(predictions.controls) - (
+            self.supported_controls | self.dataset_baselines
+        ):
+            raise ValueError(
+                "CASP contact prediction supports only random_trunk and "
+                "the configured dataset baselines"
+            )
         if predictions.predictions.is_empty():
             raise ValueError("Contact scoring requires prediction rows")
         payload_columns = {

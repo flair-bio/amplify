@@ -7,7 +7,10 @@ from omegaconf import OmegaConf
 
 from modules.core.utils.config_loader import load_and_parse
 from modules.evaluate.src.contracts.config import EvaluationConfig
-from modules.evaluate.src.contracts.config_loader import load_baseline_config, load_evaluation_config
+from modules.evaluate.src.contracts.config_loader import (
+    load_baseline_config,
+    load_evaluation_config,
+)
 
 CONFIGS = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
 
@@ -97,7 +100,9 @@ def test_contact_rejects_unsupported_heads(head, error):
 
 
 def test_contact_predictor_cannot_be_used_for_other_tasks():
-    with pytest.raises(ValueError, match="not supported for task_type='sequence_classification'"):
+    with pytest.raises(
+        ValueError, match="not supported for task_type='sequence_classification'"
+    ):
         load_evaluation_config(
             [
                 CONFIGS / "config.yaml",
@@ -136,7 +141,9 @@ def test_contact_attention_preset_selects_fixed_predictor():
 
 
 def test_contact_attention_predictor_cannot_be_used_for_other_tasks():
-    with pytest.raises(ValueError, match="not supported for task_type='sequence_classification'"):
+    with pytest.raises(
+        ValueError, match="not supported for task_type='sequence_classification'"
+    ):
         load_evaluation_config(
             [
                 CONFIGS / "config.yaml",
@@ -160,10 +167,13 @@ def test_contact_jacobian_preset_selects_zero_shot_predictor():
     assert not config.steps.prepare.embedding_cache.enabled
     assert not config.steps.tune.hyperparameter_search.enabled
     assert config.steps.predict.controls == ["random_trunk"]
+    assert config.baselines.names == ["separation_prior"]
 
 
 def test_contact_jacobian_predictor_cannot_be_used_for_other_tasks():
-    with pytest.raises(ValueError, match="not supported for task_type='sequence_classification'"):
+    with pytest.raises(
+        ValueError, match="not supported for task_type='sequence_classification'"
+    ):
         load_evaluation_config(
             [
                 CONFIGS / "config.yaml",
@@ -310,13 +320,14 @@ def test_task_control_defaults(task, dataset, controls):
     )
     assert config.steps.predict.controls == controls
     expected_baselines = {
-        "sequence_classification": ["majority_class"],
-        "sequence_regression": ["train_mean"],
+        "sequence_classification": ["majority_class", "composition", "mmseqs_knn"],
+        "sequence_regression": ["train_mean", "composition", "mmseqs_knn"],
+        "pseudo_perplexity": ["amino_acid_frequency"],
+        "contact_prediction": ["separation_prior"],
+        "token_classification": ["majority_class"],
     }.get(task, [])
     assert config.baselines.names == expected_baselines
-    assert config.steps.predict.baselines == (
-        ["majority_class"] if task == "token_classification" else []
-    )
+    assert config.steps.predict.baselines == []
 
 
 def test_protparams_uses_sequence_regression_r2_defaults():

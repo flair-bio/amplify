@@ -25,7 +25,7 @@ class SequenceRegressionTask(FlatMetricsTask):
     """One continuous target per sequence with regression metrics."""
 
     supports_layerwise = True
-    dataset_baselines = frozenset({"train_mean"})
+    dataset_baselines = frozenset({"train_mean", "composition", "mmseqs_knn"})
     prediction_baselines = frozenset({"train_mean"})
 
     name = "sequence_regression"

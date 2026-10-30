@@ -22,11 +22,26 @@ from pydantic import (
 logger = logging.getLogger(__name__)
 _MIN_RECOMMENDED_BOOTSTRAP_SAMPLES = 1000
 _DEFAULT_N_PERMUTATIONS = 1000
-BASELINE_NAMES = frozenset({"majority_class", "train_mean"})
+BASELINE_NAMES = frozenset(
+    {
+        "majority_class",
+        "train_mean",
+        "composition",
+        "mmseqs_knn",
+        "amino_acid_frequency",
+    }
+)
 DEFAULT_SPLIT_NAME = "default"
 CLASSICAL_HEAD_TYPES = frozenset({"sklearn_linear", "knn", "random_forest", "xgboost"})
 TORCH_EMBEDDING_HEAD_TYPES = frozenset({"torch_linear"})
-BaselineName = Literal["majority_class", "train_mean"]
+BaselineName = Literal[
+    "majority_class",
+    "train_mean",
+    "composition",
+    "mmseqs_knn",
+    "amino_acid_frequency",
+    "separation_prior",
+]
 ControlCondition = Literal[
     "untrained",
     "random_trunk",
@@ -901,7 +916,7 @@ class EvaluationConfig(BaseModel):
             & get_task(self.workspace.task_type).dataset_baselines
         ):
             raise ValueError(
-                "Move sequence majority_class/train_mean from steps.predict.controls "
+                "Move shared baselines from steps.predict.controls/predict.baselines "
                 "to baselines.names and run run_evaluate.py --baselines first."
             )
         from modules.evaluate.src.contracts.validation import (

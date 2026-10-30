@@ -11,12 +11,35 @@ import torch
 
 from modules.evaluate.src.metrics import contact_metrics
 from modules.evaluate.src.tasks import get_task
+from modules.evaluate.src.dataset.contact import (
+    ContactChain,
+    align_contact_sequence,
+    separation_prior_scores,
+)
 from modules.evaluate.src.tasks.contact_prediction import IGNORE_INDEX
 from modules.evaluate.src.model.inference import pad_for_gather
 
 
 def _task():
     return get_task("contact_prediction")
+
+
+def test_separation_prior_uses_original_coordinates_across_unresolved_residues():
+    chain = ContactChain(
+        record_id="target",
+        split="test",
+        source="casp",
+        edition=14,
+        complex_id="complex",
+        target="target",
+        alignment=align_contact_sequence("ACXDE"),
+        units=(),
+    )
+    scores = separation_prior_scores(chain)
+    assert scores.shape == (4, 4)
+    assert scores[0, 1] == pytest.approx(1 / 2)
+    assert scores[0, 2] == pytest.approx(1 / 4)
+    assert scores[0, 1] > scores[0, 2]
 
 
 def test_align_labels_crops_and_shifts_pairs():

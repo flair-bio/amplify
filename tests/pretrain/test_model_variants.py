@@ -672,7 +672,7 @@ def test_legacy_positional_config_matches_keyword_config(args):
     actual = AMPLIFYConfig(*args)
     assert actual.to_dict() == expected.to_dict()
     assert actual.gaussian_init is False
-    # New options remain available alongside legacy positional arguments.
+    # Optional keywords remain available alongside positional arguments.
     gaussian = AMPLIFYConfig(*args, gaussian_init=True)
     expected.gaussian_init = True
     assert gaussian.to_dict() == expected.to_dict()

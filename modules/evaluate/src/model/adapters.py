@@ -29,7 +29,7 @@ def masked_lm_logits(model: nn.Module, inputs: dict[str, torch.Tensor]) -> torch
 
 @contextmanager
 def contact_positions(model: Any, positions: torch.Tensor) -> Iterator[None]:
-    """Prefer position_ids; contain legacy rotary compatibility and restore state."""
+    """Prefer position_ids; adapt rotary tables when needed and restore state."""
     rotary = [
         module
         for module in model.modules()
@@ -42,7 +42,7 @@ def contact_positions(model: Any, positions: torch.Tensor) -> Iterator[None]:
     grown = []
     legacy_table = getattr(model, "freqs_cis", None)
     try:
-        # Older AMPLIFY exports expose only the device-specific table builder.
+        # Table-based AMPLIFY exports expose a device-specific table builder.
         for module in model.modules():
             reset = getattr(module, "reset_tables", None)
             build = getattr(module, "_build_tables", None)
@@ -76,7 +76,7 @@ def contact_positions(model: Any, positions: torch.Tensor) -> Iterator[None]:
                             )
                         new_cos.copy_(old_cos)
                         new_sin.copy_(old_sin)
-        # Older HF ESM ignores rotary position_ids; no public equivalent exists there.
+        # Table-based HF ESM rotary modules do not consume position_ids.
         for module in rotary:
             saved.append(
                 (module, module._seq_len_cached, module._cos_cached, module._sin_cached)

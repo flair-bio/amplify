@@ -29,7 +29,7 @@ class TokenClassificationTask(FlatMetricsTask):
     """
 
     supports_layerwise = True
-    prediction_baselines = frozenset({"majority_class"})
+    dataset_baselines = frozenset({"majority_class"})
 
     name = "token_classification"
     auto_model_class = AutoModelForTokenClassification

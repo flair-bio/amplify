@@ -370,5 +370,39 @@ def candidate_pairs(
     )
 
 
+def separation_prior_scores(chain: ContactChain) -> np.ndarray:
+    """Rank pairs by inverse separation in original, possibly discontinuous coordinates."""
+    positions = np.asarray(chain.alignment.retained_positions, dtype=np.float64)
+    return 1.0 / (1.0 + np.abs(positions[:, None] - positions[None, :]))
+
+
+def separation_prior_prediction_rows(
+    dataset: ContactDataset, split: str = "test"
+) -> list[dict[str, Any]]:
+    """Produce canonical contact prediction rows without loading a model."""
+    from modules.evaluate.src.metrics.contact_metrics import contact_prediction_row
+
+    rows = []
+    for chain in dataset.splits[split]:
+        scores = separation_prior_scores(chain)
+        for unit in chain.units:
+            rows.append(
+                {
+                    "id": unit.id,
+                    "record_id": chain.record_id,
+                    "unit_id": unit.unit_id,
+                    "split": chain.split,
+                    "source": chain.source,
+                    "edition": chain.edition,
+                    "complex_id": chain.complex_id,
+                    "target": chain.target,
+                    "kind": unit.kind,
+                    "labels_available": unit.labels_available,
+                    **contact_prediction_row(scores, unit, chain.alignment),
+                }
+            )
+    return rows
+
+
 # Loss/metric ignore index for padding and (unscored) short-range pairs.
 IGNORE_INDEX = -100

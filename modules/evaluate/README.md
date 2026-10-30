@@ -242,7 +242,7 @@ workspace.dataset_revision=null
 Keep `workspace.dataset_config_name` from the overlay. This works offline and
 also applies to `--baselines`. Localization's external setHARD test follows
 the same suite root and revision. A single configuration directory such as
-`/path/to/evaluation-suite/meltome_human` is also supported. For a legacy
+`/path/to/evaluation-suite/meltome_human` is also supported. For a
 standalone Hub repository, override its repo ID and set
 `workspace.dataset_config_name=null`; configure external test sources separately.
 Dataset configuration selection is separate from
@@ -288,8 +288,7 @@ after CUDA OOM, but the full FP32 Jacobian must still fit on the GPU.
 
 Supported defaults do not implement every planned benchmark: stability still
 uses pooled Spearman, ProtParams evaluates one selected property per run,
-and HMD-ARG is provisional 14-class classification. Composition, MMseqs k-NN,
-contact separation-prior and amino-acid-frequency baselines remain deferred.
+and HMD-ARG is provisional 14-class classification.
 
 Task overlays explicitly select the reported metric and the validation
 selection metric/direction: Macro-F1 for classification, R² for regression
@@ -387,8 +386,13 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
     steps.score.n_samples=1000
 ```
 
-Sequence task presets request shared `majority_class` or `train_mean`
-baselines. Generate them before model evaluation using the same dataset,
+Shared baselines are configured directly in `configs/tasks/*.yaml` through
+`baselines.names`; no separate baseline YAML overlay is needed.
+Sequence task presets request shared majority/mean, composition, and MMseqs
+baselines. The pseudo-perplexity preset requests the test-corpus amino-acid
+frequency baseline; token classification requests the all-training-residue
+majority prior and contact prediction requests the separation prior.
+Generate them before model evaluation using the same dataset,
 split settings, and `workspace.base_path` (no model overlay required):
 
 ```bash
@@ -669,8 +673,8 @@ metadata. With refit disabled, the selected trial's weights are retained.
 With no architecture search configured,
 `head.hidden_size` and `head.hidden_depth` set the fixed architecture.
 Seed-variance diagnostics still run on the original train/validation splits
-before refitting. Those loaders are retained for controls; `majority_class`
-and `train_mean` continue to use train-only labels. Cached `random_trunk`
+before refitting. Those loaders are retained for controls; shared sequence
+baselines use the training split only. Cached `random_trunk`
 independently selects and refits its own probe with the same search budget
 and training protocol on random-trunk features, including its own preprocessing.
 Its checkpoint is saved under `<variant>-random_trunk` when saving is enabled.
@@ -749,7 +753,11 @@ conditions sharing a forward pass; validation loops remain quiet.
 | `random_both` | Trunk and head re-initialized |
 | `scrambled_sequences` | Residues shuffled within each sequence |
 | `scrambled_labels` | Trained predictions scored against permuted labels |
-| `majority_class` | Train class prior; inside Predict for token tasks only |
+| `majority_class` | Shared train class prior; token tasks count all labeled training residues, excluding `-100` |
+| `composition` | Logistic/ridge probe on normalized amino-acid frequencies |
+| `mmseqs_knn` | Significant MMseqs2 top training hit (E-value <= 0.001); training-mean/class-prior fallback for no hits, with coverage recorded |
+| `separation_prior` | Shared inverse-separation baseline for CASP contact pairs; generated with `--baselines` |
+| `amino_acid_frequency` | Smoothed IID amino-acid prior for pseudo-perplexity |
 
 Per-task presets, invalid combinations, and how to read the results are in
 [Controls](docs/controls.md).
@@ -762,7 +770,7 @@ Per-task presets, invalid combinations, and how to read the results are in
 | `predictions_filename` | `predictions.parquet` | Output filename directly under the run directory |
 | `persist_to_disk` | `true` | Write predictions and the prediction manifest; disable for fast in-process evaluation |
 | `store_sequences` | `false` | Decode and include source sequences in the main predictions table |
-| `controls` | `[random_trunk]` | Per-model controls. Sequence priors use top-level `baselines.names` and the separate `--baselines` route |
+| `controls` | `[random_trunk]` | Per-model controls. Shared baselines use top-level `baselines.names` and the separate `--baselines` route |
 | `embedding_batch_size` | `null` | Cached-feature rows per prediction batch, including model-based controls; `null` inherits the prepared loader size. Does not change live trunk batches. |
 
 Cached token probes batch **residues**, not proteins. The token-classification
@@ -897,8 +905,8 @@ ordinary-run resume mode.
 
 Ordinary CLI runs isolate artifacts under `seed_<seed>`. The experiment directory
 also records seed-independent settings; sibling seeds cannot use different
-settings or, for CASP embeddings, different dataset/backbone content. Historical
-unseeded outputs are not migrated or removed: choose a new run ID.
+settings or, for CASP embeddings, different dataset/backbone content. Unseeded
+output directories are left unchanged; use a distinct run ID to avoid conflicts.
 
 Even with `--overwrite`, a model/dataset label already associated with a
 different input source cannot be reused in the same workspace: choose a new
@@ -1170,9 +1178,9 @@ depend on the filesystem's atomic mkdir/rename semantics; local concurrency
 tests do not certify NFS/GPFS deployments, and publication is not power-loss
 durability.
 
-Contact backbone compatibility is isolated in `model/adapters.py`. Current
-position-aware backbones use original `position_ids`; old ESM rotary and legacy
-AMPLIFY checkpoints still require contained table adaptation. Tables are restored
+Contact backbone compatibility is isolated in `model/adapters.py`.
+Position-aware backbones use original `position_ids`; ESM rotary modules and
+AMPLIFY checkpoints that expose rotary tables require contained table adaptation. Tables are restored
 after success or exceptions. Jacobian inference composes supported public encoders
 and FP32 MLM heads without replacing `forward`.
 
@@ -1275,7 +1283,6 @@ overrides the ragged-label hooks (`is_ragged`, `aligns_labels`,
 
 | Symptom | Cause and fix |
 |---|---|
-| Results from before the positional-label or multilabel-control fixes | Rerun affected positional evaluations. Regenerate older softmax-based multilabel controls and their score comparisons; embedding caches remain reusable and trained-model scores are unaffected by the control-probability fix. |
 | `One of the subprocesses has abruptly died during map operation` | A tokenization worker exited, often because the job exceeded its CPU RAM allocation. Check Slurm/cgroup OOM counters; `steps.prepare.tokenize_num_proc=1` disables map multiprocessing for diagnosis (Accelerate's `--num_processes` does not). Pseudo-perplexity expands each protein into one masked row per residue, so it uses one source protein per map batch to bound RAM; the expanded on-disk dataset can still be large. |
 | `ValueError: Configured <role> source split '...' was not found` | The dataset doesn't publish that split; check `steps.prepare.split` against the listed available splits (see [Named benchmark splits](#named-benchmark-splits)) |
 | `ValueError: Packed evaluation requires CUDA.` | `steps.prepare.packed=true` on a machine without a GPU; set it to `false` |
