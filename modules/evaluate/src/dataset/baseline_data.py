@@ -284,7 +284,31 @@ def external_baseline_context(
 
 
 def artifact_identity(context: dict[str, Any], name: str) -> dict[str, Any]:
-    return {"baseline": name, "fit": context["fit"], "test": context["test"]}
+    fit = context["fit"]
+    if name == "mmseqs_knn":
+        fit = {
+            **fit,
+            "protocols": {
+                **fit["protocols"],
+                "mmseqs_knn": "mmseqs-significant-top1-training-prior-v2",
+            },
+        }
+    return {"baseline": name, "fit": fit, "test": context["test"]}
+
+
+def mmseqs_coverage(frame: pl.DataFrame) -> dict[str, int | float]:
+    """Summarize significant-hit coverage without dropping fallback rows."""
+    fallback = frame["fallback"]
+    if fallback.dtype != pl.Boolean or fallback.null_count() or not frame.height:
+        raise ValueError("MMseqs2 baseline requires nonnull boolean fallback flags.")
+    fallback_count = int(fallback.sum())
+    matched = frame.height - fallback_count
+    return {
+        "matched": matched,
+        "fallback": fallback_count,
+        "total": frame.height,
+        "fraction_matched": matched / frame.height,
+    }
 
 
 def artifact_directory(context: dict[str, Any], name: str) -> Path:
@@ -343,8 +367,12 @@ def load_baseline_artifact(
         "token_classification",
     }:
         required.add("probability")
+    if name == "mmseqs_knn":
+        required.add("fallback")
     if not required.issubset(frame.columns) or frame.height != manifest["rows"]:
         raise ValueError(f"Invalid baseline prediction schema/count: {path}")
+    if name == "mmseqs_knn" and manifest.get("coverage") != mmseqs_coverage(frame):
+        raise ValueError(f"Invalid MMseqs2 coverage metadata: {manifest_path}")
     return frame, path
 
 

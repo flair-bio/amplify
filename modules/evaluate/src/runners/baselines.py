@@ -23,6 +23,7 @@ from modules.evaluate.src.dataset.baseline_data import (
     contact_baseline_context,
     external_baseline_context,
     load_baseline_artifact,
+    mmseqs_coverage,
     sequence_rows,
     unlabeled_sequence_rows,
 )
@@ -142,7 +143,10 @@ def run_baselines(
             directory.mkdir(parents=True, exist_ok=True)
             with cache_lock(directory.parent / ".lock"):
                 fit_path = directory.parent / "fit_manifest.json"
-                fit_identity = {"baseline": name, "fit": test_context["fit"]}
+                fit_identity = {
+                    "baseline": name,
+                    "fit": artifact_identity(test_context, name)["fit"],
+                }
                 if fit_path.exists():
                     if json.loads(fit_path.read_text()) != fit_identity:
                         raise ValueError(
@@ -271,6 +275,11 @@ def _publish_baseline(
         temporary = directory / f".{uuid4().hex}.parquet"
         path = directory / "predictions.parquet"
         try:
+            metadata = {}
+            if name == "mmseqs_knn":
+                coverage = mmseqs_coverage(frame)
+                metadata["coverage"] = coverage
+                logger.info("MMseqs2 significant-hit coverage: %s", coverage)
             frame.write_parquet(temporary)
             temporary.replace(path)
             write_json(
@@ -279,6 +288,7 @@ def _publish_baseline(
                     "identity": artifact_identity(context, name),
                     "rows": frame.height,
                     "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    **metadata,
                 },
             )
         finally:

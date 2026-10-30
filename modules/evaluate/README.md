@@ -755,7 +755,7 @@ conditions sharing a forward pass; validation loops remain quiet.
 | `scrambled_labels` | Trained predictions scored against permuted labels |
 | `majority_class` | Shared train class prior; token tasks count all labeled training residues, excluding `-100` |
 | `composition` | Logistic/ridge probe on normalized amino-acid frequencies |
-| `mmseqs_knn` | Top-1 training-sequence match from MMseqs2 |
+| `mmseqs_knn` | Significant MMseqs2 top training hit (E-value <= 0.001); training-mean/class-prior fallback for no hits, with coverage recorded |
 | `separation_prior` | Shared inverse-separation baseline for CASP contact pairs; generated with `--baselines` |
 | `amino_acid_frequency` | Smoothed IID amino-acid prior for pseudo-perplexity |
 

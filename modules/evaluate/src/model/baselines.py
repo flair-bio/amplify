@@ -97,16 +97,29 @@ def build_sequence_baseline(
             )
         elif name == "mmseqs_knn":
             neighbors = _mmseqs_nearest_neighbors(train_rows, test_rows)
+            class_counts = np.bincount(labels, minlength=num_labels)
+            majority = int(class_counts.argmax())
+            prior = (class_counts / class_counts.sum()).tolist()
             baseline_predictions = [
-                int(train_rows[index]["label"]) for index in neighbors
+                majority if index is None else int(train_rows[index]["label"])
+                for index in neighbors
             ]
             probability_rows = [
-                [float(class_index == prediction) for class_index in range(num_labels)]
-                for prediction in baseline_predictions
+                (
+                    prior
+                    if index is None
+                    else [
+                        float(class_index == prediction)
+                        for class_index in range(num_labels)
+                    ]
+                )
+                for index, prediction in zip(
+                    neighbors, baseline_predictions, strict=True
+                )
             ]
         else:
             raise ValueError(f"Unknown classification baseline: {name}.")
-        return pl.DataFrame(
+        frame = pl.DataFrame(
             {
                 "id": [row["id"] for row in test_rows],
                 "label": [row["label"] for row in test_rows],
@@ -114,6 +127,11 @@ def build_sequence_baseline(
                 "probability": probability_rows,
             }
         )
+        if name == "mmseqs_knn":
+            frame = frame.with_columns(
+                pl.Series("fallback", [index is None for index in neighbors])
+            )
+        return frame
     if task_type != "sequence_regression":
         raise ValueError(f"Sequence baseline is not supported for {task_type}.")
     if name not in {"train_mean", "composition", "mmseqs_knn"}:
@@ -135,16 +153,23 @@ def build_sequence_baseline(
         regression_predictions = estimator.predict(test_features).tolist()
     else:
         neighbors = _mmseqs_nearest_neighbors(train_rows, test_rows)
+        train_mean = math.fsum(labels) / len(labels)
         regression_predictions = [
-            float(train_rows[index]["label"]) for index in neighbors
+            train_mean if index is None else float(train_rows[index]["label"])
+            for index in neighbors
         ]
-    return pl.DataFrame(
+    frame = pl.DataFrame(
         {
             "id": [row["id"] for row in test_rows],
             "label": [row["label"] for row in test_rows],
             "prediction": regression_predictions,
         }
     )
+    if name == "mmseqs_knn":
+        frame = frame.with_columns(
+            pl.Series("fallback", [index is None for index in neighbors])
+        )
+    return frame
 
 
 def amino_acid_composition(sequence: str) -> np.ndarray:
@@ -176,8 +201,8 @@ def _mmseqs_sequence(sequence: str) -> str:
 
 def _mmseqs_nearest_neighbors(
     train_rows: list[dict[str, Any]], test_rows: list[dict[str, Any]]
-) -> list[int]:
-    """Run deterministic MMseqs2 top-1 search against training sequences only."""
+) -> list[int | None]:
+    """Return significant top training hits, or None when no hit passes."""
     executable = shutil.which("mmseqs")
     if executable is None:
         raise FileNotFoundError(
@@ -226,13 +251,19 @@ def _mmseqs_nearest_neighbors(
                 str(result_path),
                 str(tmp_path),
                 "--format-output",
-                "query,target",
+                "query,target,bits,evalue",
                 "--max-seqs",
+                "300",
+                "-s",
+                "7.5",
+                "--mask",
+                "1",
+                "--comp-bias-corr",
                 "1",
                 "--threads",
                 "1",
                 "-e",
-                "100000",
+                "0.001",
             ],
             check=False,
             capture_output=True,
@@ -245,25 +276,32 @@ def _mmseqs_nearest_neighbors(
             )
         if not result_path.exists():
             raise RuntimeError("MMseqs2 completed without producing its result table.")
-        matches: dict[int, int] = {}
+        matches: dict[int, tuple[float, float, int]] = {}
         for line in result_path.read_text().splitlines():
-            query, target = line.split("\t")
+            query, target, bits, evalue = line.split("\t")
             query_index = int(query.removeprefix("test_"))
             target_index = int(target.removeprefix("train_"))
-            if query_index in matches:
-                raise ValueError(f"MMseqs2 returned multiple hits for {query}.")
             if not 0 <= query_index < len(test_rows) or not 0 <= target_index < len(
                 train_rows
             ):
                 raise ValueError("MMseqs2 returned an unknown query or training ID.")
-            matches[query_index] = target_index
-        missing = sorted(set(range(len(test_rows))) - matches.keys())
-        if missing:
-            raise ValueError(
-                "MMseqs2 found no training-sequence neighbor for test rows "
-                f"{missing[:10]}."
-            )
-        return [matches[index] for index in range(len(test_rows))]
+            bit_score, expectation = float(bits), float(evalue)
+            if (
+                not math.isfinite(bit_score)
+                or not math.isfinite(expectation)
+                or expectation < 0
+            ):
+                raise ValueError("MMseqs2 returned an invalid alignment score.")
+            if expectation > 0.001:
+                continue
+            # Highest bit score, then lowest E-value, then training row order.
+            rank = (-bit_score, expectation, target_index)
+            if query_index not in matches or rank < matches[query_index]:
+                matches[query_index] = rank
+        return [
+            matches[index][2] if index in matches else None
+            for index in range(len(test_rows))
+        ]
 
 
 def build_amino_acid_frequency_baseline(

@@ -208,8 +208,21 @@ explicit override where supported. Shared sequence, token and CASP contact
 baselines run once per dataset/split/protocol with `--baselines`.
 MMseqs k-NN requires the `mmseqs` executable on `PATH`. Composition is fitted
 with scikit-learn logistic regression (classification) or ridge regression
-(regression); MMseqs uses its single highest-ranked training hit. Both are
-deterministic and use no validation/test labels.
+(regression). MMseqs uses sensitivity 7.5 and up to 300 prefilter candidates,
+with masking and composition correction enabled. It transfers the target from
+the highest-bit-score training hit with E-value <= 0.001; ties use lower E-value,
+then training row order. This is approximate significant-hit transfer, not an
+exhaustive nearest-neighbor search.
+
+Queries without a significant hit use the training mean (regression) or training
+class-frequency probabilities and their majority class (classification).
+Predictions retain every test row and include a boolean `fallback` column.
+Artifact manifests and per-model score baseline references report `coverage`:
+`matched`, `fallback`, `total`, and `fraction_matched`. Full-test metrics therefore
+measure **MMseqs top-hit transfer with training-prior fallback**, not matched-only
+performance. The versioned MMseqs protocol uses new artifacts; existing constant
+and composition artifacts remain reusable. Both sequence methods are deterministic
+and use no validation/test labels.
 
 Config validation ([`contracts/validation.py`](../src/contracts/validation.py))
 rejects these combinations before any work starts:

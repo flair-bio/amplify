@@ -29,6 +29,7 @@ from modules.evaluate.src.dataset.baseline_data import (
     align_token_baseline,
     artifact_identity,
     load_baseline_artifact,
+    mmseqs_coverage,
 )
 from modules.evaluate.src.dataset.workspace import EvaluationWorkspace
 from modules.evaluate.src.metrics.scoring import compare_layer_scores
@@ -97,6 +98,8 @@ class ScoreStep:
                         predict_result.baseline_context, name
                     ),
                 }
+                if name == "mmseqs_knn":
+                    baseline_references[name]["coverage"] = mmseqs_coverage(frame)
             predict_result = replace(
                 predict_result, controls=controls, requested_controls=requested_controls
             )

@@ -305,7 +305,7 @@ def test_score_loads_shared_predictions_and_standalone_manifest(
         config.baselines.names = [baseline]
     monkeypatch.setattr(
         "modules.evaluate.src.model.baselines._mmseqs_nearest_neighbors",
-        lambda train, test: [0, 1, 2],
+        lambda train, test: [0, None, 2],
     )
     run_baselines(config, dataset=data)
     context = _context(config, data)
@@ -360,6 +360,13 @@ def test_score_loads_shared_predictions_and_standalone_manifest(
         assert score_manifest["baselines"][name]["identity"]["fit"]["fit_policy"] == (
             "train_only"
         )
+        if name == "mmseqs_knn":
+            assert score_manifest["baselines"][name]["coverage"] == {
+                "matched": 2,
+                "fallback": 1,
+                "total": 3,
+                "fraction_matched": 2 / 3,
+            }
         if name == "train_mean":
             assert np.isnan(score_manifest["baselines"][name]["scores"]["spearmanr"])
             baseline_scores = conditions.filter(
@@ -579,17 +586,36 @@ def test_composition_baselines_fit_normalized_residue_frequencies():
     assert regression["prediction"][0] < regression["prediction"][1]
 
 
-def test_mmseqs_knn_uses_top_training_hit_and_reports_missing_tool(monkeypatch):
+@pytest.mark.parametrize("reverse_hits", [False, True])
+def test_mmseqs_knn_uses_top_training_hit_and_reports_missing_tool(
+    monkeypatch, reverse_hits
+):
     train = [
         {"id": "first", "sequence": "AAAA", "label": 0},
         {"id": "second", "sequence": "CCCC", "label": 1},
     ]
-    test = [{"id": "query", "sequence": "CCCC", "label": 1}]
+    test = [
+        {"id": "query", "sequence": "CCCC", "label": 1},
+        {"id": "no_hit", "sequence": "AAAA", "label": 0},
+    ]
 
     def fake_search(command, *, check, capture_output, text):
         assert command[1] == "easy-search"
         assert command[command.index("--threads") + 1] == "1"
-        Path(command[4]).write_text("test_0\ttrain_1\n")
+        assert command[command.index("--max-seqs") + 1] == "300"
+        assert command[command.index("-s") + 1] == "7.5"
+        assert command[command.index("-e") + 1] == "0.001"
+        assert command[command.index("--mask") + 1] == "1"
+        assert command[command.index("--comp-bias-corr") + 1] == "1"
+        hits = [
+            "test_0\ttrain_0\t20\t1e-5",
+            "test_0\ttrain_1\t30\t1e-6",
+            "test_0\ttrain_0\t100\t0.1",
+            "test_1\ttrain_0\t10\t0.01",
+        ]
+        Path(command[4]).write_text(
+            "\n".join(reversed(hits) if reverse_hits else hits) + "\n"
+        )
         return type("Result", (), {"returncode": 0, "stderr": "", "stdout": ""})()
 
     monkeypatch.setattr(
@@ -598,13 +624,118 @@ def test_mmseqs_knn_uses_top_training_hit_and_reports_missing_tool(monkeypatch):
     monkeypatch.setattr(
         "modules.evaluate.src.model.baselines.subprocess.run", fake_search
     )
-    assert _mmseqs_nearest_neighbors(train, test) == [1]
+    assert _mmseqs_nearest_neighbors(train, test) == [1, None]
 
     monkeypatch.setattr(
         "modules.evaluate.src.model.baselines.shutil.which", lambda _: None
     )
     with pytest.raises(FileNotFoundError, match="requires the MMseqs2"):
         _mmseqs_nearest_neighbors(train, test)
+
+
+def test_mmseqs_knn_breaks_score_ties_by_evalue_then_training_order(monkeypatch):
+    rows = [{"sequence": "CCCC"}] * 3
+
+    def fake_search(command, **kwargs):
+        Path(command[4]).write_text(
+            "test_0\ttrain_2\t30\t1e-6\n"
+            "test_0\ttrain_1\t30\t1e-6\n"
+            "test_0\ttrain_0\t30\t1e-5\n"
+        )
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(
+        "modules.evaluate.src.model.baselines.shutil.which", lambda _: "/usr/bin/mmseqs"
+    )
+    monkeypatch.setattr(
+        "modules.evaluate.src.model.baselines.subprocess.run", fake_search
+    )
+    assert _mmseqs_nearest_neighbors(rows, rows[:1]) == [1]
+
+
+@pytest.mark.parametrize("failure", [None, "command", "missing_table", "unknown_id"])
+def test_mmseqs_empty_hits_allow_fallback_but_tool_errors_do_not(monkeypatch, failure):
+    rows = [{"sequence": "CCCC"}]
+
+    def fake_search(command, **kwargs):
+        if failure != "missing_table":
+            Path(command[4]).write_text(
+                "test_0\ttrain_9\t30\t1e-6\n" if failure == "unknown_id" else ""
+            )
+        return type(
+            "Result",
+            (),
+            {
+                "returncode": int(failure == "command"),
+                "stderr": "search failed" if failure == "command" else "",
+                "stdout": "",
+            },
+        )()
+
+    monkeypatch.setattr(
+        "modules.evaluate.src.model.baselines.shutil.which", lambda _: "/usr/bin/mmseqs"
+    )
+    monkeypatch.setattr(
+        "modules.evaluate.src.model.baselines.subprocess.run", fake_search
+    )
+    if failure is None:
+        assert _mmseqs_nearest_neighbors(rows, rows) == [None]
+    else:
+        with pytest.raises(
+            ValueError if failure == "unknown_id" else RuntimeError,
+            match={
+                "command": "search failed",
+                "missing_table": "without producing",
+                "unknown_id": "unknown query or training ID",
+            }[failure],
+        ):
+            _mmseqs_nearest_neighbors(rows, rows)
+
+
+@pytest.mark.parametrize("regression", [False, True])
+@pytest.mark.parametrize("all_missing", [False, True])
+def test_mmseqs_fallback_uses_training_prior_and_records_coverage(
+    tmp_path, monkeypatch, regression, all_missing
+):
+    config, data = _config(tmp_path, regression), _data(regression)
+    config.baselines.names = ["mmseqs_knn"]
+    neighbors = [None, None, None] if all_missing else [0, None, 2]
+    monkeypatch.setattr(
+        "modules.evaluate.src.model.baselines._mmseqs_nearest_neighbors",
+        lambda train, test: neighbors,
+    )
+    path = run_baselines(config, dataset=data)["test"]["mmseqs_knn"]
+    frame, _ = load_baseline_artifact(_context(config, data), "mmseqs_knn")
+    assert frame["fallback"].to_list() == [index is None for index in neighbors]
+    fallback = frame.filter(pl.col("fallback"))
+    assert fallback["prediction"].to_list() == [
+        2.0 if regression else 1
+    ] * fallback.height
+    if not regression:
+        for probabilities in fallback["probability"].to_list():
+            assert probabilities == pytest.approx([1 / 3, 2 / 3, 0])
+    manifest = json.loads(path.with_name("manifest.json").read_text())
+    assert manifest["coverage"] == {
+        "matched": 0 if all_missing else 2,
+        "fallback": 3 if all_missing else 1,
+        "total": 3,
+        "fraction_matched": 0.0 if all_missing else 2 / 3,
+    }
+    if not all_missing:
+        assert frame["prediction"][0] == data["train"]["targets"][0]
+        assert frame["prediction"][2] == data["train"]["targets"][2]
+
+
+def test_mmseqs_protocol_change_preserves_other_baseline_paths(tmp_path):
+    from modules.evaluate.src.dataset.baseline_data import artifact_identity, identity_hash
+
+    config, data = _config(tmp_path), _data()
+    context = _context(config, data)
+    original_hash = identity_hash(context["fit"])[:12]
+    for name in ("majority_class", "composition", "train_mean", "amino_acid_frequency"):
+        assert artifact_identity(context, name)["fit"] == context["fit"]
+        assert artifact_directory(context, name).parent.name == f"fit-{original_hash}"
+    assert artifact_directory(context, "mmseqs_knn").parent.name != f"fit-{original_hash}"
 
 
 def test_amino_acid_frequency_baseline_runs_on_test_only_data(tmp_path):
