@@ -242,7 +242,7 @@ workspace.dataset_revision=null
 Keep `workspace.dataset_config_name` from the overlay. This works offline and
 also applies to `--baselines`. Localization's external setHARD test follows
 the same suite root and revision. A single configuration directory such as
-`/path/to/evaluation-suite/meltome_human` is also supported. For a legacy
+`/path/to/evaluation-suite/meltome_human` is also supported. For a
 standalone Hub repository, override its repo ID and set
 `workspace.dataset_config_name=null`; configure external test sources separately.
 Dataset configuration selection is separate from
@@ -905,8 +905,8 @@ ordinary-run resume mode.
 
 Ordinary CLI runs isolate artifacts under `seed_<seed>`. The experiment directory
 also records seed-independent settings; sibling seeds cannot use different
-settings or, for CASP embeddings, different dataset/backbone content. Historical
-unseeded outputs are not migrated or removed: choose a new run ID.
+settings or, for CASP embeddings, different dataset/backbone content. Unseeded
+output directories are left unchanged; use a distinct run ID to avoid conflicts.
 
 Even with `--overwrite`, a model/dataset label already associated with a
 different input source cannot be reused in the same workspace: choose a new
@@ -1178,9 +1178,9 @@ depend on the filesystem's atomic mkdir/rename semantics; local concurrency
 tests do not certify NFS/GPFS deployments, and publication is not power-loss
 durability.
 
-Contact backbone compatibility is isolated in `model/adapters.py`. Current
-position-aware backbones use original `position_ids`; old ESM rotary and legacy
-AMPLIFY checkpoints still require contained table adaptation. Tables are restored
+Contact backbone compatibility is isolated in `model/adapters.py`.
+Position-aware backbones use original `position_ids`; ESM rotary modules and
+AMPLIFY checkpoints that expose rotary tables require contained table adaptation. Tables are restored
 after success or exceptions. Jacobian inference composes supported public encoders
 and FP32 MLM heads without replacing `forward`.
 
@@ -1283,7 +1283,6 @@ overrides the ragged-label hooks (`is_ragged`, `aligns_labels`,
 
 | Symptom | Cause and fix |
 |---|---|
-| Results from before the positional-label or multilabel-control fixes | Rerun affected positional evaluations. Regenerate older softmax-based multilabel controls and their score comparisons; embedding caches remain reusable and trained-model scores are unaffected by the control-probability fix. |
 | `One of the subprocesses has abruptly died during map operation` | A tokenization worker exited, often because the job exceeded its CPU RAM allocation. Check Slurm/cgroup OOM counters; `steps.prepare.tokenize_num_proc=1` disables map multiprocessing for diagnosis (Accelerate's `--num_processes` does not). Pseudo-perplexity expands each protein into one masked row per residue, so it uses one source protein per map batch to bound RAM; the expanded on-disk dataset can still be large. |
 | `ValueError: Configured <role> source split '...' was not found` | The dataset doesn't publish that split; check `steps.prepare.split` against the listed available splits (see [Named benchmark splits](#named-benchmark-splits)) |
 | `ValueError: Packed evaluation requires CUDA.` | `steps.prepare.packed=true` on a machine without a GPU; set it to `false` |

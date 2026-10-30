@@ -707,7 +707,7 @@ It finishes with `Data sources prepared. Exiting (dataset.prepare_only).`, and t
 
 ### Staging data to node-local disk (network filesystems)
 
-Training reads rows in random order. If `HF_DATASETS_CACHE` is on a network filesystem that doesn't page-cache those reads (e.g. Mila's `/network/projects`, BeeGFS with `tuneFileCacheType=buffered`), every read is a network round trip. Large sources like BFD then risk starving the GPUs. Set `dataset.local_stage_dir` to a node-local directory to copy each source's sequence-only train/val splits there once per job before training starts:
+Training reads rows in random order. If `HF_DATASETS_CACHE` is on a network filesystem that doesn't page-cache those reads, every read is a network round trip. Large sources like BFD then risk starving the GPUs. Set `dataset.local_stage_dir` to a node-local directory to copy each source's sequence-only train/val splits there once per job before training starts:
 
 ```bash
     dataset.local_stage_dir=$SLURM_TMPDIR/flair_plm_stage \
@@ -769,7 +769,7 @@ Costs and caveats:
 
 ### Copying a built cache to another cluster
 
-The HF cache above is tied to the parquet files' absolute paths and modification times, so it can't be reused on another filesystem (e.g. Mila → Compute Canada). Instead, export each source once into a self-contained folder by adding `dataset.export_dir` to a `prepare_only` run:
+The HF cache above is tied to the parquet files' absolute paths and modification times, so it can't be reused on another filesystem. Instead, export each source once into a self-contained folder by adding `dataset.export_dir` to a `prepare_only` run:
 
 ```bash
     dataset.prepare_only=true \

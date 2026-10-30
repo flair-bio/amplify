@@ -117,7 +117,7 @@ steps:
     predictions_filename: predictions.parquet
     store_sequences: false # include decoded input sequences in main predictions parquet (larger output)
     controls: [random_trunk] # model/input/label ablations only
-    baselines: [] # legacy inline requests; shipped tasks use top-level baselines.names
+    baselines: [] # inline prediction baselines; shipped tasks use top-level baselines.names
   score:
     metrics: null # task overlays declare reported metrics explicitly
     metric_aggregation: macro # one of micro, macro, weighted, samples

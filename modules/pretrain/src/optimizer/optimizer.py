@@ -106,7 +106,7 @@ def get_optimizer(
             return torch.optim.AdamW(optimizer_grouped_parameters, **opt_kwargs)
 
         case "Adam":
-            # Standard legacy Adam (without decoupled weight decay).
+            # Adam without decoupled weight decay.
             return torch.optim.Adam(optimizer_grouped_parameters, **opt_kwargs)
 
         case "Adafactor":
