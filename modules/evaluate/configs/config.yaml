@@ -112,6 +112,7 @@ steps:
         weight_decay: [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1] # TPE uses min/max bounds; random/grid use listed candidates
         weight_decay_sampling: log # continuous log-scale TPE sampling; categorical also supports zero decay
   predict:
+    test_subsets: {} # named column-equality filters; null evaluates the full test split
     embedding_batch_size: 1024 # cached protein rows; token task overrides with residue batches
     collect_probabilities: false # auto-enabled when effective metrics need probabilities, e.g. roc_auc or multilabel average_precision
     predictions_filename: predictions.parquet

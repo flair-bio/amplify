@@ -222,7 +222,6 @@ def contact_baseline_context(
         "test": {
             "dataset": identity,
             "split": "test",
-            "edition": workspace.edition,
         },
         "root": str((workspace.dataset_root / "baselines").resolve()),
         "names": names,

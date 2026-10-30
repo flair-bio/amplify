@@ -91,16 +91,16 @@ it once with the contact dataset configuration (no model or predictor overlay):
 ```bash
 uv run python -m modules.evaluate.src.run_evaluate --baselines \
   modules/evaluate/configs/config.yaml \
-  modules/evaluate/configs/datasets/contact_prediction_casp.yaml \
-  workspace.edition=14
+  modules/evaluate/configs/datasets/contact_prediction_casp.yaml
 ```
 
 Ordinary contact evaluations use the task preset's
 `baselines.names=[separation_prior]`; Score loads the stored candidate-pair
 predictions and reports their hierarchical CASP metrics beside the model.
-Artifact identity includes the contact dataset/schema fingerprint, CASP edition,
-and prior protocol. Generate separately for each edition when the workspace is
-edition-specific.
+The dataset preset generates separate artifacts for CASP14, CASP15 and CASP16.
+Artifact identity includes the selected contact dataset/schema fingerprint
+and prior protocol. Use the same `steps.predict.test_subsets` selection for
+baseline generation and model evaluation; `workspace.edition` is no longer used.
 
 Missing artifacts are an error with instructions to run `--baselines`, not an
 automatic baseline job. Duplicate requests fail.

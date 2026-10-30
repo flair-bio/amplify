@@ -21,6 +21,9 @@ from modules.evaluate.src.contracts.config import (
     EvaluationConfig,
     ExternalTestSetConfig,
 )
+from modules.evaluate.src.dataset.contact import prepare_contact_dataset
+from modules.evaluate.src.dataset.dataloader import resolve_evaluation_data
+from modules.evaluate.src.dataset.subsets import select_test_subsets
 from modules.evaluate.src.dataset.workspace import (
     EvaluationWorkspace,
     get_evaluation_workspace,
@@ -134,6 +137,27 @@ def _execute_steps(
     dataset: DatasetDict | None,
 ) -> PipelineResult:
     logger.info("Preparing evaluation inputs")
+    subsets: dict[str, DatasetDict] = {}
+    if config.steps.predict.test_subsets:
+        dataset = resolve_evaluation_data(
+            workspace.dataset_repo_id or workspace.dataset_name,
+            split=config.steps.prepare.split,
+            seed=config.seed,
+            validation_fraction=config.steps.prepare.validation_fraction,
+            dataset=dataset,
+            config_name=config.workspace.dataset_config_name,
+            revision=config.workspace.dataset_revision,
+        )
+        if workspace.task_type == "contact_prediction":
+            prepare_contact_dataset(dataset)
+        subsets = select_test_subsets(
+            dataset,
+            config.steps.predict.test_subsets,
+            group_column="record_id"
+            if workspace.task_type == "contact_prediction"
+            else None,
+        )
+        dataset = next(iter(subsets.values()))
     prepared = PrepareStep(config.steps.prepare).run(
         workspace,
         seed=config.seed,
@@ -174,7 +198,58 @@ def _execute_steps(
         controls=config.steps.predict.controls,
         fitted=tuned,
     )
-    result = _predict_and_score(config, workspace, prepared, accelerator, tuned=tuned)
+    if subsets:
+        result = PipelineResult([])
+        prepare_step = PrepareStep(config.steps.prepare)
+        for index, (name, subset_data) in enumerate(subsets.items()):
+            subset_workspace = workspace.test_workspace(name)
+            subset_workspace.setup_directories()
+            evaluation = {
+                "status": "running",
+                "test_subset": name,
+                "filters": config.steps.predict.test_subsets[name],
+                "parent_manifest": str(workspace.run_manifest_path),
+                "model_path": str(workspace.model_path),
+            }
+            if accelerator.is_main_process:
+                update_run_manifest(
+                    subset_workspace.run_manifest_path, "evaluation", evaluation
+                )
+            subset_prepared = (
+                prepared
+                if index == 0
+                else prepare_step.prepare_test_subset(
+                    workspace,
+                    prepared,
+                    name,
+                    subset_data,
+                    accelerator=accelerator,
+                    seed=config.seed,
+                    layerwise_config=config.steps.layerwise,
+                )
+            )
+            result.test_subsets[name] = _predict_and_score(
+                config, subset_workspace, subset_prepared, accelerator, tuned=tuned
+            )
+            if accelerator.is_main_process:
+                update_run_manifest(
+                    subset_workspace.run_manifest_path,
+                    "evaluation",
+                    {**evaluation, "status": "complete"},
+                )
+        if accelerator.is_main_process:
+            update_run_manifest(
+                workspace.run_manifest_path,
+                "tests",
+                {
+                    name: str(workspace.test_workspace(name).run_manifest_path)
+                    for name in subsets
+                },
+            )
+    else:
+        result = _predict_and_score(
+            config, workspace, prepared, accelerator, tuned=tuned
+        )
     result.external = _evaluate_external_tests(
         config, workspace, prepared, accelerator, tuned=tuned
     )
@@ -234,17 +309,16 @@ def _predict_and_score(
         layer_predictions = predict_step.run_layerwise(
             workspace, prepared, accelerator, config.seed
         )
-        evaluations = [
-            EvaluationResult(
-                get_evaluation_workspace(
-                    workspace.config,
-                    variant=f"{workspace.variant}-layer_{layer}",
-                    seed=workspace.seed,
-                ),
-                prediction,
+        evaluations = []
+        for layer, prediction in layer_predictions.items():
+            layer_workspace = get_evaluation_workspace(
+                workspace.config,
+                variant=f"{workspace.variant}-layer_{layer}",
+                seed=workspace.seed,
             )
-            for layer, prediction in layer_predictions.items()
-        ]
+            if workspace.test_subset is not None:
+                layer_workspace = layer_workspace.test_workspace(workspace.test_subset)
+            evaluations.append(EvaluationResult(layer_workspace, prediction))
     else:
         prediction = predict_step.run(
             workspace,

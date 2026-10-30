@@ -102,19 +102,25 @@ def config_for(tmp_path, model_path, seed=13):
             f"seed={seed}",
             "steps.tune.max_epochs=12",
             "steps.predict.controls=[random_trunk]",
+            "steps.predict.test_subsets=null",
+            "baselines.names=[]",
         ],
     )
 
 
-@pytest.mark.parametrize("predictor", ["attention_l1", "categorical_jacobian"])
+@pytest.mark.parametrize("predictor", ["bilinear512", "attention_l1", "categorical_jacobian"])
 @pytest.mark.parametrize("controls", [[], ["random_trunk"]])
 def test_contact_predictor_pipeline_roundtrip(
-    tmp_path, esm2_tokenizer, predictor, controls
+    tmp_path, esm2_tokenizer, predictor, controls, monkeypatch
 ):
     from transformers import EsmForMaskedLM
 
     from modules.evaluate.src.contracts.config import ScoreConfig
     from modules.evaluate.src.steps.score import ScoreStep
+    from modules.evaluate.src.contracts.config_loader import load_baseline_config
+    from modules.evaluate.src.runners.baselines import run_baselines
+    from modules.evaluate.src.tasks import contact_prediction
+    import polars as pl
 
     model_path = tmp_path / "trunk"
     EsmForMaskedLM(small_trunk().config).save_pretrained(model_path)
@@ -128,15 +134,24 @@ def test_contact_predictor_pipeline_roundtrip(
         ],
         features=FEATURES,
     )
-    hf["test"] = Dataset.from_list([row(sequence="ACXXDEFGHIK")], features=FEATURES)
-    preset = "contact_attention" if predictor == "attention_l1" else "contact_jacobian"
-    config = load_evaluation_config(
+    hf["test"] = Dataset.from_list(
         [
+            row(f"casp{edition}", edition=edition, sequence="ACXXDEFGHIK")
+            for edition in (14, 15, 16)
+        ],
+        features=FEATURES,
+    )
+    preset = {
+        "bilinear512": "contact_embedding",
+        "attention_l1": "contact_attention",
+        "categorical_jacobian": "contact_jacobian",
+    }[predictor]
+    paths = [
             CONFIGS / "config.yaml",
             CONFIGS / "datasets/contact_prediction_casp.yaml",
             CONFIGS / f"predictors/{preset}.yaml",
-        ],
-        overrides=[
+    ]
+    overrides = [
             f"workspace.output_dir={tmp_path / 'output'}",
             "workspace.model_name=tiny",
             f"workspace.model_repo_id={model_path}",
@@ -144,32 +159,55 @@ def test_contact_predictor_pipeline_roundtrip(
             "workspace.run_id=offline",
             "seed=13",
             f"steps.predict.controls={json.dumps(controls)}",
-        ],
-    )
+            "steps.tune.max_epochs=12",
+    ]
+    config = load_evaluation_config(paths, overrides=overrides)
+    baselines = run_baselines(load_baseline_config(paths, overrides), dataset=hf)
+    assert set(baselines) == {"tests/casp14", "tests/casp15", "tests/casp16"}
+    fit_name = "fit_contact_attention_head" if predictor == "attention_l1" else "fit_contact_head"
+    fit = Mock(wraps=getattr(contact_prediction, fit_name))
+    monkeypatch.setattr(contact_prediction, fit_name, fit)
     workspace = get_evaluation_workspace(
         config.workspace, config.variant, seed=config.seed
     )
     result = run_pipeline(config, workspace, Accelerator(cpu=True), dataset=hf)
-    prediction = result.predictions[None]
-    assert prediction.metadata.head_type == predictor
-    assert set(prediction.controls) == set(controls)
-    restored = ScoreStep.load_predict_output(workspace)
-    scored = ScoreStep(ScoreConfig()).run(workspace, predict_result=restored)
-    assert scored.summaries.equals(result.scores[None].summaries)
-    assert set(scored.control_summaries) == set(controls)
+    assert fit.call_count == (0 if predictor == "categorical_jacobian" else 1 + len(controls))
+    assert result.evaluations == []
+    assert set(result.test_subsets) == {"casp14", "casp15", "casp16"}
+    predictions = []
+    for edition in (14, 15, 16):
+        name = f"casp{edition}"
+        subset_workspace = workspace.test_workspace(name)
+        prediction = result.test_subsets[name].predictions[None]
+        predictions.append(prediction.predictions)
+        assert prediction.metadata.test_subset == name
+        assert prediction.metadata.head_type == predictor
+        assert prediction.predictions["edition"].unique().to_list() == [edition]
+        assert set(prediction.controls) == set(controls)
+        assert all(frame["edition"].unique().to_list() == [edition] for frame in prediction.controls.values())
+        restored = ScoreStep.load_predict_output(subset_workspace)
+        scored = ScoreStep(ScoreConfig()).run(subset_workspace, predict_result=restored)
+        assert scored.summaries.equals(result.test_subsets[name].scores[None].summaries)
+        assert set(scored.control_summaries) == {*controls, "separation_prior"}
+        assert scored.summaries["edition"].unique().to_list() == [edition]
+        subset_manifest = json.loads(subset_workspace.run_manifest_path.read_text())
+        assert subset_manifest["evaluation"]["status"] == "complete"
+        assert subset_manifest["evaluation"]["filters"] == {"edition": edition}
+        assert subset_manifest["evaluation"]["model_path"] == str(workspace.model_path)
+        assert not (subset_workspace.run_root / "model").exists()
+    from modules.evaluate.src.contracts.artifacts import PredictOutput
+    pooled = get_task("contact_prediction").score_units(
+        PredictOutput(metadata=prediction.metadata, predictions=pl.concat(predictions))
+    )
+    for edition in (14, 15, 16):
+        columns = ["edition", "kind", "minsep", *get_task("contact_prediction").default_metrics()]
+        assert pooled.summaries.filter(pl.col("edition") == edition).select(columns).equals(
+            result.test_subsets[f"casp{edition}"].scores[None].summaries.select(columns)
+        )
     manifest = json.loads(workspace.run_manifest_path.read_text())
-    assert manifest["predict"]["metadata"]["head_type"] == predictor
     assert manifest["evaluation"]["status"] == "complete"
-    assert manifest["score"]["scores"] == scored.summaries.to_dicts()
-    assert manifest["score"]["scores_path"] == str(scored.summaries_path)
-    assert manifest["score"]["unit_scores_path"] == str(scored.unit_scores_path)
-    assert set(manifest["score"]["controls"]) == set(controls)
-    assert "bootstrap" not in manifest
-    for name in controls:
-        summary = manifest["score"]["controls"][name]
-        assert summary["scores"] == scored.control_summaries[name].to_dicts()
-        assert summary["scores_path"] == str(scored.control_summaries_paths[name])
-        assert summary["unit_scores_path"] == str(scored.control_unit_scores_paths[name])
+    assert set(manifest["tests"]) == set(result.test_subsets)
+    assert "predict" not in manifest and "score" not in manifest
     if predictor == "categorical_jacobian":
         assert not (workspace.stats_path / "contact_training.json").exists()
     for name in controls:

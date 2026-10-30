@@ -165,7 +165,6 @@ def test_separation_prior_is_shared_and_scored_as_a_contact_baseline(tmp_path):
             "workspace": {
                 "dataset_name": "casp",
                 "dataset_repo_id": "local-casp",
-                "edition": 14,
                 "task_type": "contact_prediction",
                 "target_type": "categorical",
                 "label_format": "contact_pairs",
@@ -189,8 +188,8 @@ def test_separation_prior_is_shared_and_scored_as_a_contact_baseline(tmp_path):
     assert artifact["status"].to_list() == ["scorable"]
 
     other_edition_context = contact_baseline_context(
-        config.workspace.model_copy(update={"edition": 15}),
-        contacts,
+        config.workspace,
+        prepare_contact_dataset(hf_data([row("casp15", edition=15)])),
         config.baselines.names,
     )
     assert artifact_directory(context, "separation_prior") != artifact_directory(

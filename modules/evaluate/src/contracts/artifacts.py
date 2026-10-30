@@ -176,6 +176,7 @@ class EvaluationMetadata(BaseModel):
     dataset_name: str
     task_type: str
     split: str = "default"
+    test_subset: str | None = None
     model_repo_id: str | None = None
     dataset_repo_id: str | None = None
     dataset_config_name: str | None = None
@@ -353,6 +354,7 @@ class PipelineResult:
     evaluations: list[EvaluationResult]
     # Results of the same fitted model on each configured external test set.
     external: dict[str, PipelineResult] = field(default_factory=dict)
+    test_subsets: dict[str, PipelineResult] = field(default_factory=dict)
 
     @property
     def predictions(self) -> dict[int | None, PredictOutput]:

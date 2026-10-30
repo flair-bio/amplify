@@ -21,6 +21,7 @@ from torch import nn
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from modules.evaluate.src.contracts.artifacts import (
+    ContactArtifacts,
     EmbeddingArtifacts,
     LayerwiseArtifacts,
     PreparedArtifacts,
@@ -42,6 +43,7 @@ from modules.evaluate.src.dataset.collator import (
     EvaluationCollator,
     EvaluationCollatorConfig,
 )
+from modules.evaluate.src.dataset.contact import prepare_contact_dataset
 from modules.evaluate.src.dataset.dataloader import (
     DataLoaderConfig,
     build_dataloaders,
@@ -419,6 +421,7 @@ class PrepareStep:
         accelerator: Accelerator,
         seed: int,
         layerwise_config: LayerwiseConfig | None = None,
+        dataset: DatasetDict | None = None,
     ) -> PreparedArtifacts:
         """Return *prepared* with its test loaders swapped for an external set.
 
@@ -432,12 +435,13 @@ class PrepareStep:
             external.dataset_repo_id,
             external.split,
         )
-        dataset = resolve_external_data(
-            external.dataset_repo_id,
-            external.split,
-            config_name=external.dataset_config_name,
-            revision=external.dataset_revision,
-        )
+        if dataset is None:
+            dataset = resolve_external_data(
+                external.dataset_repo_id,
+                external.split,
+                config_name=external.dataset_config_name,
+                revision=external.dataset_revision,
+            )
         shared_context = (
             external_baseline_context(
                 prepared.baseline_context,
@@ -587,6 +591,53 @@ class PrepareStep:
             embedding=EmbeddingArtifacts(backend=external_backend),
             layerwise=layerwise,
             baseline_context=shared_context,
+        )
+
+    def prepare_test_subset(
+        self,
+        workspace: EvaluationWorkspace,
+        prepared: PreparedArtifacts,
+        name: str,
+        dataset: DatasetDict,
+        *,
+        accelerator: Accelerator,
+        seed: int,
+        layerwise_config: LayerwiseConfig | None = None,
+    ) -> PreparedArtifacts:
+        """Reuse the fitted predictor and controls on another selected test set."""
+        if prepared.contact is not None:
+            contacts = prepare_contact_dataset(
+                dataset,
+                source=workspace.dataset_repo_id or workspace.dataset_name,
+                revision=workspace.config.dataset_revision,
+            )
+            context = (
+                contact_baseline_context(
+                    workspace.config, contacts, prepared.baseline_context["names"]
+                )
+                if prepared.baseline_context
+                else None
+            )
+            return replace(
+                prepared,
+                contact=ContactArtifacts(dataset=contacts),
+                baseline_context=context,
+            )
+        external = ExternalTestSetConfig(
+            name=name,
+            dataset_repo_id=workspace.dataset_repo_id or workspace.dataset_name,
+            dataset_config_name=workspace.config.dataset_config_name,
+            dataset_revision=workspace.config.dataset_revision,
+            split=self.config.split.test,
+        )
+        return self.prepare_external_test(
+            workspace,
+            prepared,
+            external,
+            accelerator=accelerator,
+            seed=seed,
+            layerwise_config=layerwise_config,
+            dataset=DatasetDict({"test": dataset["test"]}),
         )
 
     def _apply_embedding_cache(

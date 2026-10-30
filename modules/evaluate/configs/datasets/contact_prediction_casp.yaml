@@ -8,3 +8,10 @@ workspace:
   target_type: categorical
   label_format: contact_pairs
   num_labels: null
+
+steps:
+  predict:
+    test_subsets:
+      casp14: {edition: 14}
+      casp15: {edition: 15}
+      casp16: {edition: 16}

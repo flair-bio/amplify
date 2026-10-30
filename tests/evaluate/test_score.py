@@ -1262,6 +1262,7 @@ class TestScoreStepLongDf:
                 "dataset_revision": None,
                 "task_type": None,
                 "split": None,
+                "test_subset": None,
                 "head_type": None,
                 "layer_index": None,
                 "variant": None,

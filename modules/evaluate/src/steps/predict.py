@@ -147,6 +147,8 @@ class PredictStep:
                 variant=f"{workspace.variant}-layer_{layer}",
                 seed=workspace.seed,
             )
+            if workspace.test_subset is not None:
+                layer_workspace = layer_workspace.test_workspace(workspace.test_subset)
             layer_workspace.setup_directories()
             metadata = EvaluationMetadata(
                 model_name=workspace.model_name,
@@ -157,6 +159,7 @@ class PredictStep:
                 dataset_revision=workspace.config.dataset_revision,
                 task_type=workspace.task_type,
                 split=prepared.split,
+                test_subset=workspace.test_subset,
                 seed=seed,
                 head_type="torch_linear",
                 layer_index=layer,
@@ -251,6 +254,7 @@ class PredictStep:
             dataset_revision=workspace.config.dataset_revision,
             task_type=workspace.task_type,
             split=prepared.split,
+            test_subset=workspace.test_subset,
             seed=seed,
             head_type=head_type,
             variant=variant,
@@ -261,6 +265,7 @@ class PredictStep:
                 raise ValueError("Structured prediction requires a single process")
             output = task.predict(prepared, metadata, self.config)
             output.config = self.config.model_dump(mode="json")
+            output.baseline_context = prepared.baseline_context
             if self.config.persist_to_disk and (
                 accelerator is None or accelerator.is_main_process
             ):

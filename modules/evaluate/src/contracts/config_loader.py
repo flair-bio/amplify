@@ -77,5 +77,6 @@ def load_baseline_config(
             "baselines": raw.get("baselines", {}),
             "external_test_sets": raw.get("external_test_sets", []),
             "seed": raw.get("seed", 710019),
+            "test_subsets": raw.get("steps", {}).get("predict", {}).get("test_subsets"),
         }
     )

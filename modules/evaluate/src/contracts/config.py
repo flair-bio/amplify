@@ -15,6 +15,10 @@ from pydantic import (
     ConfigDict,
     Field,
     PositiveInt,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
     field_validator,
     model_validator,
 )
@@ -64,6 +68,24 @@ HeadType = Literal[
 EmbeddingPooling = Literal["mean", "cls"]
 EmbeddingDtype = Literal["float16", "float32"]
 EmbeddingAutocastDtype = Literal["float16", "bfloat16", "float32"]
+TestSubsets = dict[
+    str, dict[str, StrictStr | StrictInt | StrictFloat | StrictBool | None]
+]
+
+
+def validate_test_subsets(value: TestSubsets | None) -> TestSubsets:
+    if value is None:
+        return {}
+    for name, filters in value.items():
+        validate_directory_label(name)
+        if not filters or any(not column.strip() for column in filters):
+            raise ValueError("Test subsets require nonempty column-equality filters.")
+        if any(
+            isinstance(item, float) and not math.isfinite(item)
+            for item in filters.values()
+        ):
+            raise ValueError("Test subset filter values must be finite.")
+    return value
 
 
 def dataset_source_identity(
@@ -159,7 +181,6 @@ class DatasetWorkspaceConfig(BaseModel):
         None, min_length=1, description="Named configuration within a dataset suite."
     )
     dataset_revision: str | None = None
-    edition: Literal[14, 15, 16] | None = None
     task_type: str
     default_task_type: str | None = None  # dataset default evaluation method
     target_type: Literal["categorical", "continuous"]
@@ -637,6 +658,25 @@ class PredictConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    test_subsets: TestSubsets = Field(
+        default_factory=dict,
+        description="Named test-only subsets, matched by column equality before inference.",
+    )
+
+    @field_validator("test_subsets", mode="before")
+    @classmethod
+    def _normalize_test_subsets(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                name: filters for name, filters in value.items() if filters is not None
+            }
+        return {} if value is None else value
+
+    @field_validator("test_subsets")
+    @classmethod
+    def _validate_test_subsets(cls, value: TestSubsets) -> TestSubsets:
+        return validate_test_subsets(value)
+
     embedding_batch_size: int | None = Field(
         None,
         gt=0,
@@ -937,6 +977,21 @@ class BaselineRunConfig(BaseModel):
     baselines: BaselinesConfig = Field(default_factory=BaselinesConfig)
     external_test_sets: list[ExternalTestSetConfig] = Field(default_factory=list)
     seed: int = 710019
+    test_subsets: TestSubsets = Field(default_factory=dict)
+
+    @field_validator("test_subsets", mode="before")
+    @classmethod
+    def _normalize_test_subsets(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                name: filters for name, filters in value.items() if filters is not None
+            }
+        return {} if value is None else value
+
+    @field_validator("test_subsets")
+    @classmethod
+    def _validate_test_subsets(cls, value: TestSubsets) -> TestSubsets:
+        return validate_test_subsets(value)
 
     @model_validator(mode="after")
     def validate_baselines(self) -> BaselineRunConfig:

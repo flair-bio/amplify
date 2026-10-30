@@ -36,6 +36,7 @@ from modules.evaluate.src.dataset.dataloader import (
     resolve_evaluation_data,
     resolve_external_data,
 )
+from modules.evaluate.src.dataset.subsets import select_test_subsets
 from modules.evaluate.src.model.baselines import (
     build_amino_acid_frequency_baseline,
     build_sequence_baseline,
@@ -51,6 +52,41 @@ def run_baselines(
 ) -> dict[str, dict[str, Path]]:
     """Build shared baselines for the main and external test datasets."""
     workspace, prepare = config.workspace, config.prepare
+    if config.test_subsets:
+        data = resolve_evaluation_data(
+            workspace.dataset_repo_id or workspace.dataset_name,
+            split=prepare.split,
+            seed=config.seed,
+            validation_fraction=prepare.validation_fraction,
+            dataset=dataset,
+            config_name=workspace.dataset_config_name,
+            revision=workspace.dataset_revision,
+        )
+        if workspace.task_type == "contact_prediction":
+            prepare_contact_dataset(data)
+        subsets = select_test_subsets(
+            data,
+            config.test_subsets,
+            group_column="record_id"
+            if workspace.task_type == "contact_prediction"
+            else None,
+        )
+        subset_results: dict[str, dict[str, Path]] = {}
+        for index, (name, subset) in enumerate(subsets.items()):
+            subset_outputs = run_baselines(
+                config.model_copy(
+                    update={
+                        "test_subsets": {},
+                        "external_test_sets": config.external_test_sets
+                        if index == 0
+                        else [],
+                    }
+                ),
+                dataset=subset,
+            )
+            subset_results[f"tests/{name}"] = subset_outputs.pop("test")
+            subset_results.update(subset_outputs)
+        return subset_results
     if workspace.task_type == "contact_prediction":
         if config.external_test_sets:
             raise ValueError(
@@ -185,14 +221,12 @@ def _run_contact_baselines(
             source,
             revision=workspace.dataset_revision,
             config_name=workspace.dataset_config_name,
-            edition=workspace.edition,
         )
         if dataset is None
         else prepare_contact_dataset(
             dataset,
             source=source,
             revision=workspace.dataset_revision,
-            edition=workspace.edition,
         )
     )
     context = contact_baseline_context(workspace, contacts, config.baselines.names)

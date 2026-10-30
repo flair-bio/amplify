@@ -128,7 +128,7 @@ def contact_development_attention_fingerprint(
         raise ValueError("Attention identity requires one token row per training chain")
     identity = {
         "protocol": ATTENTION_PROTOCOL,
-        "dataset_fingerprint": dataset.fingerprint,
+        "development_fingerprint": dataset.development_fingerprint,
         "weights": weights,
         "backbone_config": dict(backbone_config),
         "precision": "float32",
@@ -204,14 +204,12 @@ class ContactPredictionTask(StructuredTask):
                 source,
                 revision=inputs.dataset_revision,
                 config_name=inputs.dataset_config_name,
-                edition=inputs.edition,
             )
         else:
             contacts = prepare_contact_dataset(
                 dataset,
                 source=source,
                 revision=inputs.dataset_revision,
-                edition=inputs.edition,
             )
         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
         model = build_contact_model(
@@ -403,7 +401,7 @@ class ContactPredictionTask(StructuredTask):
         else:
             return {}
         return {
-            "dataset_fingerprint": dataset.fingerprint,
+            "development_fingerprint": dataset.development_fingerprint,
             "development_features": key,
             "protocol": protocol,
         }

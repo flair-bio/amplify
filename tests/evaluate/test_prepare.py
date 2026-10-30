@@ -153,6 +153,43 @@ def _run_prepare(
     )
 
 
+@pytest.mark.parametrize("cached", [False, True])
+def test_prepare_test_subset_reuses_model_and_controls(
+    monkeypatch, tmp_path, model_family, cached
+):
+    prepared = _run_prepare(
+        monkeypatch, tmp_path, "sequence_classification", model_family,
+        embedding_cache={"enabled": cached, "cache_policy": "off"},
+    )
+    workspace = _make_workspace(tmp_path, "sequence_classification")
+    subset = DatasetDict(
+        {"test": Dataset.from_dict({"sequence": ["ACDEFG"], "targets": [1], "id": ["selected"]})}
+    )
+    # No dataset reload or model construction is needed for subsequent subsets.
+    monkeypatch.setattr(
+        resolution_module, "load_raw_evaluation_dataset",
+        lambda *args, **kwargs: pytest.fail("subset reloaded the dataset"),
+    )
+    step = PrepareStep(PrepareConfig(
+        batch_size=2, tokenize_num_proc=1,
+        embedding_cache={"enabled": cached, "cache_policy": "off"},
+    ))
+    selected = step.prepare_test_subset(
+        workspace, prepared, "selected", subset,
+        accelerator=HFAccelerator(cpu=True), seed=0,
+    )
+    assert selected.model is prepared.model
+    assert selected.controls is prepared.controls
+    assert selected.train_dataloader is prepared.train_dataloader
+    assert selected.val_dataloader is prepared.val_dataloader
+    assert len(selected.test_dataloader.dataset) == 1
+    assert len(prepared.test_dataloader.dataset) == 4
+    if cached:
+        assert selected.embedding.backend.trunk is prepared.embedding.backend.trunk
+        assert selected.embedding.backend.test_cache_key != prepared.embedding.backend.test_cache_key
+        assert len(selected.embedding.backend.token_test_dataloader.dataset) == 1
+
+
 def test_prepare_caches_configured_final_refit_split_separately(
     monkeypatch, tmp_path, model_family
 ):
