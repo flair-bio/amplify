@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import re
 import shutil
@@ -58,16 +59,23 @@ class EvaluationWorkspace:
             r"[A-Za-z0-9][A-Za-z0-9_.-]*", variant
         ):
             raise ValueError("Run variants must be safe single-directory labels.")
-        workspace_root = config.dataset_root / "models" / config.model_name
+        workspace_root = config.dataset_root / config.model_name
         self.workspace_root = workspace_root
+        temporary_root = (
+            Path(config.tmp_path) if config.tmp_path else config.benchmark_root / "tmp"
+        )
         self.tmp_path = (
-            Path(config.tmp_path) if config.tmp_path else workspace_root / "tmp"
+            temporary_root / config.task_type / config.dataset_name / config.model_name
         )
         # Disposable: safe to delete between runs, PrepareStep recomputes on miss.
         # Deliberately NOT nested under `variant`: a frozen trunk's cached
         # embeddings don't depend on head_type/mode, so every variant
         # sweep for this model+dataset can reuse the same cache.
         self.embeddings_path = self.tmp_path / "embeddings"
+        output_identity = hashlib.sha256(
+            str(workspace_root.resolve()).encode()
+        ).hexdigest()
+        self.locks_path = self.tmp_path / "locks" / output_identity
 
         self.run_name = f"{variant}-{config.run_id}" if variant else config.run_id
         run_root = workspace_root / self.run_name
@@ -119,8 +127,9 @@ class EvaluationWorkspace:
         if self.variant is None:
             raise ValueError("Pipeline output protection requires a run variant.")
         self.workspace_root.mkdir(parents=True, exist_ok=True)
+        self.locks_path.mkdir(parents=True, exist_ok=True)
         suffix = "" if self.seed is None else f"-seed_{self.seed}"
-        lock_path = self.workspace_root / f".{self.run_name}{suffix}.lock"
+        lock_path = self.locks_path / f".{self.run_name}{suffix}.lock"
         with lock_path.open("a") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -128,28 +137,6 @@ class EvaluationWorkspace:
                 raise FileExistsError(
                     f"Evaluation is already running for {self.run_root}."
                 ) from error
-            provenance_path = self.workspace_root / "workspace_manifest.json"
-            provenance = {
-                "dataset_name": self.dataset_name,
-                "dataset_repo_id": self.dataset_repo_id,
-                "task_type": self.task_type,
-                "model_name": self.model_name,
-                "model_repo_id": self.model_repo_id,
-            }
-            if self.config.dataset_config_name is not None:
-                provenance["dataset_config_name"] = self.config.dataset_config_name
-            if self.config.dataset_revision is not None:
-                provenance["dataset_revision"] = self.config.dataset_revision
-            with (self.workspace_root / ".workspace.lock").open("a") as workspace_lock:
-                fcntl.flock(workspace_lock, fcntl.LOCK_EX)
-                if provenance_path.exists():
-                    if json.loads(provenance_path.read_text()) != provenance:
-                        raise ValueError(
-                            f"Output labels already identify different inputs at "
-                            f"{self.workspace_root}; choose a new model/dataset label or benchmark root."
-                        )
-                else:
-                    write_json(provenance_path, provenance)
             runs_path = self.workspace_root
             if runs_path.is_symlink():
                 raise ValueError(
@@ -159,20 +146,6 @@ class EvaluationWorkspace:
                 rf"{re.escape(self.variant)}-layer_\d+-{re.escape(self.config.run_id)}"
             )
             targets = [self.run_root]
-            if (
-                self.seed is None
-                and (self.experiment_root / "experiment_config.json").exists()
-            ):
-                raise ValueError(
-                    "Seeded outputs already use this run_id; select a seed or a new run_id"
-                )
-            if (
-                self.seed is not None
-                and (self.experiment_root / "run_manifest.json").exists()
-            ):
-                raise ValueError(
-                    "Unseeded outputs already use this run_id; choose a new run_id"
-                )
             if runs_path.exists():
                 targets.extend(
                     path if self.seed is None else path / f"seed_{self.seed}"
@@ -193,13 +166,56 @@ class EvaluationWorkspace:
                         raise ValueError(
                             f"Output target {target} overlaps input/cache path {source}."
                         )
-                if target.exists() and any(target.iterdir()) and not overwrite:
-                    raise FileExistsError(
-                        f"Evaluation outputs already exist at {target}. "
-                        "Choose another workspace.run_id or use --overwrite "
-                        "to replace this variant and its derived outputs."
+            with (self.locks_path / ".workspace.lock").open("a") as workspace_lock:
+                fcntl.flock(workspace_lock, fcntl.LOCK_EX)
+                if self.seed is None and any(
+                    self.experiment_root.glob("seed_*/run_manifest.json")
+                ):
+                    raise ValueError(
+                        "Seeded outputs already use this run_id; select a seed or a new run_id"
                     )
+                if (
+                    self.seed is not None
+                    and (self.experiment_root / "run_manifest.json").exists()
+                ):
+                    raise ValueError(
+                        "Unseeded outputs already use this run_id; choose a new run_id"
+                    )
+                for target in targets:
+                    if target.exists() and any(target.iterdir()) and not overwrite:
+                        raise FileExistsError(
+                            f"Evaluation outputs already exist at {target}. "
+                            "Choose another workspace.run_id or use --overwrite "
+                            "to replace this variant and its derived outputs."
+                        )
+                for pattern in ("*/run_manifest.json", "*/seed_*/run_manifest.json"):
+                    for path in self.workspace_root.glob(pattern):
+                        provenance = json.loads(path.read_text()).get("workspace")
+                        if provenance is not None and provenance != self._identity():
+                            raise ValueError(
+                                f"Output labels already identify different inputs at "
+                                f"{self.workspace_root}; choose a new model/dataset label or benchmark root."
+                            )
+                if self.run_manifest_path.is_symlink():
+                    raise ValueError("Refusing to modify symlinked run manifest")
+                update_run_manifest(
+                    self.run_manifest_path, "workspace", self._identity()
+                )
             yield targets
+
+    def _identity(self) -> dict[str, Any]:
+        identity = {
+            "dataset_name": self.dataset_name,
+            "dataset_repo_id": self.dataset_repo_id,
+            "task_type": self.task_type,
+            "model_name": self.model_name,
+            "model_repo_id": self.model_repo_id,
+        }
+        for key in ("dataset_config_name", "dataset_revision"):
+            value = getattr(self.config, key)
+            if value is not None:
+                identity[key] = value
+        return identity
 
     def initialize_run(
         self, targets: list[Path], *, overwrite: bool, config: dict[str, Any]
@@ -208,6 +224,11 @@ class EvaluationWorkspace:
         if self.seed is not None:
             identity = {key: value for key, value in config.items() if key != "seed"}
             self.validate_experiment("config", identity)
+        experiment = (
+            json.loads(self.run_manifest_path.read_text()).get("experiment", {})
+            if self.run_manifest_path.exists()
+            else {}
+        )
         if overwrite:
             runs_path = self.workspace_root
             pattern = re.compile(
@@ -233,32 +254,54 @@ class EvaluationWorkspace:
                     )
             for target in targets:
                 if target.exists():
-                    shutil.rmtree(target)
-        update_run_manifest(
-            self.run_manifest_path,
-            "evaluation",
-            {"status": "running", "config": config},
-        )
+                    if target != self.run_root:
+                        shutil.rmtree(target)
+                        continue
+                    # Keep identity visible to concurrent sibling seed runs.
+                    for child in target.iterdir():
+                        if child == self.run_manifest_path:
+                            continue
+                        if child.is_dir() and not child.is_symlink():
+                            shutil.rmtree(child)
+                        else:
+                            child.unlink()
+        manifest = {
+            "workspace": self._identity(),
+            "evaluation": {"status": "running", "config": config},
+        }
+        if experiment:
+            manifest["experiment"] = experiment
+        write_json(self.run_manifest_path, manifest)
 
     def validate_experiment(self, kind: str, identity: dict[str, Any]) -> None:
         """Bind sibling seed runs to identical settings and immutable inputs."""
         if self.experiment_root.is_symlink() or self.workspace_root.is_symlink():
             raise ValueError("Refusing to modify symlinked experiment outputs")
         validate_directory_label(kind)
-        path = self.experiment_root / f"experiment_{kind}.json"
-        lock_path = self.workspace_root / f".{self.run_name}-experiment.lock"
+        path = self.run_manifest_path
+        self.locks_path.mkdir(parents=True, exist_ok=True)
+        lock_path = self.locks_path / f".{self.run_name}-experiment.lock"
         with lock_path.open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             if path.is_symlink():
                 raise ValueError("Refusing to modify symlinked experiment identity")
-            if path.exists():
-                if json.loads(path.read_text()) != identity:
+            siblings = list(self.experiment_root.glob("seed_*/run_manifest.json"))
+            if path not in siblings:
+                siblings.append(path)
+            for sibling in siblings:
+                if not sibling.exists():
+                    continue
+                previous = json.loads(sibling.read_text()).get("experiment", {})
+                if kind in previous and previous[kind] != identity:
                     raise ValueError(
                         f"Experiment {kind} differs across seeds; choose a new run_id"
                     )
-            else:
-                self.experiment_root.mkdir(parents=True, exist_ok=True)
-                write_json(path, identity)
+            experiment = (
+                json.loads(path.read_text()).get("experiment", {})
+                if path.exists()
+                else {}
+            )
+            update_run_manifest(path, "experiment", {**experiment, kind: identity})
 
 
 def get_evaluation_workspace(

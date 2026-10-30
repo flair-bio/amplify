@@ -1055,9 +1055,11 @@ class TestScoreStepBootstrap:
 
         step = ScoreStep(ScoreConfig(metrics=["accuracy", "f1"]))
         result = step.run(workspace)
-        condition_path = workspace.run_root / "condition_scores.parquet"
-        conditions = pl.read_parquet(condition_path)
-        assert set(conditions["condition"]) == {"trained", "random_trunk"}
+        assert not (workspace.run_root / "condition_scores.parquet").exists()
+        conditions = json.loads(workspace.run_manifest_path.read_text())["score"][
+            "condition_scores"
+        ]
+        assert set(conditions) == {"trained", "random_trunk"}
         expected = full_scores(
             get_task("sequence_classification", workspace.num_labels),
             prediction.controls["random_trunk"]["prediction"].to_list(),
@@ -1066,10 +1068,11 @@ class TestScoreStepBootstrap:
             ["accuracy", "f1"],
             "macro",
         )
-        actual = conditions.filter(pl.col("condition") == "random_trunk")
-        assert dict(zip(actual["metric"], actual["score"])) == expected
+        assert conditions["random_trunk"] == expected
         step.run(workspace)
-        assert pl.read_parquet(condition_path).equals(conditions)
+        assert json.loads(workspace.run_manifest_path.read_text())["score"][
+            "condition_scores"
+        ] == conditions
 
         assert result.confidence_intervals is None
         assert result.control_comparisons is None

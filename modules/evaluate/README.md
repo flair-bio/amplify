@@ -480,6 +480,7 @@ Append these overrides to any launch command, or put them in an overlay YAML.
 | Disable control conditions | `steps.predict.controls=[]` |
 | Disable shared sequence baselines | `baselines.names=[]` |
 | Write results elsewhere | `workspace.base_path=/path/to/eval` |
+| Store embedding caches on HPC scratch | `workspace.tmp_path=/scratch/$USER/evaluate` (task/dataset/model subdirectories are appended) |
 | Group model versions into one benchmark comparison | `workspace.base_path=/path/to/client-benchmark-v1` |
 | Keep another evaluation of the same model/probe | `workspace.run_id=run02` |
 | Label a specific checkpoint version | `workspace.model_name=amplify-350m-muon workspace.model_repo_id=/path/to/checkpoint` |
@@ -832,11 +833,11 @@ custom metrics, and unsupported aggregation modes retain the existing path.
 | `long_filename` | `scores_long.parquet` | Tidy/long-format sidecar written on every run, with or without bootstrap — concatenable across (model, dataset) runs for plotting |
 
 **Input:** `<run>/predictions.parquet`
-**Exact scores:** `<run>/condition_scores.parquet` contains one row per
-condition/metric with full-test `score` and evaluation metadata. `trained`
+**Exact scores:** `<run>/run_manifest.json` records full-test scores under
+`score.condition_scores`, grouped by condition and metric. `trained`
 identifies the evaluated model (the frozen-trunk probe in `tune_probe` mode);
-other conditions use their control/baseline names. This table is written even
-without bootstrap, preserves undefined scores as NaN, and is replaced on
+other conditions use their control/baseline names. These scores are recorded even
+without bootstrap, preserve undefined scores as NaN, and are replaced on
 rescoring. Unlike comparison-row bootstrap means, these are exact test scores.
 
 **Output:** `<run>/scores_long.parquet` (always), plus `<run>/bootstrap_results.parquet` when `bootstrap_enabled=true`; scores/confidence intervals are also recorded in `<run>/run_manifest.json` under the `score`/`bootstrap` sections. Concatenate run-local score tables when comparing models or repeated runs.
@@ -852,7 +853,7 @@ intervals describe the paired differences, not standalone control-score interval
 ### Output disk layout
 
 `get_evaluation_workspace()` (in [`src/dataset/workspace.py`](src/dataset/workspace.py))
-groups outputs by **benchmark root -> task -> dataset -> baselines/models -> run**:
+groups outputs by **benchmark root -> task -> dataset -> baseline/model -> run**:
 
 ```
 <base_path>/<task_type>/<dataset_name>/
@@ -862,9 +863,7 @@ groups outputs by **benchmark root -> task -> dataset -> baselines/models -> run
 │       ├── manifest.json
 │       ├── predictions.parquet
 │       └── log
-└── models/<model_name>/
-    ├── workspace_manifest.json
-    ├── tmp/embeddings/                 ← reusable across model runs
+└── <model_name>/
     └── <variant>-<run_id>/seed_<seed>/
         ├── model/
         ├── predictions.parquet
@@ -873,7 +872,6 @@ groups outputs by **benchmark root -> task -> dataset -> baselines/models -> run
         │   └── predictions.parquet
         ├── bootstrap_results.parquet
         ├── scores_long.parquet
-        ├── condition_scores.parquet      ← exact scores for model, controls, baselines
         ├── layerwise_comparison.parquet  ← when layer comparisons apply
         ├── run_manifest.json
         └── log
@@ -903,10 +901,25 @@ other seeds, variants, models, caches, and shared baselines are preserved. Match
 concurrent jobs fail rather than overwriting an active run. There is no
 ordinary-run resume mode.
 
-Ordinary CLI runs isolate artifacts under `seed_<seed>`. The experiment directory
-also records seed-independent settings; sibling seeds cannot use different
-settings or, for CASP embeddings, different dataset/backbone content. Unseeded
+Ordinary CLI runs isolate artifacts under `seed_<seed>`. Each `run_manifest.json`
+also records workspace identity and seed-independent experiment settings;
+sibling seeds cannot use different settings or, for CASP embeddings, different
+dataset/backbone content. Unseeded
 output directories are left unchanged; use a distinct run ID to avoid conflicts.
+
+Embedding caches live separately at
+`<benchmark_root>/tmp/<task_type>/<dataset_name>/<model_name>/embeddings/`,
+shared across variants, run IDs and seeds. Set `workspace.tmp_path=/scratch/$USER/evaluate`
+to replace `<benchmark_root>/tmp` with an HPC scratch directory. Run, workspace
+and experiment locks live alongside embeddings under `locks/<output-root-hash>/`.
+All jobs writing the same results must use the same shared `workspace.tmp_path`.
+Do not delete this temporary directory while jobs are running; persistent `.lock`
+files are harmless after jobs finish. Baseline publication locks remain transient
+directories beside the shared baseline artifacts.
+Model and baseline
+checkpoint/validation JSON files are retained; separate `workspace_manifest.json`
+and `experiment_*.json` files are no longer written. Existing outputs and caches
+are not automatically moved.
 
 Even with `--overwrite`, a model/dataset label already associated with a
 different input source cannot be reused in the same workspace: choose a new
@@ -953,7 +966,7 @@ external_test_sets:
 ```
 
 Outputs use the external dataset's own workspace and the same variant:
-`<task>/<external.name>/models/<model>/<variant>-<run_id>/`.
+`<task>/<external.name>/<model>/<variant>-<run_id>/`.
 Its comparison table lives directly inside that run.
 All requested output targets are checked before training or replacement. Sets are
 skipped with a warning under `evaluate_as_is` (no fitted probe).

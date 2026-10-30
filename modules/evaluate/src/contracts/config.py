@@ -225,12 +225,25 @@ class EvaluationWorkspaceConfig(DatasetWorkspaceConfig):
     run_id: str
     model_repo_id: str | None = None
     model_kwargs: dict[str, Any] = Field(default_factory=dict)
-    tmp_path: str | None = None
+    tmp_path: str | None = Field(
+        None,
+        description=(
+            "Temporary cache root, optionally on HPC scratch storage. Defaults to "
+            "<benchmark_root>/tmp; task/dataset/model subdirectories are appended."
+        ),
+    )
 
     @field_validator("run_id", "model_name")
     @classmethod
     def _validate_directory_label(cls, value: str) -> str:
         return validate_directory_label(value)
+
+    @field_validator("model_name")
+    @classmethod
+    def _validate_model_label(cls, value: str) -> str:
+        if value == "baselines":
+            raise ValueError("model_name='baselines' is reserved for shared baselines.")
+        return value
 
 
 def validate_directory_label(value: str) -> str:

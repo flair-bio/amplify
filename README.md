@@ -127,7 +127,7 @@ Each module has its own README with detailed documentation on configuration, CLI
 
 ## Scope
 
-This repo is not a polished product package. It is a development sandbox for driving the monorepo/package split and validating migration steps.
+This repository contains modules for protein dataset preparation, language model pretraining, and downstream evaluation.
 
 ## Contributors
 

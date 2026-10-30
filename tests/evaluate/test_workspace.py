@@ -45,9 +45,11 @@ def test_output_layout_uses_labels_not_source_paths(tmp_path, model_repo_id):
     workspace = EvaluationWorkspace(config)
 
     assert config.output_dir is None
-    root = tmp_path / "default/sequence_classification/toy_dataset/models/toy_model"
+    root = tmp_path / "default/sequence_classification/toy_dataset/toy_model"
     assert workspace.scores_path == root / "test"
-    assert workspace.embeddings_path == root / "tmp/embeddings"
+    assert workspace.embeddings_path == (
+        tmp_path / "default/tmp/sequence_classification/toy_dataset/toy_model/embeddings"
+    )
 
 
 @pytest.mark.parametrize("variant", [None, "mlp-frozen_trunk"])
@@ -66,7 +68,7 @@ def test_output_dir_overrides_experiment_root_without_changing_checkpoint(
     assert workspace.model_repo_id == str(checkpoint)
     assert workspace.model_name == "toy_model"
     assert config.output_dir == output
-    root = output / "sequence_classification/toy_dataset/models/toy_model"
+    root = output / "sequence_classification/toy_dataset/toy_model"
     run = root / (f"{variant}-test" if variant else "test")
     assert workspace.model_path == run / "model"
     assert workspace.preds_path == run
@@ -74,7 +76,9 @@ def test_output_dir_overrides_experiment_root_without_changing_checkpoint(
     assert workspace.scores_path == run
     assert workspace.run_manifest_path == run / "run_manifest.json"
     assert workspace.comparison_path == run
-    assert workspace.embeddings_path == root / "tmp/embeddings"
+    assert workspace.embeddings_path == (
+        output / "tmp/sequence_classification/toy_dataset/toy_model/embeddings"
+    )
     assert workspace.run_root.is_dir()
     assert not workspace.model_path.exists()
     assert not workspace.embeddings_path.exists()
@@ -92,10 +96,73 @@ def test_output_dir_preserves_an_explicit_temporary_directory(tmp_path):
     workspace = EvaluationWorkspace(config)
 
     assert workspace.scores_path == (
-        tmp_path / "results/sequence_classification/toy_dataset/models/toy_model/test"
+        tmp_path / "results/sequence_classification/toy_dataset/toy_model/test"
     )
-    assert workspace.tmp_path == tmp_path / "cache"
-    assert workspace.embeddings_path == tmp_path / "cache/embeddings"
+    assert workspace.tmp_path == (
+        tmp_path / "cache/sequence_classification/toy_dataset/toy_model"
+    )
+    assert workspace.embeddings_path == workspace.tmp_path / "embeddings"
+
+
+def test_scratch_cache_is_shared_across_runs_but_not_models_or_datasets(tmp_path):
+    config = workspace_config(tmp_path, tmp_path=str(tmp_path / "scratch"))
+    workspace = EvaluationWorkspace(config, variant="mlp", seed=1)
+    repeat = EvaluationWorkspace(
+        config.model_copy(update={"run_id": "repeat"}), variant="linear", seed=2
+    )
+    other_model = EvaluationWorkspace(config.model_copy(update={"model_name": "other"}))
+    other_dataset = EvaluationWorkspace(
+        config.model_copy(update={"dataset_name": "other"})
+    )
+    assert workspace.embeddings_path == repeat.embeddings_path
+    assert workspace.embeddings_path != other_model.embeddings_path
+    assert workspace.embeddings_path != other_dataset.embeddings_path
+    assert not workspace.embeddings_path.is_relative_to(config.benchmark_root)
+
+
+def test_shared_baseline_directory_is_reserved(tmp_path):
+    with pytest.raises(ValueError, match="reserved"):
+        workspace_config(tmp_path, model_name="baselines")
+
+
+def test_seed_manifests_replace_workspace_and_experiment_sidecars(tmp_path):
+    config = workspace_config(tmp_path)
+    first = EvaluationWorkspace(config, variant="mlp", seed=1)
+    second = EvaluationWorkspace(config, variant="mlp", seed=2)
+    for workspace in (first, second):
+        with workspace.reserve_run() as targets:
+            workspace.initialize_run(
+                targets, overwrite=False, config={"seed": workspace.seed, "mode": "mlp"}
+            )
+        workspace.validate_experiment("inputs", {"fingerprint": "same"})
+    manifests = list(config.benchmark_root.rglob("*.json"))
+    assert set(manifests) == {first.run_manifest_path, second.run_manifest_path}
+    manifest = json.loads(first.run_manifest_path.read_text())
+    assert manifest["workspace"]["model_repo_id"] == config.model_repo_id
+    assert manifest["experiment"] == {
+        "config": {"mode": "mlp"},
+        "inputs": {"fingerprint": "same"},
+    }
+    with pytest.raises(ValueError, match="inputs differs across seeds"):
+        second.validate_experiment("inputs", {"fingerprint": "changed"})
+    with pytest.raises(ValueError, match="config differs across seeds"):
+        second.validate_experiment("config", {"mode": "other"})
+    with first.reserve_run(overwrite=True) as targets:
+        first.initialize_run(targets, overwrite=True, config={"seed": 1, "mode": "mlp"})
+    assert json.loads(first.run_manifest_path.read_text())["experiment"] == (
+        manifest["experiment"]
+    )
+
+
+@pytest.mark.parametrize("seeded_first", [False, True])
+def test_seeded_and_unseeded_runs_cannot_mix(tmp_path, seeded_first):
+    config = workspace_config(tmp_path)
+    first = EvaluationWorkspace(config, variant="mlp", seed=1 if seeded_first else None)
+    second = EvaluationWorkspace(config, variant="mlp", seed=None if seeded_first else 1)
+    with first.reserve_run() as targets:
+        first.initialize_run(targets, overwrite=False, config={})
+    with pytest.raises(ValueError, match="seed|Seed"), second.reserve_run():
+        pass
 
 
 def test_output_dir_yaml_override_parses_independently_of_model_path(tmp_path):
@@ -150,7 +217,7 @@ def test_suite_configs_and_revisions_cannot_reuse_output_labels(tmp_path, change
         config.model_copy(update=change), variant="mlp-frozen_trunk"
     )
     with pytest.raises(ValueError, match="different inputs"):
-        with changed.reserve_run():
+        with changed.reserve_run(overwrite=True):
             pass
 
 
@@ -291,6 +358,25 @@ def test_active_run_cannot_be_overwritten(tmp_path):
         workspace.reserve_run(overwrite=True),
     ):
         pass
+
+
+def test_coordination_locks_live_in_scratch_not_results(tmp_path):
+    config = workspace_config(tmp_path, tmp_path=str(tmp_path / "scratch"))
+    workspace = EvaluationWorkspace(config, variant="mlp", seed=1)
+    with workspace.reserve_run() as targets:
+        workspace.initialize_run(targets, overwrite=False, config={"seed": 1})
+    assert workspace.locks_path.is_relative_to(workspace.tmp_path)
+    assert len(list(workspace.locks_path.glob("*.lock"))) == 3
+    assert not list(workspace.workspace_root.rglob("*.lock"))
+    repeat = EvaluationWorkspace(config, variant="mlp", seed=2)
+    assert repeat.locks_path == workspace.locks_path
+    separate_output = EvaluationWorkspace(
+        config.model_copy(update={"output_dir": tmp_path / "other_results"}),
+        variant="mlp",
+        seed=1,
+    )
+    assert separate_output.embeddings_path == workspace.embeddings_path
+    assert separate_output.locks_path != workspace.locks_path
 
 
 def test_model_labels_cannot_be_reused_for_different_sources(tmp_path):

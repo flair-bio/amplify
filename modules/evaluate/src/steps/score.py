@@ -133,21 +133,6 @@ class ScoreStep:
         )
         for name, reference in baseline_references.items():
             reference["scores"] = result.condition_scores[name]
-        condition_scores_path = write_parquet(
-            pl.DataFrame(
-                [
-                    {
-                        **metadata_dict,
-                        "condition": condition,
-                        "metric": metric,
-                        "score": value,
-                    }
-                    for condition, metrics in result.condition_scores.items()
-                    for metric, value in metrics.items()
-                ]
-            ),
-            workspace.run_root / "condition_scores.parquet",
-        )
         result.scores_path = update_run_manifest(
             workspace.run_manifest_path,
             "score",
@@ -156,7 +141,7 @@ class ScoreStep:
                 "config": result.config,
                 "scores": result.scores,
                 "baselines": baseline_references,
-                "condition_scores_path": str(condition_scores_path),
+                "condition_scores": result.condition_scores,
             },
         )
         if result.resamples is not None:
