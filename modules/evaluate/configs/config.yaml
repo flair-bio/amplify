@@ -18,9 +18,9 @@ workspace:
   label_format: null # scalar, per_token, multilabel, or contact_pairs
   num_labels: null # number of classes for *_classification tasks; unused (forced to 1) for sequence_regression
   model_kwargs: {} # extra task.build_model() kwargs, e.g. Jacobian mutant_batch_size/max_jacobian_bytes
-  base_path: "./eval" # benchmark root; task/dataset/baselines and task/dataset/models live here
+  base_path: "./eval" # benchmark root; task/dataset/baselines and task/dataset/<model> live here
   output_dir: null # optional benchmark-root override for both models and baselines
-  tmp_path: null
+  tmp_path: null # cache root; defaults to <benchmark_root>/tmp; override with /scratch/...; task/dataset/model appended
 
 wandb:
   enabled: false
