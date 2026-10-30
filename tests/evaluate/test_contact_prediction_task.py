@@ -11,11 +11,12 @@ import torch
 
 from modules.evaluate.src.metrics import contact_metrics
 from modules.evaluate.src.tasks import get_task
-from modules.evaluate.src.dataset.contact import ContactChain, align_contact_sequence
-from modules.evaluate.src.tasks.contact_prediction import (
-    IGNORE_INDEX,
+from modules.evaluate.src.dataset.contact import (
+    ContactChain,
+    align_contact_sequence,
     separation_prior_scores,
 )
+from modules.evaluate.src.tasks.contact_prediction import IGNORE_INDEX
 from modules.evaluate.src.model.inference import pad_for_gather
 
 
