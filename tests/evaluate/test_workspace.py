@@ -8,11 +8,13 @@ from unittest.mock import Mock
 import polars as pl
 import pytest
 
-from modules.core.utils.config_loader import load_and_parse
 from modules.evaluate.src.config import EvaluationConfig
 from modules.evaluate.src.dataset.workspace import (
     EvaluationWorkspace,
     EvaluationWorkspaceConfig,
+)
+from modules.evaluate.src.utils.config_loader import (
+    load_and_parse_evaluation as load_and_parse,
 )
 
 
@@ -326,30 +328,48 @@ def test_overwrite_rejects_checkpoint_inside_target(tmp_path):
     assert (checkpoint / "weights").read_text() == "keep"
 
 
-def test_cli_passes_explicit_overwrite_to_pipeline(tmp_path, monkeypatch):
+def test_cli_passes_explicit_overwrite_to_runner(tmp_path, monkeypatch):
     from modules.evaluate.src import run_evaluate
 
     path = tmp_path / "config.json"
     path.write_text(
         json.dumps({"workspace": workspace_config(tmp_path).model_dump(mode="json")})
     )
-    monkeypatch.setattr("sys.argv", ["run_evaluate.py", "--overwrite", str(path)])
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_evaluate.py",
+            "--suite",
+            "calibration",
+            "--model",
+            "amplify_120m",
+            "--config",
+            str(path),
+            "--overwrite",
+        ],
+    )
     monkeypatch.setattr(
         run_evaluate,
         "Accelerator",
         lambda **kwargs: SimpleNamespace(is_main_process=True),
     )
     monkeypatch.setattr(run_evaluate, "seed_everything", lambda seed: None)
+    engine = object()
+    monkeypatch.setattr(run_evaluate, "resolve_engine", lambda config: engine)
     run = Mock()
-    monkeypatch.setattr(run_evaluate, "run_pipeline", run)
+    monkeypatch.setattr(run_evaluate, "run_evaluation", run)
     run_evaluate.main()
     assert run.call_args.kwargs["overwrite"] is True
+    assert run.call_args.kwargs["task"] is engine
     assert run.call_args.args[1].config.run_id == "test"
 
 
 def test_cli_rejects_baseline_overwrite_without_touching_artifacts(monkeypatch):
     from modules.evaluate.src import run_evaluate
 
-    monkeypatch.setattr("sys.argv", ["run_evaluate.py", "--baselines", "--overwrite"])
+    monkeypatch.setattr(
+        "sys.argv",
+        ["run_evaluate.py", "--suite", "calibration", "--baselines", "--overwrite"],
+    )
     with pytest.raises(SystemExit, match="model runs only"):
         run_evaluate.main()

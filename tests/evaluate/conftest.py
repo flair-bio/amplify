@@ -22,6 +22,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import NamedTuple
 
+import pytest
 from accelerate.state import AcceleratorState
 from datasets import Dataset, DatasetDict
 from torch import nn
@@ -42,8 +43,6 @@ from modules.pretrain.src.model.tokenizer import (
     get_tokenizer,
 )
 
-import pytest
-
 
 def _reset_accelerator_state() -> None:
     AcceleratorState._reset_state(  # pyright: ignore[reportPrivateUsage]
@@ -56,6 +55,26 @@ def isolate_accelerator_state():
     _reset_accelerator_state()
     yield
     _reset_accelerator_state()
+
+
+_FAKE_HUB_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+@pytest.fixture(autouse=True)
+def offline_hub_commits(monkeypatch):
+    """Resolve every Hub repo to one fixed commit, so execution preflight never
+    reaches the network. Tests that exercise resolution set their own client."""
+    from types import SimpleNamespace
+
+    from modules.evaluate.src.evaluation import preflight
+
+    class _FakeHubApi:
+        def model_info(self, repo_id: str) -> SimpleNamespace:
+            return SimpleNamespace(sha=_FAKE_HUB_COMMIT)
+
+        dataset_info = model_info
+
+    monkeypatch.setattr(preflight, "HfApi", _FakeHubApi)
 
 
 # Minimal but real amino-acid vocabulary (the 20 standard residues, enough to

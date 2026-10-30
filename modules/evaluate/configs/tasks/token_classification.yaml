@@ -1,14 +1,18 @@
-workspace:
-  task_type: token_classification
+task:
+  type: token_classification
 
-steps:
-  tune:
-    hyperparameter_search:
-      metric: f1
-      direction: maximize
-      n_trials: 100
-  score:
-    metrics: [f1]
-    metric_aggregation: macro # pool valid residues, then average classes; -100 positions are excluded
-  predict:
-    controls: [random_trunk]
+training:
+  hyperparameter_search:
+    metric: f1
+    direction: maximize
+    n_trials: 100
+
+scoring:
+  metrics: [f1]
+  metric_aggregation: macro # pool valid residues, then average classes; -100 positions are excluded
+
+prediction:
+  controls: [random_trunk]
+
+baselines:
+  names: [majority_class]

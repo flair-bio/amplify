@@ -1,18 +1,17 @@
-workspace:
-  dataset_name: antibiotic_resistance
-  dataset_repo_id: flair-bio/amr_hmd_arg
+dataset:
+  name: antibiotic_resistance
+  repo_id: flair-bio/amr_hmd_arg
   target_type: categorical
   label_format: scalar
   num_labels: 14
 
-steps:
-  prepare:
-    max_length: 2048
-    split:
-      refit_additional_splits: [tuning_excluded]
-  tune:
-    refit_on_train_validation: true
-    metric_aggregation: macro
-  score:
-    metrics: [f1]
-    metric_aggregation: macro
+representation:
+  max_length: 2048
+  split:
+    refit_additional_splits: [tuning_excluded]
+training:
+  refit_on_train_validation: true
+  metric_aggregation: macro
+scoring:
+  metrics: [f1]
+  metric_aggregation: macro

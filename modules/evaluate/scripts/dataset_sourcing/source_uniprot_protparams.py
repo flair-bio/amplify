@@ -22,7 +22,9 @@ from modules.evaluate.scripts.dataset_sourcing.shared.downloads import (
     build_uniprot_query,
     download_uniprot_tsv,
 )
-from modules.evaluate.scripts.dataset_sourcing.shared.hf_io import upload_dataset_artifact
+from modules.evaluate.scripts.dataset_sourcing.shared.hf_io import (
+    upload_dataset_artifact,
+)
 from modules.evaluate.scripts.dataset_sourcing.shared.outputs import (
     generated_utc_date,
     mmseqs_settings_lines,

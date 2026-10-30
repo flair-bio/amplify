@@ -3,9 +3,8 @@ Pluggable prediction heads for the evaluation probe.
 
 ``EmbeddingProbeHead`` is a linear or MLP torch probe over precomputed
 embeddings. ``"torch_linear"`` is a single :class:`torch.nn.Linear` layer trained by
-backpropagation through
-:class:`~modules.evaluate.src.steps.tune.TuneStep`'s existing epoch/optimizer
-loop. With ``steps.prepare.embedding_cache.enabled=True``, it uses the
+backpropagation through the training owner's epoch/optimizer loop
+(:class:`~modules.evaluate.src.training.torch_trainer.TorchProbeTrainer`). With ``steps.prepare.embedding_cache.enabled=True``, it uses the
 standalone :class:`EmbeddingProbeHead`. Without the cache, it trains the
 model's native head only when that head is itself a plain ``nn.Linear``.
 Layerwise mode instead applies independent linear heads at selected frozen

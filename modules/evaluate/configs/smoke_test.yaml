@@ -20,53 +20,53 @@
 #     modules/evaluate/configs/datasets/ssp_q3.yaml \
 #     modules/evaluate/configs/smoke_test.yaml
 
-workspace:
-  base_path: "./eval/smoke_test"
+runtime:
+  output_root: "./eval/smoke_test"
 
-wandb:
+tracking:
   enabled: false
 
 baselines:
   names: [] # smoke tests exercise model controls without requiring a baseline job
 
-steps:
+predictor:
   mode: evaluate_as_is
-  prepare:
-    # Small batches make differing dynamic-padding widths likely across ranks.
-    batch_size: 2
-    max_length: 64
-    dataloader_num_workers: 0
-    dataloader_persistent_workers: false
-    length_grouped_sampling: false
-    embedding_cache:
-      enabled: false
-      layers: null
-  tune:
-    refit_on_train_validation: false
-    head:
-      head_type: mlp # native head for evaluate_as_is, even after an alternative probe overlay
-    max_epochs: 1
-    hyperparameter_search:
-      enabled: false
-      n_trials: 2
-      search_pattern: tpe
-      search_space:
-        hidden_size: null
-        hidden_depth: null
-        batch_size: null
-        learning_rate: [1e-4, 5e-5]
-        max_epochs: [1]
-        weight_decay: [1e-4]
-  predict:
-    store_sequences: true
-    controls:
-      [
-        untrained,
-        random_trunk,
-        random_head,
-        random_both,
-        scrambled_labels,
-      ]
-  score:
-    bootstrap_enabled: true
-    n_samples: 5
+  head:
+    head_type: mlp # native head for evaluate_as_is, even after an alternative probe overlay
+representation:
+  # Small batches make differing dynamic-padding widths likely across ranks.
+  batch_size: 2
+  max_length: 64
+  dataloader_num_workers: 0
+  dataloader_persistent_workers: false
+  length_grouped_sampling: false
+  embedding_cache:
+    enabled: false
+    layers: null
+training:
+  refit_on_train_validation: false
+  max_epochs: 1
+  hyperparameter_search:
+    enabled: false
+    n_trials: 2
+    search_pattern: tpe
+    search_space:
+      hidden_size: null
+      hidden_depth: null
+      batch_size: null
+      learning_rate: [1e-4, 5e-5]
+      max_epochs: [1]
+      weight_decay: [1e-4]
+prediction:
+  store_sequences: true
+  controls:
+    [
+      untrained,
+      random_trunk,
+      random_head,
+      random_both,
+      scrambled_labels,
+    ]
+scoring:
+  bootstrap_enabled: true
+  n_samples: 5

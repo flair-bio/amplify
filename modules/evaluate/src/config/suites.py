@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from modules.evaluate.src.tasks import available_tasks
 
-CONFIG_ROOT = Path(__file__).resolve().parents[1] / "configs"
+CONFIG_ROOT = Path(__file__).resolve().parents[2] / "configs"
 SUITE_DIR = CONFIG_ROOT / "suites"
 MODEL_COLLECTION_DIR = CONFIG_ROOT / "model_collections"
 MODEL_DIR = CONFIG_ROOT / "models"
@@ -78,6 +78,22 @@ class EvaluationJob:
     def evaluation_id(self) -> str:
         return f"{self.task}/{self.dataset}/{self.predictor or 'default'}"
 
+    def dataset_config_path(self) -> Path:
+        return CONFIG_ROOT / "datasets" / f"{self.dataset}.yaml"
+
+    @property
+    def shared_baselines(self) -> tuple[str, ...]:
+        """Shared baselines this job's task declares (``baselines.names``)."""
+        from modules.evaluate.src.utils.baselines import STRUCTURAL_TASK_BASELINES
+
+        raw = yaml.safe_load((CONFIG_ROOT / "tasks" / f"{self.task}.yaml").read_text())
+        names = (raw or {}).get("baselines", {}).get("names", [])
+        if names:
+            return tuple(names)
+        # Structural tasks keep baselines.names out of their YAML (model runs
+        # reject it); --baselines supplies these defaults explicitly.
+        return STRUCTURAL_TASK_BASELINES.get(self.task, ())
+
     def config_paths(self, model_path: Path | None = None) -> list[Path]:
         """Overlay order: base config, model, task, dataset, predictor.
 
@@ -134,9 +150,10 @@ def expand_suite(
             spec.predictors if entry.predictors is None else entry.predictors
         ) or [None]
         for predictor in predictors:
-            if predictor is not None and not (
-                CONFIG_ROOT / "predictors" / f"{predictor}.yaml"
-            ).is_file():
+            if (
+                predictor is not None
+                and not (CONFIG_ROOT / "predictors" / f"{predictor}.yaml").is_file()
+            ):
                 raise SuiteError(
                     f"suite '{spec.suite}': unknown predictor '{predictor}'"
                 )
@@ -177,28 +194,90 @@ def select_jobs(
     return selected
 
 
-def resolve_model_paths(model: str | Path) -> list[Path]:
-    """Resolve a model name or explicit YAML path to a model config file.
+_REMOTE_ID = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
-    Local checkpoint directories are not supported yet and fail explicitly.
+
+@dataclass(frozen=True)
+class ModelRef:
+    """A resolved model input.
+
+    ``config_path`` is a model YAML overlay (named or explicit). Checkpoint
+    directories and raw remote identifiers have no YAML; they contribute
+    ``overrides`` setting ``model.repo_id`` and ``model.name``.
+    """
+
+    label: str
+    source: str  # "config", "checkpoint" or "remote"
+    config_path: Path | None = None
+    overrides: tuple[str, ...] = field(default_factory=tuple)
+
+
+def _checked_label(label: str, origin: str) -> str:
+    if not _SAFE_LABEL.match(label):
+        raise SuiteError(
+            f"unsafe model label '{label}' for {origin}; pass --model-name LABEL"
+        )
+    return label
+
+
+def model_label(path: Path) -> str:
+    """Filesystem-safe model label derived from a model config file name."""
+    return _checked_label(path.stem, str(path))
+
+
+def resolve_model(model: str | Path, *, label: str | None = None) -> ModelRef:
+    """Resolve ``--model`` input into a :class:`ModelRef`.
+
+    Accepted forms, in order: a model YAML path, a local checkpoint directory
+    (must exist and contain ``config.json``), a raw remote identifier
+    ``org/name`` (label defaults to ``org--name``), or a known model config name.
     """
     text = str(model)
+    if label is not None:
+        _checked_label(label, "--model-name")
     if text.endswith((".yaml", ".yml")):
         path = Path(text)
-    elif "/" in text or Path(text).is_dir():
-        raise SuiteError(
-            f"model '{text}' looks like a checkpoint path; provide a model config "
-            "name or YAML (checkpoint directories are not supported yet)"
+        if not path.is_file():
+            raise SuiteError(f"model config '{text}' not found at {path}")
+        return ModelRef(label or model_label(path), "config", path)
+
+    if text.startswith(("/", ".", "~")) or Path(text).exists():
+        path = Path(text).expanduser().resolve()
+        if not path.is_dir():
+            raise SuiteError(
+                f"model path '{text}' is not a checkpoint directory; provide a model "
+                "config name or YAML"
+            )
+        if not (path / "config.json").is_file():
+            raise SuiteError(f"checkpoint directory {path} has no config.json")
+        name = _checked_label(label or path.name, f"checkpoint {path}")
+        return ModelRef(
+            name,
+            "checkpoint",
+            None,
+            (f"model.repo_id={path}", f"model.name={name}"),
         )
-    else:
-        path = MODEL_DIR / f"{text}.yaml"
+
+    if "/" in text:
+        if not _REMOTE_ID.match(text):
+            raise SuiteError(f"invalid remote model identifier '{text}'")
+        name = label or text.replace("/", "--")
+        _checked_label(name, f"remote model {text}")
+        return ModelRef(
+            name,
+            "remote",
+            None,
+            (f"model.repo_id={text}", f"model.name={name}"),
+        )
+
+    path = MODEL_DIR / f"{text}.yaml"
     if not path.is_file():
         raise SuiteError(f"model config '{text}' not found at {path}")
-    return [path]
+    return ModelRef(label or model_label(path), "config", path)
 
 
-def resolve_model_collection(name_or_path: str | Path) -> list[Path]:
-    """Return ordered, unique model config paths from a model collection file."""
+def resolve_model_collection(name_or_path: str | Path) -> list[ModelRef]:
+    """Return ordered model refs from a model collection file, labels unique."""
     path = Path(name_or_path)
     if path.suffix not in {".yaml", ".yml"}:
         path = MODEL_COLLECTION_DIR / f"{name_or_path}.yaml"
@@ -208,18 +287,14 @@ def resolve_model_collection(name_or_path: str | Path) -> list[Path]:
     models = raw.get("models")
     if not isinstance(models, list) or not models:
         raise SuiteError(f"model collection {path} must list 'models'")
-    labels = [str(model) for model in models]
-    if len(set(labels)) != len(labels):
+    entries = [str(model) for model in models]
+    if len(set(entries)) != len(entries):
         raise SuiteError(f"model collection {path} has duplicate model entries")
-    resolved: list[Path] = []
-    for label in labels:
-        resolved.extend(resolve_model_paths(label))
-    return resolved
-
-
-def model_label(path: Path) -> str:
-    """Filesystem-safe model label derived from a model config file name."""
-    label = path.stem
-    if not _SAFE_LABEL.match(label):
-        raise SuiteError(f"unsafe model label '{label}' from {path}")
-    return label
+    refs = [resolve_model(entry) for entry in entries]
+    labels = [ref.label for ref in refs]
+    if len(set(labels)) != len(labels):
+        raise SuiteError(
+            f"model collection {path} resolves to duplicate labels {labels}; "
+            "labels must be unique"
+        )
+    return refs

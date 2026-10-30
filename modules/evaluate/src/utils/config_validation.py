@@ -279,11 +279,7 @@ def _validate_contact_task(config: EvaluationConfig) -> None:
         config.workspace.label_format,
         config.workspace.dataset_name,
     )
-    if (
-        config.external_test_sets
-        or steps.layerwise.enabled
-        or config.baselines.names
-    ):
+    if config.external_test_sets or steps.layerwise.enabled or config.baselines.names:
         raise ValueError(
             "Contact prediction requires fixed CASP splits, without generic CV/layers/baselines"
         )

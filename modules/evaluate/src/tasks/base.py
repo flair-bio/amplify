@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import warnings
 from abc import ABC
-from typing import Any, Callable, ClassVar, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, ClassVar
 
 import numpy as np
 import torch
@@ -67,6 +68,14 @@ class TaskHandler(ABC):
     #: Whether predictions/labels are per-*pair* (e.g. contact maps) rather
     #: than per-token/per-sequence.
     pairwise: ClassVar[bool] = False
+
+    #: Whether labels use ``IGNORE_INDEX`` for positions that must be excluded from
+    #: training statistics and metrics (per-token labels with padding/special tokens).
+    masks_ignore_index: ClassVar[bool] = False
+
+    #: Whether the task's predictions are continuous values. Regression baselines
+    #: (train mean, separation prior, ...) differ from class-based ones.
+    is_regression: ClassVar[bool] = False
 
     #: Whether tokenization must rewrite the label column to stay aligned with
     #: the tokenized (and possibly cropped) residue span.

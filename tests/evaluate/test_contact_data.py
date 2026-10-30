@@ -10,20 +10,27 @@ import polars as pl
 import pytest
 from datasets import Dataset, DatasetDict, Features, List, Value
 
+from modules.evaluate.src.artifacts.predictions import load_predict_output
+from modules.evaluate.src.artifacts.scores import publish_contact_scores
+from modules.evaluate.src.config.predict import PredictConfig
+from modules.evaluate.src.config.score import ScoreConfig
 from modules.evaluate.src.dataset import dataloader
 from modules.evaluate.src.dataset.dataloader import load_contact_dataset
 from modules.evaluate.src.dataset.workspace import (
     EvaluationWorkspaceConfig,
     get_evaluation_workspace,
 )
+from modules.evaluate.src.predictors.contact import (
+    predict_contacts,
+    score_contact_predictions,
+)
+from modules.evaluate.src.predictors.inference import build_evaluation_metadata
 from modules.evaluate.src.schemas.artifacts import (
     ContactEvaluationMetadata,
     PreparedArtifacts,
 )
-from modules.evaluate.src.steps.predict import PredictConfig, PredictStep
-from modules.evaluate.src.steps.prepare import PrepareConfig, PrepareStep
-from modules.evaluate.src.steps.score import ScoreConfig, ScoreStep
 from modules.evaluate.src.tasks.contact_prediction import (
+    ContactPredictionTask,
     candidate_pairs,
     prepare_contact_dataset,
     tokenize_contact_chain,
@@ -107,6 +114,28 @@ def prediction_inputs(dataset, predictor, tmp_path):
     return workspace, prepared
 
 
+def predict(workspace, prepared, config, seed=0):
+    """Contact prediction through the owner, with the predictor's metadata."""
+    metadata = build_evaluation_metadata(
+        workspace,
+        split=prepared.split,
+        seed=seed,
+        head_type=None,
+        variant=workspace.variant,
+    )
+    return predict_contacts(workspace, prepared, config, metadata, seed, None)
+
+
+def score(predictions, *, bootstrap_enabled=False, output_dir=None):
+    """Contact scoring through the owner; publishes only when asked."""
+    result = score_contact_predictions(
+        predictions, bootstrap_enabled=bootstrap_enabled, metrics=None
+    )
+    if output_dir is not None:
+        publish_contact_scores(result, output_dir, ScoreConfig().model_dump())
+    return result
+
+
 def test_local_loading_uses_only_parquet_and_preserves_rows(tmp_path, monkeypatch):
     rows = [
         row(),
@@ -119,7 +148,7 @@ def test_local_loading_uses_only_parquet_and_preserves_rows(tmp_path, monkeypatc
     for split, dataset in hf.items():
         dataset.to_parquet(data / f"{split}-00000-of-00001.parquet")
     monkeypatch.setattr(np, "load", Mock(side_effect=AssertionError("No coordinates")))
-    loaded = PrepareStep(PrepareConfig()).run_contacts(
+    loaded = ContactPredictionTask().prepare_dataset(
         tmp_path, cache_dir=tmp_path / "cache"
     )
     expected = prepare_contact_dataset(hf)
@@ -299,16 +328,14 @@ def test_steps_share_full_chain_predictions_and_roundtrip_outputs(tmp_path):
         side_effect=lambda chain: np.zeros((len(chain.alignment.clean_sequence),) * 2)
     )
     workspace, prepared = prediction_inputs(dataset, predictor, tmp_path)
-    predictions = PredictStep(PredictConfig(controls=[])).run(
-        workspace, prepared, seed=0
-    )
+    predictions = predict(workspace, prepared, PredictConfig(controls=[]))
     predictor.assert_called_once_with(dataset.splits["test"][0])
     assert predictions.predictions.height == len(rows)
     assert predictions.predictions_path is not None
-    restored = ScoreStep.load_predict_output(workspace)
+    restored = load_predict_output(workspace)
     assert isinstance(restored.metadata, ContactEvaluationMetadata)
     assert restored.metadata == predictions.metadata
-    scored = ScoreStep(ScoreConfig()).run_contacts(restored, output_dir=tmp_path)
+    scored = score(restored, output_dir=tmp_path)
     assert scored.unit_scores.height == 2 * len(rows)
     statuses = {
         (r["id"], r["minsep"]): r["status"] for r in scored.unit_scores.to_dicts()
@@ -323,28 +350,28 @@ def test_steps_share_full_chain_predictions_and_roundtrip_outputs(tmp_path):
 
 
 def test_deleted_chains_are_unscorable_and_bad_predictions_fail(tmp_path):
-    step = PredictStep(PredictConfig(controls=[], persist_to_disk=False))
+    config = PredictConfig(controls=[], persist_to_disk=False)
     dataset = prepare_contact_dataset(
         hf_data([row(sequence="XBOUZJ", positive_pairs=[])])
     )
     predictor = Mock(side_effect=AssertionError("No retained residues"))
     workspace, prepared = prediction_inputs(dataset, predictor, tmp_path)
-    predictions = step.run(workspace, prepared, seed=0)
+    predictions = predict(workspace, prepared, config)
     predictor.assert_not_called()
-    result = ScoreStep(ScoreConfig()).run_contacts(predictions)
+    result = score(predictions)
     assert result.unit_scores["status"].to_list() == ["no_retained_members"] * 2
     dataset = prepare_contact_dataset(hf_data([row()]))
     workspace, prepared = prediction_inputs(
         dataset, lambda chain: np.zeros((10, 10)), tmp_path
     )
     with pytest.raises(ValueError, match="full retained-chain"):
-        step.run(workspace, prepared, seed=0)
+        predict(workspace, prepared, config)
     workspace, prepared = prediction_inputs(
         dataset, Mock(side_effect=MemoryError("too long")), tmp_path
     )
     with pytest.raises(MemoryError, match="too long"):
-        step.run(workspace, prepared, seed=0)
+        predict(workspace, prepared, config)
     with pytest.raises(ValueError, match="no fitted contact control"):
-        PredictStep(PredictConfig()).run(workspace, prepared, seed=0)
+        predict(workspace, prepared, PredictConfig())
     with pytest.raises(ValueError, match="complexes"):
-        ScoreStep(ScoreConfig(bootstrap_enabled=True)).run_contacts(predictions)
+        score(predictions, bootstrap_enabled=True)

@@ -1,6 +1,6 @@
-workspace:
-  dataset_name: interpro_active_site
-  dataset_repo_id: flair-bio/interpro_active_site
+dataset:
+  name: interpro_active_site
+  repo_id: flair-bio/interpro_active_site
   target_type: categorical
   label_format: multilabel
   num_labels: 2

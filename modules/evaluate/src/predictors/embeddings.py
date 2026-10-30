@@ -29,10 +29,11 @@ import fcntl
 import hashlib
 import json
 import logging
+from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, Sequence
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from accelerate import Accelerator
@@ -704,9 +705,8 @@ def build_embedding_dataloaders(
     extract them fresh from *model* (writing them to cache when eligible),
     then wrap them in an accelerator-prepared :class:`EmbeddingDataset`
     dataloader. Returns one dataloader (or ``None``, for an absent split)
-    per key in *splits*, used by :class:`~modules.evaluate.src.steps.
-    prepare.PrepareStep` to replace token dataloaders with pooled-embedding
-    ones.
+    per key in *splits*, used by the preparation owner to replace token dataloaders
+    with pooled-embedding ones.
 
     Rebuilt extraction loaders use deterministic length grouping when enabled;
     otherwise they retain dataset order. Cached feature batches are not grouped.

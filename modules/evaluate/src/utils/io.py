@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -41,12 +43,22 @@ def write_json(path: Path, payload: dict[str, Any]) -> Path:
     """Write *payload* to *path* as indented JSON, creating parent dirs.
 
     Returns *path* so callers can assign and use it in one expression.
-    Atomic: a crash mid-write leaves the previous file intact.
+    Atomic: a crash mid-write leaves the previous file intact. Each write uses
+    its own exclusively created temporary file, so concurrent writers to the
+    same path cannot interleave their bytes.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2))
-    tmp.replace(path)
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(json.dumps(payload, indent=2))
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     return path
 
 

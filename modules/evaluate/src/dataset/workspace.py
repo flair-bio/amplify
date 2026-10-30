@@ -13,6 +13,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from modules.evaluate.src.artifacts.identity import (
+    dataset_identity,
+    model_identity,
+    validate_dataset_pin,
+    validate_model_pin,
+)
 from modules.evaluate.src.tasks import TaskType, available_tasks
 from modules.evaluate.src.utils.io import update_run_manifest, write_json
 
@@ -35,6 +41,10 @@ class DatasetWorkspaceConfig(BaseModel):
         None  # path to HuggingFace dataset repo e.g. biomap-research/stability_prediction
     )
     dataset_revision: str | None = None
+    # Named view within a shared repo (HF builder config / local subdirectory).
+    dataset_subset: str | None = None
+    # Relative directory under --data-root (defaults to dataset_name there).
+    local_path: str | None = None
     edition: Literal[14, 15, 16] | None = None
     task_type: TaskType
     target_type: Literal["categorical", "continuous"]
@@ -70,6 +80,17 @@ class DatasetWorkspaceConfig(BaseModel):
         return value
 
     @model_validator(mode="after")
+    def _validate_dataset_pin(self) -> DatasetWorkspaceConfig:
+        # Offline (no Hub or data access): same rules as the loaders enforce later.
+        validate_dataset_pin(
+            task_type=self.task_type,
+            repo_id=self.dataset_repo_id,
+            revision=self.dataset_revision,
+            subset=self.dataset_subset,
+        )
+        return self
+
+    @model_validator(mode="after")
     def _validate_target_metadata(self) -> DatasetWorkspaceConfig:
         if self.target_type == "continuous":
             if self.label_format != "scalar" or self.num_labels is not None:
@@ -90,8 +111,15 @@ class EvaluationWorkspaceConfig(DatasetWorkspaceConfig):
     model_name: str
     run_id: str
     model_repo_id: str | None = None
+    # Immutable commit SHA for Hub models; fingerprinted local paths take none.
+    model_revision: str | None = None
     model_kwargs: dict[str, Any] = Field(default_factory=dict)
     tmp_path: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_model_pin(self) -> EvaluationWorkspaceConfig:
+        validate_model_pin(repo_id=self.model_repo_id, revision=self.model_revision)
+        return self
 
     @field_validator("run_id", "model_name")
     @classmethod
@@ -133,6 +161,14 @@ class EvaluationWorkspace:
         self.task_type = config.task_type
         self.num_labels = config.num_labels
         self.model_kwargs = config.model_kwargs
+        # Pinned Hub revision, forwarded to every tokenizer/model load so the
+        # trunk, tokenizer and random-trunk controls all come from one commit.
+        self.model_load_kwargs: dict[str, Any] = (
+            {"revision": config.model_revision}
+            if config.model_revision is not None
+            else {}
+        )
+        self._pinned_identity: dict[str, Any] | None = None
         self.base_path = config.base_path
         if variant is not None and not re.fullmatch(
             r"[A-Za-z0-9][A-Za-z0-9_.-]*", variant
@@ -193,6 +229,23 @@ class EvaluationWorkspace:
         for path in self._all_paths:
             path.mkdir(parents=True, exist_ok=True)
 
+    def pinned_identity(self) -> dict[str, Any]:
+        """Model checkpoint and dataset identity, hashed once per workspace."""
+        if self._pinned_identity is None:
+            self._pinned_identity = {
+                "model": model_identity(
+                    label=self.model_name,
+                    source=self.model_repo_id or self.model_name,
+                    requested_revision=self.config.model_revision,
+                ),
+                "dataset": dataset_identity(
+                    source=self.dataset_repo_id or self.dataset_name,
+                    subset=self.config.dataset_subset,
+                    revision=self.config.dataset_revision,
+                ),
+            }
+        return self._pinned_identity
+
     @contextmanager
     def reserve_run(self, *, overwrite: bool = False) -> Iterator[list[Path]]:
         """Hold a nonblocking lock until this ordinary pipeline finishes."""
@@ -216,16 +269,38 @@ class EvaluationWorkspace:
                 "model_name": self.model_name,
                 "model_repo_id": self.model_repo_id,
             }
+            identity = self.pinned_identity()
             with (self.workspace_root / ".workspace.lock").open("a") as workspace_lock:
                 fcntl.flock(workspace_lock, fcntl.LOCK_EX)
                 if provenance_path.exists():
-                    if json.loads(provenance_path.read_text()) != provenance:
+                    recorded = json.loads(provenance_path.read_text())
+                    if {key: recorded.get(key) for key in provenance} != provenance:
                         raise ValueError(
                             f"Output labels already identify different inputs at "
                             f"{self.workspace_root}; choose a new model/dataset label or benchmark root."
                         )
+                    # Same labels but a different checkpoint, revision or subset
+                    # would silently merge two experiments into one directory.
+                    if "identity" in recorded and recorded["identity"] != identity:
+                        raise ValueError(
+                            f"Output labels at {self.workspace_root} were recorded for a "
+                            "different model checkpoint, dataset revision or subset; "
+                            "choose a new model or dataset label."
+                        )
+                    if "identity" not in recorded:
+                        # Adopting an identity-less manifest would bind these
+                        # outputs to whatever checkpoint is present now, which
+                        # cannot be verified. Refuse and leave outputs untouched.
+                        raise ValueError(
+                            f"{self.workspace_root} holds outputs from a run that "
+                            "predates checkpoint identity recording, so they cannot be "
+                            "verified against the current model or dataset. Nothing was "
+                            "changed. To proceed, move this benchmark directory aside "
+                            "(or choose a new model/dataset label or run_id) and rerun; "
+                            "existing results are never overwritten or re-adopted."
+                        )
                 else:
-                    write_json(provenance_path, provenance)
+                    write_json(provenance_path, {**provenance, "identity": identity})
             runs_path = self.workspace_root
             if runs_path.is_symlink():
                 raise ValueError(
@@ -344,3 +419,32 @@ def get_evaluation_workspace(
 ) -> EvaluationWorkspace:
     """Build a workspace, optionally identifying the probe/mode variant."""
     return EvaluationWorkspace(config, variant=variant, seed=seed)
+
+
+def get_layer_workspace(
+    workspace: EvaluationWorkspace, layer: int
+) -> EvaluationWorkspace:
+    """Output workspace of one probed layer of *workspace*'s view."""
+    return get_evaluation_workspace(
+        workspace.config,
+        variant=f"{workspace.variant}-layer_{layer}",
+        seed=workspace.seed,
+    )
+
+
+def get_external_workspace(
+    workspace: EvaluationWorkspace, external: Any
+) -> EvaluationWorkspace:
+    """Workspace of one external test set (``external`` has name and repo id)."""
+    return get_evaluation_workspace(
+        workspace.config.model_copy(
+            update={
+                "dataset_name": external.name,
+                "dataset_repo_id": external.dataset_repo_id,
+                "dataset_revision": external.dataset_revision,
+                "dataset_subset": external.dataset_subset,
+            }
+        ),
+        variant=workspace.variant,
+        seed=workspace.seed,
+    )

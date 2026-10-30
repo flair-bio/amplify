@@ -1,6 +1,6 @@
-workspace:
-  dataset_name: fold_prediction
-  dataset_repo_id: flair-bio/biomap-research-fold_prediction
+dataset:
+  name: fold_prediction
+  repo_id: flair-bio/biomap-research-fold_prediction
   target_type: categorical
   label_format: scalar
   num_labels: 1195

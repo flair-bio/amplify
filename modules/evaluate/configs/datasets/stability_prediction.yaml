@@ -1,16 +1,15 @@
-workspace:
-  dataset_name: stability_prediction
-  dataset_repo_id: flair-bio/biomap-research-stability_prediction
+dataset:
+  name: stability_prediction
+  repo_id: flair-bio/biomap-research-stability_prediction
   target_type: continuous
   label_format: scalar
   num_labels: null
 
 # Grouped Macro-Spearman is the target protocol, but verified parent-design
 # metadata and grouped scoring are not yet available. This is pooled Spearman.
-steps:
-  tune:
-    hyperparameter_search:
-      metric: spearmanr
-      direction: maximize
-  score:
-    metrics: [spearmanr]
+training:
+  hyperparameter_search:
+    metric: spearmanr
+    direction: maximize
+scoring:
+  metrics: [spearmanr]

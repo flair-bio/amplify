@@ -109,9 +109,7 @@ def _calibration_label_rows(batch_size: int, seq_len: int) -> list[list[float]]:
 
 
 @pytest.fixture(
-    params=[
-        name for name in available_tasks() if name != "contact_prediction"
-    ]
+    params=[name for name in available_tasks() if name != "contact_prediction"]
 )
 def task(request) -> TaskHandler:
     return get_task(request.param)
@@ -325,7 +323,10 @@ def test_unknown_metric_name_raises(task: TaskHandler):
 
 def test_label_consuming_tasks_declare_a_dataset_contract(task: TaskHandler):
     if not task.requires_source_labels:
-        pytest.skip(f"{task.name} derives its targets from the sequence.")
+        # Label-free tasks (e.g. pseudo_perplexity) must declare that explicitly
+        # rather than carry a label contract they never use.
+        assert not task.accepted_label_formats or task.accepted_target_types == ()
+        return
 
     assert task.accepted_target_types
     assert task.accepted_label_formats

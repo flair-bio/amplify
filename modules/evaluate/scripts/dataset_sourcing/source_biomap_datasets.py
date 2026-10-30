@@ -5,7 +5,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from modules.evaluate.scripts.dataset_sourcing.shared.config import DatasetSourcingConfig
+from modules.evaluate.scripts.dataset_sourcing.shared.config import (
+    DatasetSourcingConfig,
+)
 from modules.evaluate.scripts.dataset_sourcing.shared.pipeline import run_cli
 from modules.evaluate.scripts.dataset_sourcing.shared.spec import DatasetSourceSpec
 

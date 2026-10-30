@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Mapping
 from time import monotonic
-from typing import TYPE_CHECKING, Any, Callable, Mapping, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 from accelerate import Accelerator
@@ -27,8 +28,8 @@ from modules.evaluate.src.utils.inference import pad_for_gather, unique_id_indic
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from modules.evaluate.src.config.predict import PredictConfig
     from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
-    from modules.evaluate.src.steps.predict import PredictConfig
 
 # With a frozen trunk these two controls are identical, so they share one run.
 FRESH_HEAD_CONTROLS = frozenset({"untrained", "random_head"})
@@ -93,8 +94,8 @@ def run_layerwise_control_conditions(
         raise ValueError(f"Unsupported layerwise controls: {sorted(unsupported)}")
     if controls & RANDOMIZED_TRUNK_CONTROLS and prepared.layerwise_random_model is None:
         raise ValueError(
-            "random_trunk/random_both need the random-trunk probes from "
-            "TuneStep; pass the predict controls to TuneStep.run."
+            "random_trunk/random_both need the random-trunk probes from the "
+            "probe fit (fit_probe_protocol); pass the predict controls to it."
         )
     inner = accelerator.unwrap_model(prepared.model)
     using_embeddings = prepared.embedding_backend is not None

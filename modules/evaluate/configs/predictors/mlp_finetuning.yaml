@@ -2,24 +2,24 @@
 # swept here since the native head's size is fixed by the trunk architecture,
 # not independently configurable in this codebase.
 
-steps:
+predictor:
   mode: finetune
-  prepare:
-    embedding_cache:
-      enabled: false # Override probe defaults: trunk updates make cached embeddings stale.
-  tune:
-    refit_on_train_validation: false # live/native refit is not implemented yet
-    head:
-      head_type: mlp
-    hyperparameter_search:
-      enabled: true
-      n_trials: 100
-      search_pattern: tpe
-      search_space:
-        hidden_size: null
-        hidden_depth: null # native head architecture is fixed
-        batch_size: null
-        learning_rate: [1e-5, 1e-3]
-        max_epochs: [1, 2, 5, 10, 20, 40, 100]
-        weight_decay: [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
-        weight_decay_sampling: log
+  head:
+    head_type: mlp
+representation:
+  embedding_cache:
+    enabled: false # Override probe defaults: trunk updates make cached embeddings stale.
+training:
+  refit_on_train_validation: false # live/native refit is not implemented yet
+  hyperparameter_search:
+    enabled: true
+    n_trials: 100
+    search_pattern: tpe
+    search_space:
+      hidden_size: null
+      hidden_depth: null # native head architecture is fixed
+      batch_size: null
+      learning_rate: [1e-5, 1e-3]
+      max_epochs: [1, 2, 5, 10, 20, 40, 100]
+      weight_decay: [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
+      weight_decay_sampling: log

@@ -6,10 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from modules.core.utils.config_loader import load_and_parse
-from modules.evaluate.src.config import EvaluationConfig, LayerwiseConfig
-from modules.evaluate.src.steps.prepare import PrepareConfig
 from modules.evaluate.src.artifacts.feature_cache import EmbeddingCacheConfig
+from modules.evaluate.src.config import EvaluationConfig, LayerwiseConfig
+from modules.evaluate.src.dataset.preparation import PrepareConfig
+from modules.evaluate.src.utils.config_loader import (
+    load_and_parse_evaluation as load_and_parse,
+)
 
 
 def _base_config_dict() -> dict:
@@ -372,7 +374,9 @@ class TestShippedConfigOverlays:
             ],
             EvaluationConfig,
         )
-        assert config.workspace.dataset_repo_id == "flair-bio/solubility_uesolds_original"
+        assert (
+            config.workspace.dataset_repo_id == "flair-bio/solubility_uesolds_original"
+        )
         assert config.workspace.num_labels == 2
         assert config.steps.tune.hyperparameter_search.metric == "f1"
         assert config.steps.score.metrics == ["f1"]
@@ -398,8 +402,17 @@ class TestShippedConfigOverlays:
                 self._CONFIG_ROOT / "models" / "esm2_35m.yaml",
                 self._CONFIG_ROOT / "tasks" / f"{task_name}.yaml",
                 self._CONFIG_ROOT / "datasets" / f"{dataset_name}.yaml",
-                *([self._CONFIG_ROOT / "predictors/contact_embedding.yaml"] if task_name == "contact_prediction" else []),
+                *(
+                    [self._CONFIG_ROOT / "predictors/contact_embedding.yaml"]
+                    if task_name == "contact_prediction"
+                    else []
+                ),
             ],
+            overrides=(
+                [f"workspace.dataset_revision={'a' * 40}"]
+                if task_name == "contact_prediction"
+                else None
+            ),
             model_cls=EvaluationConfig,
         )
 
@@ -534,8 +547,17 @@ class TestShippedConfigOverlays:
                 self._CONFIG_ROOT / "models" / "esm2_35m.yaml",
                 self._CONFIG_ROOT / "tasks" / f"{task_type}.yaml",
                 self._CONFIG_ROOT / "datasets" / f"{dataset_name}.yaml",
-                *([self._CONFIG_ROOT / "predictors/contact_embedding.yaml"] if task_type == "contact_prediction" else []),
+                *(
+                    [self._CONFIG_ROOT / "predictors/contact_embedding.yaml"]
+                    if task_type == "contact_prediction"
+                    else []
+                ),
             ],
+            overrides=(
+                [f"workspace.dataset_revision={'a' * 40}"]
+                if task_type == "contact_prediction"
+                else None
+            ),
             model_cls=EvaluationConfig,
         )
 

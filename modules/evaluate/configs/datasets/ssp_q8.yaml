@@ -1,10 +1,9 @@
-workspace:
-  dataset_name: ssp_q8
-  dataset_repo_id: flair-bio/biomap-research-ssp_q8_masked
+dataset:
+  name: ssp_q8
+  repo_id: flair-bio/biomap-research-ssp_q8_masked
   target_type: categorical
   label_format: per_token
   num_labels: 8
 
-steps:
-  prepare:
-    max_length: 2048
+representation:
+  max_length: 2048

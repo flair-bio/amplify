@@ -10,18 +10,22 @@ from accelerate import Accelerator
 from pydantic import ValidationError
 from torch.utils.data import DataLoader
 
-from modules.core.utils.config_loader import load_and_parse
 from modules.evaluate.src.config import EvaluationConfig
 from modules.evaluate.src.model.heads import EmbeddingProbeHead, HeadConfig
 from modules.evaluate.src.model.layerwise import LayerwiseProbeModel
+from modules.evaluate.src.predictors.embeddings import EmbeddingDataset
 from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
-from modules.evaluate.src.steps.tune import (
+from modules.evaluate.src.training.config import (
     HyperparameterSearchConfig,
     HyperparameterSearchSpaceConfig,
     TuneConfig,
-    TuneStep,
 )
-from modules.evaluate.src.predictors.embeddings import EmbeddingDataset
+from modules.evaluate.src.training.search import generate_candidates
+from modules.evaluate.src.training.torch_trainer import TorchProbeTrainer
+from modules.evaluate.src.training.tuning import fit_probe_protocol
+from modules.evaluate.src.utils.config_loader import (
+    load_and_parse_evaluation as load_and_parse,
+)
 
 from .test_prepare import _make_workspace
 
@@ -77,9 +81,13 @@ def test_depth_search_rejects_empty_or_nonpositive_depths(depths):
 
 
 def test_grid_width_candidates_cover_the_full_product():
-    step = TuneStep(TuneConfig(hyperparameter_search=_search("grid", widths=_WIDTHS)))
+    trainer = TorchProbeTrainer(
+        TuneConfig(hyperparameter_search=_search("grid", widths=_WIDTHS))
+    )
 
-    candidates = step._generate_candidates("grid", n_trials=1, seed=42)
+    candidates = generate_candidates(
+        trainer.config.hyperparameter_search.search_space, "grid", n_trials=1, seed=42
+    )
 
     assert len(candidates) == 8
     assert {(item["hidden_size"], item["learning_rate"]) for item in candidates} == {
@@ -89,22 +97,36 @@ def test_grid_width_candidates_cover_the_full_product():
 
 
 def test_random_width_candidates_cover_each_width_with_a_limited_budget():
-    step = TuneStep(TuneConfig(hyperparameter_search=_search("random", widths=_WIDTHS)))
+    trainer = TorchProbeTrainer(
+        TuneConfig(hyperparameter_search=_search("random", widths=_WIDTHS))
+    )
 
-    candidates = step._generate_candidates("random", n_trials=4, seed=42)
+    candidates = generate_candidates(
+        trainer.config.hyperparameter_search.search_space,
+        "random",
+        n_trials=4,
+        seed=42,
+    )
 
     assert len(candidates) == 4
     assert {item["hidden_size"] for item in candidates} == set(_WIDTHS)
     assert len({tuple(sorted(item.items())) for item in candidates}) == 4
-    assert candidates == step._generate_candidates("random", n_trials=4, seed=42)
+    assert candidates == generate_candidates(
+        trainer.config.hyperparameter_search.search_space,
+        "random",
+        n_trials=4,
+        seed=42,
+    )
 
 
 def test_grid_combines_width_depth_and_batch_dimensions():
     search = _search("grid", widths=[3, 5], depths=[1, 2])
     search.search_space.learning_rate = [1e-3]
     search.search_space.batch_size = [2, 4]
-    step = TuneStep(TuneConfig(hyperparameter_search=search))
-    candidates = step._generate_candidates("grid", n_trials=1, seed=42)
+    trainer = TorchProbeTrainer(TuneConfig(hyperparameter_search=search))
+    candidates = generate_candidates(
+        trainer.config.hyperparameter_search.search_space, "grid", n_trials=1, seed=42
+    )
     assert {
         (item["hidden_size"], item["hidden_depth"], item["batch_size"])
         for item in candidates
@@ -119,9 +141,14 @@ def test_grid_combines_width_depth_and_batch_dimensions():
 
 @pytest.mark.parametrize("pattern", ["grid", "random"])
 def test_fixed_width_candidates_keep_existing_hyperparameters(pattern):
-    step = TuneStep(TuneConfig(hyperparameter_search=_search(pattern)))
+    trainer = TorchProbeTrainer(TuneConfig(hyperparameter_search=_search(pattern)))
 
-    candidates = step._generate_candidates(pattern, n_trials=24, seed=42)
+    candidates = generate_candidates(
+        trainer.config.hyperparameter_search.search_space,
+        pattern,
+        n_trials=24,
+        seed=42,
+    )
 
     assert len(candidates) == 2
     assert all(
@@ -140,7 +167,7 @@ def test_width_search_saves_winning_architecture_weights_and_training_statistics
         pytest.importorskip("optuna")
     prepared = _prepared()
     workspace = _make_workspace(tmp_path, "sequence_classification")
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             head=HeadConfig(head_type="mlp", hidden_size=7),
             standardize_features=standardize,
@@ -189,9 +216,11 @@ def test_width_search_saves_winning_architecture_weights_and_training_statistics
         )
         return score
 
-    monkeypatch.setattr(step, "_train", train)
+    monkeypatch.setattr(trainer, "train", train)
 
-    result = step.run(workspace, prepared, seed=42, accelerator=Accelerator(cpu=True))
+    result = fit_probe_protocol(
+        trainer, workspace, prepared, seed=42, accelerator=Accelerator(cpu=True)
+    )
 
     assert {trial["width"] for trial in trials} == set(_WIDTHS)
     assert len(trials) == (24 if pattern == "bohb" else 8 * len(depths or [1]))
@@ -255,7 +284,7 @@ def test_width_search_rejects_unsupported_probe_paths(tmp_path, unsupported, dim
         ValueError,
         match=f"{dimension} search requires a cached MLP probe in tune_probe mode",
     ):
-        step = TuneStep(
+        trainer = TorchProbeTrainer(
             TuneConfig(
                 head=HeadConfig(
                     head_type="torch_linear" if unsupported == "torch_linear" else "mlp"
@@ -266,9 +295,10 @@ def test_width_search_rejects_unsupported_probe_paths(tmp_path, unsupported, dim
                     depths=[1, 2] if dimension == "hidden_depth" else None,
                 ),
             ),
-            mode="finetune" if unsupported == "finetune" else "tune_probe",
+            train_trunk=unsupported == "finetune",
         )
-        step.run(
+        fit_probe_protocol(
+            trainer,
             _make_workspace(tmp_path, "sequence_classification"),
             prepared,
             accelerator=Accelerator(cpu=True),
@@ -278,7 +308,7 @@ def test_width_search_rejects_unsupported_probe_paths(tmp_path, unsupported, dim
 def test_disabled_width_search_keeps_the_configured_fixed_width(monkeypatch, tmp_path):
     search = _search("grid", widths=[3, 5])
     search.enabled = False
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             head=HeadConfig(head_type="mlp", hidden_size=7, hidden_depth=2),
             hyperparameter_search=search,
@@ -291,9 +321,10 @@ def test_disabled_width_search_keeps_the_configured_fixed_width(monkeypatch, tmp
         assert artifacts.model.probe_hidden_depth == 2
         assert "hidden_size" not in hparams
 
-    monkeypatch.setattr(step, "_train", train)
+    monkeypatch.setattr(trainer, "train", train)
 
-    trained = step.run(
+    trained = fit_probe_protocol(
+        trainer,
         _make_workspace(tmp_path, "sequence_classification"),
         _prepared(),
         accelerator=Accelerator(cpu=True),
@@ -317,7 +348,7 @@ def test_depth_only_search_trains_every_depth_and_keeps_fixed_width(
 ):
     search = _search(pattern, depths=[1, 2], n_trials=4)
     search.search_space.learning_rate = [1e-3]
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             head=HeadConfig(hidden_size=7),
             hyperparameter_search=search,
@@ -326,7 +357,7 @@ def test_depth_only_search_trains_every_depth_and_keeps_fixed_width(
         )
     )
     trained_depths = []
-    train = step._train
+    train = trainer.train
 
     def record_training(workspace, artifacts, accelerator, hparams, **kwargs):
         model = artifacts.model
@@ -346,8 +377,9 @@ def test_depth_only_search_trains_every_depth_and_keeps_fixed_width(
         trained_depths.append(model.probe_hidden_depth)
         return score
 
-    monkeypatch.setattr(step, "_train", record_training)
-    result = step.run(
+    monkeypatch.setattr(trainer, "train", record_training)
+    result = fit_probe_protocol(
+        trainer,
         _make_workspace(tmp_path, "sequence_classification"),
         _prepared(),
         accelerator=Accelerator(cpu=True),
@@ -361,7 +393,7 @@ def test_depth_only_search_trains_every_depth_and_keeps_fixed_width(
 def test_width_search_trains_cached_heads_end_to_end(monkeypatch, tmp_path):
     search = _search("grid", widths=[3, 5], n_trials=2)
     search.search_space.learning_rate = [1e-3]
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             head=HeadConfig(head_type="mlp", hidden_size=7),
             hyperparameter_search=search,
@@ -370,7 +402,7 @@ def test_width_search_trains_cached_heads_end_to_end(monkeypatch, tmp_path):
         )
     )
     trained_widths = []
-    train = step._train
+    train = trainer.train
 
     def record_training(workspace, artifacts, accelerator, hparams, **kwargs):
         model = artifacts.model
@@ -380,9 +412,10 @@ def test_width_search_trains_cached_heads_end_to_end(monkeypatch, tmp_path):
         trained_widths.append(model.probe_hidden_size)
         return result
 
-    monkeypatch.setattr(step, "_train", record_training)
+    monkeypatch.setattr(trainer, "train", record_training)
 
-    result = step.run(
+    result = fit_probe_protocol(
+        trainer,
         _make_workspace(tmp_path, "sequence_classification"),
         _prepared(),
         accelerator=Accelerator(cpu=True),

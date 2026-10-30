@@ -12,22 +12,21 @@ import polars as pl
 import pytest
 from datasets import Dataset, DatasetDict
 
+from modules.evaluate.src.artifacts.predictions import persist_predictions
 from modules.evaluate.src.config import LayerwiseConfig
+from modules.evaluate.src.config.predict import PredictConfig
+from modules.evaluate.src.config.score import ScoreConfig
 from modules.evaluate.src.dataset import resolution
 from modules.evaluate.src.dataset.dataloader import ExternalTestSetConfig
 from modules.evaluate.src.dataset.workspace import (
     DatasetWorkspaceConfig,
     get_evaluation_workspace,
 )
+from modules.evaluate.src.predictors.inference import predict_layerwise, predict_trained
 from modules.evaluate.src.runners import baselines as runner
 from modules.evaluate.src.runners.baselines import BaselineRunConfig, run_baselines
 from modules.evaluate.src.schemas.artifacts import EvaluationMetadata, PredictOutput
-from modules.evaluate.src.steps.predict import (
-    PredictConfig,
-    PredictStep,
-    persist_predictions,
-)
-from modules.evaluate.src.steps.score import ScoreConfig, ScoreStep
+from modules.evaluate.src.scoring.run import compare_predictions, score_predictions
 from modules.evaluate.src.utils.baselines import (
     align_baseline,
     artifact_directory,
@@ -107,6 +106,9 @@ def test_standalone_baseline_reuses_predictions_and_never_fits_validation(
     assert path.parent.parent.name.startswith("fit-")
     assert (path.parent / "log").read_text()
     assert (path.parent.parent / "fit_manifest.json").exists()
+    standalone = json.loads(next((path.parent / "scores").glob("*.json")).read_text())
+    assert standalone["scores"]
+    assert "control_comparisons" not in standalone
     assert baseline["id"].to_list() == ["repeat", "repeat", "other"]
     if regression:
         assert baseline["prediction"].to_list() == [2.0] * 3
@@ -178,7 +180,9 @@ def test_external_baseline_keeps_source_training_prior(tmp_path, monkeypatch):
         }
     )
     config.external_test_sets[0].split = "holdout"
-    monkeypatch.setattr(resolution, "load_raw_evaluation_dataset", lambda _: external)
+    monkeypatch.setattr(
+        resolution, "load_raw_evaluation_dataset", lambda _, **kwargs: external
+    )
     paths = run_baselines(config, dataset=data)
     frame = pl.read_parquet(paths["external/heldout"]["majority_class"])
     assert frame["prediction"].to_list() == [1]
@@ -188,7 +192,8 @@ def test_external_baseline_keeps_source_training_prior(tmp_path, monkeypatch):
         .with_name("manifest.json")
         .read_text()
     )
-    assert manifest["identity"]["test"]["dataset"] == "org/heldout"
+    assert manifest["identity"]["test"]["dataset"]["source"] == "org/heldout"
+    assert manifest["identity"]["test"]["dataset"]["pinned"] is False
     assert manifest["identity"]["fit"] == _context(config, data)["fit"]
 
 
@@ -229,20 +234,24 @@ def test_score_loads_shared_predictions_and_standalone_manifest(
             config=PredictConfig(controls=[]).model_dump(mode="json"),
         )
         persist_predictions(workspace, output, seed=1)
-        result = ScoreStep(
+        result = compare_predictions(
             ScoreConfig(
                 metrics=["mse", "spearmanr"] if regression else ["f1"],
                 bootstrap_enabled=True,
                 n_samples=5,
                 n_permutations=5,
-            )
-        ).run(workspace)
+            ),
+            workspace,
+            baselines=[name],
+        )
         assert name in result.control_comparisons
         assert not (
             workspace.preds_path / f"control_{name}_predictions.parquet"
         ).exists()
-        score_manifest = json.loads(workspace.run_manifest_path.read_text())["score"]
-        conditions = pl.read_parquet(workspace.run_root / "condition_scores.parquet")
+        score_manifest = json.loads(result.scores_path.read_text())["score"]
+        conditions = pl.read_parquet(
+            result.scores_path.parent / "condition_scores.parquet"
+        )
         assert set(conditions["condition"]) == {"trained", name}
         assert conditions.filter(pl.col("condition") == "trained")[
             "score"
@@ -298,6 +307,188 @@ def test_manifest_identity_mismatch_fails_explicitly(tmp_path):
         load_baseline_artifact(_context(config, data), "majority_class")
 
 
+@pytest.mark.parametrize("names", [[], ["majority_class"]])
+def test_model_scores_before_baselines_and_compares_later_from_disk(tmp_path, names):
+    from modules.evaluate.src.run_score import main
+
+    config, data = _config(tmp_path), _data()
+    context = _context(config, data)
+    context["names"] = names
+    workspace = _make_workspace(tmp_path, "sequence_classification", num_labels=3)
+    output = PredictOutput(
+        metadata=EvaluationMetadata(
+            model_name="toy", dataset_name="toy", task_type="sequence_classification"
+        ),
+        predictions=pl.DataFrame(
+            {
+                "id": data["test"]["id"],
+                "label": data["test"]["targets"],
+                "prediction": [0, 1, 0],
+            }
+        ),
+        baseline_context=context,
+        config=PredictConfig(controls=[]).model_dump(mode="json"),
+    )
+    persist_predictions(workspace, output, seed=7)
+    result = score_predictions(ScoreConfig(metrics=["accuracy"]), workspace)
+    before = workspace.run_manifest_path.read_bytes()
+    assert result.scores["accuracy"] == 1
+    with pytest.raises(FileNotFoundError, match="rerun the comparison"):
+        compare_predictions(
+            ScoreConfig(metrics=["accuracy"]), workspace, baselines=["majority_class"]
+        )
+    assert workspace.run_manifest_path.read_bytes() == before
+    main(["--manifest", str(workspace.run_manifest_path)])
+    run_baselines(config, dataset=data)
+    standalone = workspace.run_manifest_path.read_bytes()
+    predictions = output.predictions_path.read_bytes()
+    main(
+        ["--manifest", str(workspace.run_manifest_path), "--baseline", "majority_class"]
+    )
+    path = next((workspace.run_root / "comparisons").glob("*/run_manifest.json"))
+    assert json.loads(path.read_text())["score"]["baselines"]["majority_class"]
+    assert workspace.run_manifest_path.read_bytes() == standalone
+    assert output.predictions_path.read_bytes() == predictions
+
+
+def _token_config_data(tmp_path):
+    config = BaselineRunConfig.model_validate(
+        {
+            "workspace": {
+                "dataset_name": "tokens",
+                "task_type": "token_classification",
+                "target_type": "categorical",
+                "label_format": "per_token",
+                "num_labels": 3,
+                "base_path": str(tmp_path),
+            },
+            "baselines": {"names": ["majority_class"]},
+            "score": {"metrics": ["accuracy", "f1"], "metric_aggregation": "macro"},
+        }
+    )
+    data = DatasetDict(
+        {
+            "train": Dataset.from_dict(
+                {"id": ["train"], "sequence": ["AAAA"], "targets": [[2, -100, 2, 0]]}
+            ),
+            "validation": Dataset.from_dict(
+                {"id": ["validation"], "sequence": ["AAAA"], "targets": [[1, 1, 1, 1]]}
+            ),
+            "test": Dataset.from_dict(
+                {
+                    "id": ["a", "b"],
+                    "sequence": ["AAAA", "CCC"],
+                    "targets": [[0, -100, 2, 1], [1, 0, -100]],
+                }
+            ),
+        }
+    )
+    return config, data
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_token_baselines_train_only_score_and_align_cropped_ignored_residues(
+    tmp_path, cached
+):
+    config, data = _token_config_data(tmp_path)
+    path = run_baselines(config, dataset=data)["test"]["majority_class"]
+    baseline = pl.read_parquet(path)
+    assert baseline["prediction"].to_list() == [[2, 2, 2], [2, 2]]
+    scores = json.loads(next((path.parent / "scores").glob("*.json")).read_text())
+    assert scores["scores"]["accuracy"] == pytest.approx(1 / 5)
+    frame = pl.DataFrame(
+        {
+            "id": ["b", "a"],
+            "label": [[1, 0], [2, 1]],
+            "prediction": [[1, 0], [2, 1]],
+            "evaluated_positions": [[0, 1], [2, 3]],
+        }
+    )
+    if cached:
+        frame = frame.explode(
+            "label", "prediction", "evaluated_positions"
+        ).with_columns(
+            pl.col("label", "prediction", "evaluated_positions")
+            .implode()
+            .over(pl.int_range(pl.len()))
+        )
+    output = PredictOutput(
+        metadata=EvaluationMetadata(
+            model_name="model", dataset_name="tokens", task_type="token_classification"
+        ),
+        predictions=frame,
+        baseline_context={**_context(config, data), "names": []},
+    )
+    workspace = _make_workspace(tmp_path, "token_classification", num_labels=3)
+    result = compare_predictions(
+        ScoreConfig(
+            metrics=["accuracy"], bootstrap_enabled=True, n_samples=5, n_permutations=5
+        ),
+        workspace,
+        baselines=["majority_class"],
+        predict_result=output,
+    )
+    assert result.scores["accuracy"] == 1
+    assert result.control_comparisons["majority_class"]["accuracy"]["diff_mean"] > 0
+    invalid = frame.with_columns(
+        pl.col("evaluated_positions").list.eval(pl.element() + 10)
+    )
+    with pytest.raises(ValueError, match="positions/masks/labels"):
+        align_baseline(baseline, invalid, regression=False)
+    with pytest.raises(ValueError, match="requires evaluated_positions"):
+        align_baseline(baseline, frame.drop("evaluated_positions"), regression=False)
+
+
+@pytest.mark.parametrize("layerwise", [False, True])
+def test_token_predictions_save_exact_crop_positions_without_baseline_requests(
+    monkeypatch, tmp_path, model_family, layerwise
+):
+    raw = build_raw_dataset_dict("token_classification")
+    raw = DatasetDict(
+        {
+            split: dataset.map(
+                lambda row: {
+                    "sequence": row["sequence"] * 20,
+                    "targets": ([-100] + row["targets"][1:]) * 20,
+                }
+            )
+            for split, dataset in raw.items()
+        }
+    )
+    prepared = _run_prepare(
+        monkeypatch,
+        tmp_path,
+        "token_classification",
+        model_family,
+        dataset=raw,
+        baseline_names=[],
+        layerwise_config=LayerwiseConfig(enabled=True, layers=[0, 2])
+        if layerwise
+        else None,
+    )
+    workspace = _make_workspace(tmp_path, "token_classification")
+    config = PredictConfig(controls=[], persist_to_disk=True)
+    if layerwise:
+        from accelerate import Accelerator
+
+        outputs = predict_layerwise(
+            workspace, prepared, config, Accelerator(cpu=True), seed=1
+        ).values()
+    else:
+        outputs = [predict_trained(workspace, prepared, config)]
+    population = {row["id"]: row for row in prepared.baseline_context["population"]}
+    assert prepared.baseline_context["names"] == []
+    for output in outputs:
+        for row in output.predictions.iter_rows(named=True):
+            assert (
+                row["evaluated_positions"]
+                == population[row["id"]]["evaluated_positions"]
+            )
+            original = raw["test"][row["id"]]["targets"]
+            assert row["label"] == [original[i] for i in row["evaluated_positions"]]
+            assert all(i < 62 for i in row["evaluated_positions"])
+
+
 def test_alignment_preserves_repeats_and_rejects_different_targets(tmp_path):
     config, data = _config(tmp_path), _data()
     run_baselines(config, dataset=data)
@@ -340,7 +531,8 @@ def test_baseline_cli_uses_data_subset_without_model_validation(tmp_path, monkey
     from modules.evaluate.src import run_evaluate
 
     monkeypatch.setattr(
-        "sys.argv", ["run_evaluate.py", "--baselines", str(root / "config.yaml")]
+        "sys.argv",
+        ["run_evaluate.py", "--suite", "sequence_classification", "--baselines"],
     )
     monkeypatch.setattr(runner, "load_baseline_config", lambda *args: config)
     run = Mock(return_value={})
@@ -351,7 +543,15 @@ def test_baseline_cli_uses_data_subset_without_model_validation(tmp_path, monkey
         Mock(side_effect=AssertionError("baseline CLI must not create an accelerator")),
     )
     run_evaluate.main()
-    run.assert_called_once_with(config)
+    assert (
+        run.call_count == 4
+    )  # one shared baseline run per sequence_classification dataset
+    # The CLI pins dataset views on a copy of the config (dry-run stays offline);
+    # baseline names and the selected workspace dataset must be preserved.
+    for call in run.call_args_list:
+        (passed,) = call.args
+        assert passed.baselines.names == config.baselines.names
+        assert passed.workspace.dataset_repo_id == config.workspace.dataset_repo_id
 
 
 @pytest.mark.parametrize(
@@ -398,15 +598,19 @@ def test_prepare_predict_carries_context_without_building_baselines(
         else None,
     )
     workspace = _make_workspace(tmp_path, task_type)
-    predict = PredictStep(PredictConfig(controls=[], persist_to_disk=False))
+    predict_config = PredictConfig(controls=[], persist_to_disk=False)
     if layerwise:
         from accelerate import Accelerator
 
-        outputs = predict.run_layerwise(
-            workspace, prepared, Accelerator(cpu=True), seed=710019
+        outputs = predict_layerwise(
+            workspace,
+            prepared,
+            predict_config,
+            Accelerator(cpu=True),
+            seed=710019,
         ).values()
     else:
-        outputs = [predict.run(workspace, prepared)]
+        outputs = [predict_trained(workspace, prepared, predict_config)]
     for output in outputs:
         assert output.baseline_context == prepared.baseline_context
         assert output.baseline_context["names"] == [name]
@@ -423,14 +627,17 @@ def test_prepare_predict_carries_context_without_building_baselines(
     )
     run_baselines(baseline_config, dataset=raw)
     for output in outputs:
-        score = ScoreStep(
+        score = compare_predictions(
             ScoreConfig(
                 metrics=["mse"] if task_type == "sequence_regression" else ["f1"],
                 bootstrap_enabled=True,
                 n_samples=5,
                 n_permutations=5,
-            )
-        ).run(workspace, predict_result=output)
+            ),
+            workspace,
+            baselines=[name],
+            predict_result=output,
+        )
         assert name in score.control_comparisons
 
 
@@ -471,11 +678,18 @@ def test_external_prepare_and_score_use_source_fit_identity(
             }
         )
     )
-    output = PredictStep(PredictConfig(controls=[], persist_to_disk=False)).run(
-        workspace, prepared
+    output = predict_trained(
+        workspace,
+        prepared,
+        PredictConfig(controls=[], persist_to_disk=False),
     )
-    ScoreStep(ScoreConfig(metrics=["f1"])).run(workspace, predict_result=output)
-    manifest = json.loads(workspace.run_manifest_path.read_text())
+    result = compare_predictions(
+        ScoreConfig(metrics=["f1"]),
+        workspace,
+        baselines=["majority_class"],
+        predict_result=output,
+    )
+    manifest = json.loads(result.scores_path.read_text())
     assert manifest["score"]["baselines"]["majority_class"]["path"] == str(
         paths["external/separate"]["majority_class"]
     )

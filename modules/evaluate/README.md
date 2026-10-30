@@ -44,6 +44,7 @@ Deeper guides on controls, datasets, dataset sourcing, and ProteinGym are in
   - [Running many combinations](#running-many-combinations)
   - [Common recipes](#common-recipes)
   - [New dataset, task, or model overlay](#new-dataset-task-or-model-overlay)
+  - [Config namespaces](#config-namespaces)
   - [Config schema](#config-schema)
 - [Step 1 — Prepare](#step-1--prepare)
 - [Step 2 — Tune](#step-2--tune)
@@ -55,7 +56,6 @@ Deeper guides on controls, datasets, dataset sourcing, and ProteinGym are in
 - [Advanced Workflows](#advanced-workflows)
   - [Predictor overlays (`configs/predictors/`)](#predictor-overlays-configspredictors)
   - [Layerwise linear probes](#layerwise-linear-probes)
-  - [Cross-validation](#cross-validation)
   - [Zero-shot contact prediction](#categorical-jacobian-contact-prediction)
 - [Developer Guide](#developer-guide)
   - [Code Layout](#code-layout)
@@ -76,54 +76,61 @@ uv sync --extra evaluate
 
 The smoke tests add [`configs/smoke_test.yaml`](configs/smoke_test.yaml) to a
 model, task, and dataset overlay. It shrinks batch size, sequence length, and
-bootstrap resamples, and sets `steps.mode=evaluate_as_is`, so Tune is skipped
+bootstrap resamples, and sets `predictor.mode=evaluate_as_is`, so Tune is skipped
 and only Prepare → Predict → Score run. It resets the head to the native MLP
 path and disables caching, HPO, and refitting, including when layered after an
 alternative probe. A CUDA GPU is only needed for packed
-batches (`steps.prepare.packed=true`, off by default).
+batches (`representation.packed=true`, off by default).
 
 ### Sequence classification
 
+Validate the composed jobs offline first (no data, model or output access):
+
 ```bash
-uv run accelerate launch modules/evaluate/src/run_evaluate.py \
-    modules/evaluate/configs/config.yaml \
-    modules/evaluate/configs/models/amplify_120m.yaml \
-    modules/evaluate/configs/tasks/sequence_classification.yaml \
-    modules/evaluate/configs/datasets/localization_prediction.yaml \
-    modules/evaluate/configs/smoke_test.yaml
+uv run python -m modules.evaluate.src.run_evaluate \
+    --suite sequence_classification \
+    --model amplify_120m model.revision=<40-char-commit-sha> \
+    --dry-run
 ```
 
-If the run prints `=== Evaluation Pipeline Completed Successfully ===`, your
-environment and the Prepare, Predict, and Score steps work. To exercise training
-too, append a [probe overlay](#predictor-overlays-configspredictors) such as
-`modules/evaluate/configs/predictors/torch_linear.yaml`.
+Then run the suite. The `--model` flag accepts a name from `configs/models/`
+or a YAML path; `--model-collection production` expands to every production
+model:
+
+```bash
+uv run python -m modules.evaluate.src.run_evaluate \
+    --suite sequence_classification \
+    --model amplify_120m model.revision=<40-char-commit-sha> \
+    --output-root /path/to/results
+```
+
+Smoke test: add `configs/smoke_test.yaml` as an overlay with `--config`, which
+shrinks batch size, sequence length, and bootstrap resamples, and runs
+`predictor.mode=evaluate_as_is` (no Tune). To exercise training too, add a probe
+with `--predictor` or a [predictor overlay](#predictor-overlays-configspredictors).
+
 
 ### Contact prediction
 
-The replacement CASP14-16 benchmark consumes the schema-6.0 Hugging Face dataset
-only. `tasks/contact_prediction.py` owns its data/prediction/scoring orchestration;
-the existing step classes delegate to that handler and persist its artifacts.
-The data contract/alignment also live in that task module, shared extraction in
-`utils/inference.py`, and ranking/aggregation in `metrics/contact_metrics.py`.
-The frozen-embedding, attention, and zero-shot categorical-Jacobian predictors
-run through the normal CLI and prediction entry point. CASP controls remain a
-subsequent stage. The old Biomap contact overlay and embedding head are removed.
-The dataset selects the shared `contact_prediction` task; an explicit predictor
-overlay selects extraction, fitting and inference without changing that task.
+Contact prediction is its own task (`tasks/contact.py`) on the same
+Prepare → Predict → Score → Publish lifecycle as the other tasks. Its three
+predictors live in `predictors/contact.py`: `contact_embedding` (frozen-embedding
+head), `contact_attention` (attention L1 logistic regression), and
+`contact_jacobian` (zero-shot categorical Jacobian). The CASP dataset is Hub
+data (schema-6.0), so it needs a full 40-character commit SHA; local data via
+`--data-root` needs no revision.
 
 ```bash
-uv run python modules/evaluate/src/run_evaluate.py \
-    modules/evaluate/configs/config.yaml \
-    modules/evaluate/configs/models/amplify_120m.yaml \
-    modules/evaluate/configs/datasets/contact_prediction_casp.yaml \
-    modules/evaluate/configs/predictors/contact_embedding.yaml \
-    "workspace.dataset_revision=<immutable-40-character-HF-commit>" \
-    workspace.run_id=casp-embedding \
-    seed=0
+uv run python -m modules.evaluate.src.run_evaluate \
+    --suite contact_prediction \
+    --model esm2_35m model.revision=<40-char-model-sha> \
+    --predictor contact_embedding \
+    dataset.revision=<40-char-CASP-commit-sha> \
+    --dry-run
 ```
 
-For the attention readout, replace `contact_embedding.yaml` with
-`contact_attention.yaml` and use a distinct `workspace.run_id`.
+Use `--predictor contact_attention` or `--predictor contact_jacobian` to select
+the other predictors; omit `--predictor` to run all three.
 
 The final residue embeddings are frozen, unpooled and unnormalized. Two
 independent bias-free 512-dimensional projections produce averaged directional
@@ -147,8 +154,7 @@ embedding preset.
 ### Categorical-Jacobian contact prediction
 
 The zero-shot categorical Jacobian shares the CASP dataset, alignment, unit
-scoring, and full-chain inference path. Select it with
-`configs/predictors/contact_jacobian.yaml`. It computes canonical-amino-acid
+scoring, and full-chain inference path. Select it with `--predictor contact_jacobian`. It computes canonical-amino-acid
 mutant-minus-wild-type log-softmax deltas, keeps the Jacobian in FP32, centers
 all four categorical/residue axes, symmetrizes directional effects, applies
 the Frobenius reduction and APC, and removes self-pairs. It does not fit a
@@ -157,10 +163,9 @@ with one tokenizer token per canonical amino acid.
 
 `tokenize_contact_chain` supplies uncropped tokens and original-coordinate
 position IDs. Native AMPLIFY and ESM rotary computations preserve gaps and
-grow positional caches without rescaling. `PreparedArtifacts.contact_dataset`
-passes these chains to the standard `PredictStep.run()`, which delegates
-scientific processing to the task handler and uses ordinary prediction
-persistence. Pass a local `workspace.dataset_repo_id` directory and omit the revision for
+grow positional caches without rescaling. The contact predictor passes these
+chains to the shared prediction path, which delegates scientific processing to the task
+and uses ordinary prediction persistence. Pass a local `dataset.repo_id` directory and omit the revision for
 offline Parquet loading. No source coordinate files or source-manifest joins
 are used. The runtime dataset fingerprint covers the scoring rows and fixed
 development splits.
@@ -173,7 +178,7 @@ original pair indices, not embeddings or attention maps.
 Development embeddings are cached across seeds; attention maps are not cached.
 Embedding-cache keys include the backbone weights/configuration, tokens,
 original positions and precision. Use
-`steps.prepare.embedding_cache.cache_policy=off` to disable the embedding cache.
+`representation.embedding_cache.cache_policy=off` to disable the embedding cache.
 Run one seed per invocation; final repetitions use seeds 0 through 4.
 
 Score writes `unit_scores.parquet` and `scores.parquet`, reporting both original
@@ -192,12 +197,12 @@ until their CASP-specific integration is implemented.
 | Term | Meaning |
 |---|---|
 | Trunk | The pretrained protein language model being evaluated |
-| Head (probe) | A small task-specific model trained on the trunk's outputs (embeddings). Chosen by `steps.tune.head.head_type`: neural (`mlp`, `torch_linear`) or classical (`knn`, `sklearn_linear`, `random_forest`, `xgboost`) |
+| Head (probe) | A small task-specific model trained on the trunk's outputs (embeddings). Chosen by `predictor.head.head_type`: neural (`mlp`, `torch_linear`) or classical (`knn`, `sklearn_linear`, `random_forest`, `xgboost`) |
 | Embedding cache | Trunk outputs computed once and reused, so heads on a frozen trunk train without rerunning the trunk. Classical heads require it |
-| Mode | `steps.mode`: `tune_probe` trains a head on a frozen trunk, `finetune` trains head and trunk, `evaluate_as_is` trains nothing (zero-shot tasks) |
+| Mode | `predictor.mode`: `tune_probe` trains a head on a frozen trunk, `finetune` trains head and trunk, `evaluate_as_is` trains nothing (zero-shot tasks) |
 | Zero-shot | Scored straight from the pretrained model, with no task-specific training |
 | Overlay | A YAML file merged over `configs/config.yaml`; when files set the same key, the later file wins |
-| Workspace | Output directory for one (model, dataset) pair under `workspace.base_path` |
+| Workspace | Output directory for one (model, dataset) pair under the benchmark root `runtime.output_root` |
 | Variant | One run configuration inside a workspace, e.g. `mlp-frozen_trunk` or `torch_linear-frozen_trunk-layer_6`; see [Output disk layout](#output-disk-layout) |
 | Control | A baseline the trained model is compared against (random weights, shuffled labels, class prior, ...). Beating it rules out that shortcut as the source of the score; see [Controls](docs/controls.md) |
 | Separation | Contact prediction: how far apart two residues are in the sequence. Bins: short `[6, 12)`, medium `[12, 24)`, long `≥ 24` |
@@ -215,8 +220,17 @@ until their CASP-specific integration is implemented.
 | `pseudo_perplexity` | Nothing; scores masked residues, zero-shot |
 | `calibration` | Homolog amino-acid profiles at conserved positions, zero-shot |
 
+Seven task families are defined, one YAML each in
+[`configs/tasks/`](configs/tasks/) (`sequence_regression`, `sequence_classification`,
+`sequence_multilabel_classification`, `token_classification`,
+`contact_prediction`, `pseudo_perplexity`, `calibration`). Only the
+`sequence_regression` and `sequence_classification` suites have implemented
+shared sequence baselines, and `contact_prediction` (`separation_prior`) and
+`pseudo_perplexity` (`amino_acid_frequency`) have structural baseline-only runs.
+`--baselines` is rejected for every other suite with an explicit error.
+
 `pseudo_perplexity` and `calibration` run only with
-`steps.mode=evaluate_as_is`. Target formats, why each task matters, and default
+`predictor.mode=evaluate_as_is`. Target formats, why each task matters, and default
 metrics per dataset are in the [dataset catalog](docs/datasets.md#evaluation-tasks).
 
 ### Datasets
@@ -238,20 +252,21 @@ protocol: an MLP probe trained over cached embeddings from a frozen trunk, with
 100-trial hyperparameter search and fresh train+validation refitting. Supply the
 base, model, and dataset configs; no MLP tuning overlay is needed. Full trunk
 fine-tuning and other probe types remain explicit alternatives in `configs/predictors/`.
-Composition is base → model/task → dataset → optional alternative → smoke
-settings → CLI overrides; later values win.
+Composition is base → model → task → dataset → predictor (optional) → smoke
+settings → CLI overrides; later values win. The exact order and rules are in
+[Config namespaces](#config-namespaces).
 
 Task overlays explicitly select the reported metric and the validation
 selection metric/direction: Macro-F1 for classification, R² for regression
 (ProtParams), pooled Spearman for the current stability dataset, long-range
 contact AUC for contacts, calibration agreement, and pseudo-perplexity.
-Only the selected metric is reported by default; override `steps.score.metrics`
+Only the selected metric is reported by default; override `scoring.metrics`
 to request diagnostic metrics. Stability's intended grouped Macro-Spearman
 still requires verified parent-design metadata and scorer support. Calibration
 agreement reports `100 × mean(exp(-KL))` over per-position KL values; it does
 not exponentiate the mean KL. The target/non-target breakdowns use the same
 scale and aggregation.
-Classification F1 includes every class configured by `workspace.num_labels`,
+Classification F1 includes every class configured by `dataset.num_labels`,
 even when absent from a split or resample (zero F1 for an absent class).
 This includes background class 0, both binary classes, all three Q3 states,
 and all eight Q8 states. Multilabel F1 averages over the configured indicator
@@ -273,8 +288,8 @@ for learning rate. The default MLP and cached tuning alternatives enable fresh
 train+validation final refitting after selection; live/native fine-tuning and layerwise refit remain
 implementation work.
 To use fixed training settings instead, set
-`steps.tune.hyperparameter_search.enabled=false`;
-`steps.tune.learning_rate`, `weight_decay`, `max_epochs`, and `batch_size` then
+`training.hyperparameter_search.enabled=false`;
+`training.learning_rate`, `weight_decay`, `max_epochs`, and `batch_size` then
 apply. During HPO, searched values replace their fixed counterparts, not cap them.
 Classical-estimator overlays retain their estimator-specific spaces.
 Calibration and pseudo-perplexity task overlays disable caching, HPO, and
@@ -296,55 +311,60 @@ zero-shot contact predictors; it is not restricted to tuning.
 | `configs/predictors/*.yaml` | Explicit prediction approaches, including CASP embeddings and alternative probes |
 | `configs/accelerate/*.yaml` | `accelerate launch` configs (e.g. single-process local runs) |
 
-Dataset overlays declare `workspace.default_task_type`, for example
-`sequence_multilabel_classification` in `datasets/GO_bp.yaml`. When no task
-YAML is supplied, `run_evaluate.py` automatically inserts the corresponding
-`configs/tasks/<default_task_type>.yaml` immediately before the dataset overlay.
-This loads the task's training mode, embedding cache settings, and control
-conditions as well as its task type. Dataset settings, later overlays, and CLI
-overrides can still customize those defaults:
+Dataset overlays (`configs/datasets/*.yaml`) describe data only: source, label
+contract, and `dataset.*` settings. They do not choose a task. The suite's
+`task` entry selects the task overlay (`configs/tasks/<task>.yaml`), and the
+suite's `evaluations` entries pair each task with its datasets and predictors.
+Overlays are applied in the order base → model → task → dataset → predictor,
+then CLI overrides.
+
+Single datasets are run through a suite file. Copy an existing suite under
+`configs/suites/` (for example `suites/sequence_classification.yaml`), keep one
+`evaluations` entry, and pass its path to `--suite`. The suite's `task` and
+`evaluations` entries choose the task and predictors for the dataset:
 
 ```bash
-uv run accelerate launch modules/evaluate/src/run_evaluate.py \
-    modules/evaluate/configs/config.yaml \
-    modules/evaluate/configs/models/amplify_120m.yaml \
-    modules/evaluate/configs/datasets/GO_bp.yaml
+uv run python -m modules.evaluate.src.run_evaluate \
+    --suite /path/to/go_bp_suite.yaml \
+    --model amplify_120m model.revision=<40-char-commit-sha>
 ```
 
 An explicit task YAML takes precedence over the dataset default, in either
-order. The CASP dataset defaults to `contact_prediction` and requires
-an explicit predictor overlay such as `contact_embedding.yaml`,
-`contact_attention.yaml`, or `contact_jacobian.yaml`. Ordinary tasks retain
+order. The CASP dataset is run by the `contact_prediction` suite, which lists
+all three predictor overlays (`contact_embedding.yaml`, `contact_attention.yaml`,
+`contact_jacobian.yaml`); pass `--predictor` to run one. Ordinary tasks retain
 their default MLP behavior without a predictor overlay. `pseudo_perplexity` works with any compatible sequence
 dataset; `uniprot_ur100p_test` selects the AMPLIFY paper's UniProt test set.
-Without an explicit task YAML, a CLI `workspace.task_type=...` selects a
-different task overlay. The baseline Slurm launcher accepts dataset-only rows
+The baseline Slurm launcher accepts dataset-only rows
 plus an optional task column for extra methods; ProteinGym rows select their
 separate runner explicitly.
 
-The entry point is `modules/evaluate/src/run_evaluate.py`. Explicit YAML files
-are merged left-to-right (later files win), followed by optional `key=value`
-overrides:
+The entry point is `modules/evaluate/src/run_evaluate.py`
+(`python -m modules.evaluate.src.run_evaluate`). A suite selects the task and
+its datasets; `key=value` overrides apply to every job in the run:
 
 ```bash
-uv run accelerate launch modules/evaluate/src/run_evaluate.py \
-    modules/evaluate/configs/config.yaml \
-    modules/evaluate/configs/models/amplify_120m.yaml \
-    modules/evaluate/configs/tasks/token_classification.yaml \
-    modules/evaluate/configs/datasets/ssp_q3.yaml \
-    steps.mode=finetune \
-    steps.prepare.embedding_cache.enabled=false \
-    steps.score.n_samples=1000
+uv run python -m modules.evaluate.src.run_evaluate \
+    --suite token_classification \
+    --model amplify_120m model.revision=<40-char-commit-sha> \
+    --config modules/evaluate/configs/predictors/mlp_finetuning.yaml \
+    scoring.n_samples=1000
 ```
 
-Sequence task presets request shared `majority_class` or `train_mean`
-baselines. Generate them before model evaluation using the same dataset,
-split settings, and `workspace.base_path` (no model overlay required):
+Sequence tasks declare shared `majority_class`, `train_mean`, `composition`, or
+`mmseqs_knn` baselines in their task YAML. Contact and pseudo-perplexity
+receive their structural baseline (`separation_prior`, `amino_acid_frequency`)
+from `--baselines` itself, since their YAML cannot declare baseline names.
+`--baselines` takes no model and is strict: a selected suite without a
+baseline (for example token or multilabel classification, calibration) fails
+the command with an error naming those suites. Nothing is silently omitted; select the
+baseline-capable suites
+explicitly:
 
 ```bash
-uv run python -m modules.evaluate.src.run_evaluate --baselines \
-    modules/evaluate/configs/config.yaml \
-    modules/evaluate/configs/datasets/solubility_prediction.yaml
+uv run python -m modules.evaluate.src.run_evaluate \
+    --suite sequence_classification --baselines \
+    --output-root /path/to/eval
 ```
 
 Model scoring loads these artifacts without fitting them. Use
@@ -352,8 +372,8 @@ Model scoring loads these artifacts without fitting them. Use
 not supported by the baseline runner yet. See [Shared sequence
 baselines](docs/controls.md#shared-sequence-baselines).
 
-CUDA evaluation enables TensorFloat-32 by default with top-level `tf32: true`,
-matching pretraining's `trainer.tf32` convention. Append `tf32=false` to any
+CUDA evaluation enables TensorFloat-32 by default with `runtime: {tf32: true}`
+(CLI: `runtime.tf32=true`), matching pretraining's `trainer.tf32` convention. Append `runtime.tf32=false` to any
 standard or ProteinGym evaluation command to disable it. This controls CUDA
 FP32 matrix multiplication and cuDNN; tensor dtypes and autocast settings are
 configured separately. The setting applies to inference and probe training.
@@ -363,23 +383,21 @@ recomputes embeddings instead of reusing outputs from another precision.
 
 ### Running many combinations
 
-There is no sweep driver: each invocation handles one (model, dataset, head) combination.
-Run combinations against one `workspace.base_path` so every result lands in a
-`scores_long.parquet` that [Reading results](#reading-results) can combine. Locally,
-loop over overlays:
+There is no sweep driver: each invocation runs one suite for one model (or one
+model collection). Run combinations against one `runtime.output_root` so every
+result lands in a `scores_long.parquet` that [Reading results](#reading-results)
+can combine. Locally, loop over models and suites:
 
 ```bash
-for model in amplify_120m amplify_350m esm2_35m; do
-  uv run accelerate launch modules/evaluate/src/run_evaluate.py \
-      modules/evaluate/configs/config.yaml \
-      modules/evaluate/configs/models/${model}.yaml \
-      modules/evaluate/configs/tasks/sequence_classification.yaml \
-      modules/evaluate/configs/datasets/localization_prediction.yaml \
-      steps.score.bootstrap_enabled=true
+for model in amplify_120m amplify_350m esm_150m esm2_35m; do
+  uv run python -m modules.evaluate.src.run_evaluate \
+      --suite sequence_classification --model "$model" \
+      model.revision=<40-char-commit-sha-for-$model> \
+      scoring.bootstrap_enabled=true
 done
 ```
 
-On a cluster, a Slurm array job runs the combinations in parallel, one per task:
+On a cluster, a Slurm array job runs one (model, suite) pair per task:
 
 ```bash
 #!/bin/bash
@@ -389,28 +407,25 @@ On a cluster, a Slurm array job runs the combinations in parallel, one per task:
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --array=0-8          # len(MODELS) * len(DATASETS) - 1
+#SBATCH --array=0-7          # len(MODELS) * len(SUITES) - 1
 
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-MODELS=(amplify_120m amplify_350m esm2_35m)
-DATASETS=(fold_prediction localization_prediction solubility_prediction)
-model=${MODELS[$((SLURM_ARRAY_TASK_ID / ${#DATASETS[@]}))]}
-dataset=${DATASETS[$((SLURM_ARRAY_TASK_ID % ${#DATASETS[@]}))]}
+MODELS=(amplify_120m amplify_350m)
+SUITES=(sequence_classification contact_prediction)
+model=${MODELS[$((SLURM_ARRAY_TASK_ID / ${#SUITES[@]}))]}
+suite=${SUITES[$((SLURM_ARRAY_TASK_ID % ${#SUITES[@]}))]}
 
-uv run accelerate launch modules/evaluate/src/run_evaluate.py \
-    modules/evaluate/configs/config.yaml \
-    modules/evaluate/configs/models/${model}.yaml \
-    modules/evaluate/configs/tasks/sequence_classification.yaml \
-    modules/evaluate/configs/datasets/${dataset}.yaml \
-    workspace.base_path=/path/to/eval
+uv run python -m modules.evaluate.src.run_evaluate \
+    --suite "$suite" --model "$model" \
+    model.revision=<40-char-commit-sha-for-$model> \
+    workspace.output_dir=/path/to/eval
 ```
 
-Give each array task its own model/dataset/run combination. Score tables are
-run-local, so different runs do not overwrite each other's rows. Embedding
-caches remain shared across a model's runs; avoid concurrent cache refreshes
-for the same model/dataset pair.
+Give each array task its own model/suite combination and its own output
+directory (see [Output disk layout](#output-disk-layout)). Generate the shared
+baselines once, before the model arrays, with `--baselines`.
 
 ### Common recipes
 
@@ -418,51 +433,119 @@ Append these overrides to any launch command, or put them in an overlay YAML.
 
 | Goal | Overrides |
 |---|---|
-| Skip tuning and score the checkpoint as-is | `steps.mode=evaluate_as_is steps.prepare.embedding_cache.enabled=false steps.tune.hyperparameter_search.enabled=false steps.tune.refit_on_train_validation=false`. For supervised tasks the head comes from the checkpoint; a pretrained-only checkpoint gets a randomly initialized head, so use this for fine-tuned checkpoints or zero-shot tasks |
+| Skip tuning and score the checkpoint as-is | `predictor.mode=evaluate_as_is representation.embedding_cache.enabled=false training.hyperparameter_search.enabled=false training.refit_on_train_validation=false`. For supervised tasks the head comes from the checkpoint; a pretrained-only checkpoint gets a randomly initialized head, so use this for fine-tuned checkpoints or zero-shot tasks |
 | Fine-tune the trunk and native MLP head | Append `configs/predictors/mlp_finetuning.yaml`; it disables caching/refitting and clears cached-MLP search dimensions |
-| Bootstrap confidence intervals and control tests | `steps.score.bootstrap_enabled=true` |
-| Disable TF32 for CUDA FP32 operations | `tf32=false` (default: `tf32=true`) |
-| Use a generated split instead of the default | `steps.prepare.split.name=stratified` (see [Named benchmark splits](#named-benchmark-splits)) |
-| K-fold cross-validated probe scores | `cross_validation.enabled=true` (see [Cross-validation](#cross-validation)) |
+| Bootstrap confidence intervals and control tests | `scoring.bootstrap_enabled=true` |
+| Disable TF32 for CUDA FP32 operations | `runtime.tf32=false` (default: `runtime.tf32=true`) |
+| Use a generated split instead of the default | `representation.split.name=stratified` (see [Named benchmark splits](#named-benchmark-splits)) |
 | Classical probe on cached embeddings | Add `modules/evaluate/configs/predictors/random_forest.yaml` after the dataset overlay |
-| Disable control conditions | `steps.predict.controls=[]` |
+| Disable control conditions | `prediction.controls=[]` |
 | Disable shared sequence baselines | `baselines.names=[]` |
-| Write results elsewhere | `workspace.base_path=/path/to/eval` |
-| Group model versions into one benchmark comparison | `workspace.base_path=/path/to/client-benchmark-v1` |
+| Write results elsewhere | `--output-root /path/to/eval` (or `runtime.output_root=/path/to/eval`) |
+| Group model versions into one benchmark comparison | `--output-root /path/to/client-benchmark-v1` |
+| Read local dataset copies without the Hub | `--data-root /path/to/data` (or `runtime.data_root=/path/to/data`) |
 | Keep another evaluation of the same model/probe | `workspace.run_id=run02` |
-| Label a specific checkpoint version | `workspace.model_name=amplify-350m-muon workspace.model_repo_id=/path/to/checkpoint` |
-| Override the benchmark output root | `workspace.output_dir=/path/to/client-benchmark-v1` (task/dataset are appended; applies to models and baselines) |
+| Label a specific checkpoint version | `model.name=amplify-350m-muon model.repo_id=/path/to/checkpoint` |
+| Write the exact output directory (no task/dataset appended) | `workspace.output_dir=/path/to/client-benchmark-v1` (applies to models and baselines) |
 
 ### New dataset, task, or model overlay
 
 Copy an existing file under `configs/datasets/`, `configs/tasks/`, or
 `configs/models/`. Dataset overlays set the source, target type, label format,
-class count, and `workspace.default_task_type`. Task overlays set the effective
-`task_type` and task behavior. Task-specific
-builder parameters belong in `workspace.model_kwargs`.
+class count (`dataset.*`) and do not set a task. Task overlays set `task.type`
+and task behavior. Task-specific
+builder parameters belong in `model.kwargs`.
+
+### Config namespaces
+
+YAML files and CLI `key=value` overrides use canonical namespaces:
+
+| Root | Holds |
+|---|---|
+| `runtime` | Process-wide settings: `runtime.seed`, `runtime.tf32`, `runtime.output_root` (benchmark root; `--output-root`), `runtime.data_root` (local dataset root; `--data-root`) |
+| `tracking` | Experiment tracking (formerly `wandb`) |
+| `predictor` | Predictor identity, mode and head: `predictor.mode`, `predictor.layerwise`, `predictor.head` (formerly `training.head` and `steps.tune.head`) |
+| `representation` | Preparation of inputs and features (formerly `steps.prepare`) |
+| `training` | Training, optimizer and hyperparameter search (formerly `steps.tune`) |
+| `prediction` | Inference and control predictions (formerly `steps.predict`) |
+| `scoring` | Metrics, bootstrap and comparisons (formerly `steps.score`) |
+| `dataset` | Data only: `dataset.name`, `dataset.repo_id`, `dataset.revision`, `dataset.subset`, `dataset.local_path`, `dataset.edition`, `dataset.target_type`, `dataset.label_format`, `dataset.num_labels`, `dataset.external_test_sets` |
+| `task` | Behavior: `task.type` |
+| `model` | Model identity and builder arguments: `model.name`, `model.repo_id`, `model.revision`, `model.kwargs` |
+| `workspace` | Run fields only: `workspace.run_id`, `workspace.output_dir` (full-directory override), `workspace.tmp_path` |
+| `baselines` | Shared baselines: `baselines.names` |
+
+Dataset YAML files describe data only and declare no task. Task YAML files select
+behavior through `task.type`. Dataset overlays do not choose a task; the suite's
+`task` entry does.
+
+**Precedence.** Layers are merged left to right, and later values win:
+
+1. the base `configs/config.yaml`;
+2. the model overlay, then the task overlay, the dataset overlay, and the predictor overlay (in that order, as composed by the suite);
+3. any `--config` files, in the order given;
+4. the CLI overrides last (`--seed`, `--output-root`, `--model-name`, then `key=value` arguments).
+
+Each layer is canonicalized on its own. Within one layer, or within one override
+list, the same setting may not be spelled two ways (for example both `seed` and
+`runtime.seed`); that is an error, not a silent choice.
+
+**Legacy aliases.** The old keys still load: `steps.*`, `workspace.base_path`
+(to `runtime.output_root`), `training.head` and `steps.tune.head` (to
+`predictor.head`), `workspace.dataset_*`, `workspace.model_*`, `workspace.task_type`,
+top-level `seed`, `tf32`, `wandb`, and `external_test_sets`. Each file (or override list) that uses them emits one
+deprecation warning that summarizes how many legacy keys it contains, with a few
+examples, and the keys are mapped to their canonical names. New configs should use
+the canonical keys. Unknown keys still fail at load time.
+
+**Limitations.**
+
+- The validated internal model still uses legacy attribute names (for example
+  `config.steps`, `config.workspace`, `config.tf32`). The rename applies at the
+  YAML/CLI boundary only.
+- External test set entries keep their `dataset_repo_id` and `dataset_revision`
+  sub-keys under `dataset.external_test_sets`.
+- The head config lives under `predictor.head`. Legacy `training.head` and
+  `steps.tune.head` are accepted as aliases.
+- `runtime.output_root` is the benchmark root (legacy alias
+  `workspace.base_path`). `workspace.output_dir` remains an exact-directory
+  override that skips the task/dataset suffix.
+- `runtime.data_root` is canonical-only (no legacy spelling). `--data-root` never
+  falls back to the Hub: every local dataset must exist under it.
+- Dataset YAML is not restricted to the `dataset` namespace by an enforced check
+  in the loader.
+
+**Predictor identity.** Each run manifest records the predictor identity. Runs
+created before this change therefore do not match the identity of runs created
+after it. Legacy manifests without an identity are not silently adopted; re-run
+those evaluations into a new benchmark root.
 
 ### Config schema
 
-All config classes are Pydantic models composed into a single `EvaluationConfig` (`src/config.py`):
+Config classes are Pydantic models composed into a single `EvaluationConfig`
+(`src/config/evaluation.py`). The tree below shows the **internal** attribute
+names the validated model uses. YAML and CLI keys use the canonical namespaces
+described in [Config namespaces](#config-namespaces); the mapping from YAML to
+these internal attributes happens at the load boundary.
 
 ```
 EvaluationConfig
-├── tf32:      bool (default: true)
+├── tf32:      bool (default: true)            ← YAML: runtime.tf32
 ├── workspace: EvaluationWorkspaceConfig
-├── wandb:     WandbConfig
-├── cross_validation: CrossValidationConfig
-├── external_test_sets: list[ExternalTestSetConfig]
+├── wandb:     WandbConfig                     ← YAML: tracking
+├── external_test_sets: list[ExternalTestSetConfig]   ← YAML: dataset.external_test_sets
 └── steps:     StepsConfig
-    ├── layerwise: LayerwiseConfig
-    ├── prepare:   PrepareConfig
-    ├── tune:      TuneConfig
+    ├── layerwise: LayerwiseConfig             ← YAML: predictor.layerwise
+    ├── prepare:   PrepareConfig               ← YAML: representation
+    ├── tune:      TuneConfig                  ← YAML: training
     │   └── hyperparameter_search: HyperparameterSearchConfig
-    ├── predict:   PredictConfig
-    └── score:     ScoreConfig
+    ├── predict:   PredictConfig               ← YAML: prediction
+    └── score:     ScoreConfig                 ← YAML: scoring
 ```
 
 `EvaluationConfig` and `StepsConfig` set `extra="forbid"`, so a misspelled
-top-level or `steps.*` key fails at load time rather than being silently ignored.
+top-level key or canonical-namespace key fails at load time rather than being silently ignored.
+Unknown canonical keys fail the same way.
 
 The **Default** columns in the step sections below are the Pydantic schema
 defaults. The checked-in [`configs/config.yaml`](configs/config.yaml) is a
@@ -481,7 +564,7 @@ Prepare uses positional identifiers.
 For positional labels, tokenization preserves ambiguous residues by disabling
 `remove_ambiguous`; this setting is saved with the tokenizer.
 
-**Key config fields (`steps.prepare`):**
+**Key config fields (`representation`):**
 
 | Field | Schema default | Description |
 |---|---|---|
@@ -520,9 +603,9 @@ repeated per role; to use another split, change all three source mappings.
 ### Named benchmark splits
 
 The default split uses the dataset's `train`, `validation`, and `test` names.
-Set `steps.prepare.split.name=stratified` (or another generated method) to load
+Set `representation.split.name=stratified` (or another generated method) to load
 the corresponding suffixed split names. For benchmarks with unrelated split
-names, set `steps.prepare.split.train`, `.validation`, and `.test` explicitly.
+names, set `representation.split.train`, `.validation`, and `.test` explicitly.
 Setting validation to `null` holds out `validation_fraction` of the training
 split.
 
@@ -534,28 +617,28 @@ inputs with sequence-boundary metadata, and prediction/embedding utilities
 unpack outputs to the usual per-example rows.
 
 By default, packed `batch_size` still counts examples. Set
-`steps.prepare.max_tokens_per_batch` to batch by tokens instead; this requires
-`steps.prepare.packed=true`, supports one process only, and includes padding to
+`representation.max_tokens_per_batch` to batch by tokens instead; this requires
+`representation.packed=true`, supports one process only, and includes padding to
 `pad_to_multiple_of` in the budget. For example:
 
 ```bash
-uv run accelerate launch --num_processes 1 \
-    modules/evaluate/src/run_evaluate.py \
-    modules/evaluate/configs/config.yaml \
-    modules/evaluate/configs/models/amplify_120m.yaml \
-    modules/evaluate/configs/tasks/sequence_classification.yaml \
-    modules/evaluate/configs/datasets/localization_prediction.yaml \
-    steps.prepare.packed=true \
-    steps.prepare.max_tokens_per_batch=4096
+uv run python -m modules.evaluate.src.run_evaluate \
+    --suite /path/to/localization_suite.yaml \
+    --model amplify_120m model.revision=<40-char-commit-sha> \
+    representation.packed=true \
+    representation.max_tokens_per_batch=4096
 ```
+
+`/path/to/localization_suite.yaml` is a suite file with one `evaluations` entry
+for `localization_prediction` (see [Running and Configuring](#running-and-configuring)).
 
 Packed mode supports frozen-trunk embedding caching. Sequence-level tasks keep
 one pooled embedding per source example; token tasks keep one row per valid
 token. Packed and padded embeddings use distinct cache keys. ProteinGym uses
 separate runners and is unaffected.
 
-**Input:** `workspace.dataset_repo_id` (or `dataset_name`) and
-`workspace.model_repo_id` (or `model_name`).
+**Input:** `dataset.repo_id` (or `dataset.name`) and
+`model.repo_id` (or `model.name`).
 **Output:** in-memory `PreparedArtifacts` containing the tokenizer, model, and
 dataloaders.
 
@@ -563,16 +646,16 @@ dataloaders.
 
 ## Step 2 — Tune
 
-**Purpose:** Train on the `train` split according to `steps.mode` (see [Glossary](#glossary)); skipped for `evaluate_as_is`. Probe tuning can use cached pooled embeddings and hyperparameter search over `hyperparameter_search.search_space`.
+**Purpose:** Train on the `train` split according to `predictor.mode` (see [Glossary](#glossary)); skipped for `evaluate_as_is`. Probe tuning can use cached pooled embeddings and hyperparameter search over `hyperparameter_search.search_space`.
 
-**Key config fields (`steps.tune`):**
+**Key config fields (`training`):**
 
 | Field | Schema default | Description |
 |---|---|---|
 | `head.head_type` | `mlp` | `mlp` (cached MLP by default; native head without caching), `torch_linear` (one `torch.nn.Linear` layer), `sklearn_linear` (sklearn logistic/ridge), `knn`, `random_forest`, or `xgboost` |
 | `head.search_space` | `{}` | Classical-estimator dimensions; candidates fit on train and are selected on validation, before optional final refitting |
 | `refit_on_train_validation` | `false` | Base YAML sets `true`: rebuild the selected probe on train+validation without early stopping or validation selection. Requires nonempty development splits; live/native and layerwise refit are unsupported |
-| `metric_aggregation` | `weighted` | Averaging used for validation metric selection; automatically follows `steps.score.metric_aggregation` unless set explicitly; supports `micro`, `macro`, `weighted`, or `samples` |
+| `metric_aggregation` | `weighted` | Averaging used for validation metric selection; automatically follows `scoring.metric_aggregation` unless set explicitly; supports `micro`, `macro`, `weighted`, or `samples` |
 | `learning_rate` | `1e-4` | Used when `hyperparameter_search.enabled=false` |
 | `weight_decay` | `1e-4` | Used when `hyperparameter_search.enabled=false`; applies to matrices and `ZeroCenteredRMSNorm` gain offsets. Other one-dimensional parameters are excluded |
 | `max_epochs` | `10` | Maximum training epochs; used when `hyperparameter_search.enabled=false` |
@@ -597,7 +680,7 @@ dataloaders.
 | `hyperparameter_search.search_space.weight_decay_sampling` | `log` | TPE: continuous log-scale sampling between min/max `weight_decay` bounds; `categorical` permits discrete candidates including zero. Random/grid always use the listed candidates |
 | `hyperparameter_search.search_space.hidden_size` | `null` | Optional hidden widths for cached MLP probes; `null` keeps the fixed `head.hidden_size` |
 | `hyperparameter_search.search_space.hidden_depth` | `null` | Optional hidden-layer counts for cached MLP probes; `null` keeps `head.hidden_depth` (default 1). Native heads and layerwise probes do not support this search |
-| `hyperparameter_search.search_space.batch_size` | `null` | Optional cached MLP training batch sizes; `null` keeps `steps.tune.batch_size` or the prepared loader size |
+| `hyperparameter_search.search_space.batch_size` | `null` | Optional cached MLP training batch sizes; `null` keeps `training.batch_size` or the prepared loader size |
 
 The base `configs/config.yaml` searches hidden widths `[128, 256, 512]`,
 hidden depths `[1, 2]`, and probe batch sizes `[8, 16, 32, 64, 128, 256]`
@@ -643,12 +726,12 @@ fit atomically, so BOHB cannot prune within a fit.
 `torch_linear` is trained through the PyTorch optimization loop and has no
 hidden projection: it uses the selected cached embedding
 vector. For sequence-level classification/regression it requires
-`steps.prepare.embedding_cache.enabled=true`; for token classification it can
+`representation.embedding_cache.enabled=true`; for token classification it can
 also use a compatible native `nn.Linear` model head without the cache.
 For native token probing, explicitly disable `refit_on_train_validation` when
 disabling the cache; final refitting currently supports cached probes only.
-Classical probes always require `steps.mode=tune_probe` and
-`steps.prepare.embedding_cache.enabled=true`. Set `embedding_cache.layers: [-1]`
+Classical probes always require `predictor.mode=tune_probe` and
+`representation.embedding_cache.enabled=true`. Set `embedding_cache.layers: [-1]`
 for the final layer, or list any valid model hidden-state indices to concatenate
 pooled representations from several layers.
 
@@ -659,14 +742,14 @@ labels. Constant features use a standard-deviation floor of `1e-6`. Validation
 and HPO trials reuse the training transformation; final refitting recomputes it
 on train+validation. Random-trunk probes fit their own transformation on random
 features. Test data never contributes statistics. Each CV fold fits its own training
-statistics. Set `steps.tune.standardize_features=false` to use raw features.
+statistics. Set `training.standardize_features=false` to use raw features.
 
 The fitted statistics are saved in `probe_head.pt`, and
 `probe_head_config.json` records `standardize_features` for reconstruction.
 Raw embedding caches remain reusable across this setting. Standardization is
 fixed during HPO and does not change regression targets or
 `normalize_before_pooling` (per-residue L2 normalization). Layerwise probing
-uses `steps.layerwise.standardize_features`; native uncached heads and
+uses `predictor.layerwise.standardize_features`; native uncached heads and
 fine-tuning do not use this cached-probe setting. Classical and ProteinGym
 supervised probes retain their existing preprocessing.
 
@@ -708,7 +791,7 @@ conditions sharing a forward pass; validation loops remain quiet.
 Per-task presets, invalid combinations, and how to read the results are in
 [Controls](docs/controls.md).
 
-**Key config fields (`steps.predict`):**
+**Key config fields (`prediction`):**
 
 | Field | Default | Description |
 |---|---|---|
@@ -720,13 +803,13 @@ Per-task presets, invalid combinations, and how to read the results are in
 | `embedding_batch_size` | `null` | Cached-feature rows per prediction batch, including model-based controls; `null` inherits the prepared loader size. Does not change live trunk batches. |
 
 Cached token probes batch **residues**, not proteins. The token-classification
-task overlay sets `steps.tune.batch_size=1024` for cached training/validation and
-`steps.predict.embedding_batch_size=16384` for cached prediction and control
-heads. Protein batches remain controlled by `steps.prepare.batch_size` (live
-inference) and `steps.prepare.embedding_batch_size` (feature extraction).
+task overlay sets `training.batch_size=1024` for cached training/validation and
+`prediction.embedding_batch_size=16384` for cached prediction and control
+heads. Protein batches remain controlled by `representation.batch_size` (live
+inference) and `representation.embedding_batch_size` (feature extraction).
 Changing the training batch size changes optimization and the learning-rate
 schedule's update count; compare validation quality when tuning it. Set
-`steps.tune.batch_size=null steps.predict.embedding_batch_size=null` to restore
+`training.batch_size=null prediction.embedding_batch_size=null` to restore
 the previous inherited batch sizes. These settings do not change uncached
 training or inference. Layerwise controls that require live trunk features
 continue to use protein batches.
@@ -734,8 +817,8 @@ continue to use protein batches.
 For cached sequence classification, multilabel classification, and regression,
 the task overlays set prediction batches to 1,024 examples. Cached probe tuning
 uses the searched batch size by default. With HPO disabled, it uses
-`steps.tune.batch_size`, falling back to the prepared loader batch size when
-null. Embedding extraction has its own `steps.prepare.embedding_batch_size` setting.
+`training.batch_size`, falling back to the prepared loader batch size when
+null. Embedding extraction has its own `representation.embedding_batch_size` setting.
 
 **Input:** `PreparedArtifacts` (trained model + test dataloader) from Prepare/Tune
 **Output:** `<run>/predictions.parquet` and `<run>/controls/<control>/predictions.parquet`; settings and control paths are recorded in `<run>/run_manifest.json`'s "predict" section.
@@ -758,7 +841,7 @@ counts, not averaged protein scores. This preserves protein grouping and seeded
 draws while avoiding repeated scans of all residue predictions. Other tasks,
 custom metrics, and unsupported aggregation modes retain the existing path.
 
-**Key config fields (`steps.score`):**
+**Key config fields (`scoring`):**
 
 | Field | Default | Description |
 |---|---|---|
@@ -819,7 +902,7 @@ groups outputs by **benchmark root -> task -> dataset -> baselines/models -> run
         └── log
 ```
 
-`workspace.base_path` names the benchmark root, for example
+`runtime.output_root` (`--output-root`; legacy `workspace.base_path`) names the benchmark root, for example
 `eval_results/controls_verification`. No extra `experiments/` or `runs/` level
 is added. `workspace.run_id` is required for model runs; the base YAML sets
 `run01`. It is appended to the variant, for example `mlp-frozen_trunk-run01`.
@@ -833,7 +916,7 @@ digits, dots, underscores, hyphens; starting with a letter or digit).
 
 For training runs, `<variant>` is `<head_type>-frozen_trunk` for `tune_probe`
 or `<head_type>-tuned_trunk` for `finetune`; `evaluate_as_is` uses `pretrained`.
-A non-default `steps.prepare.split.name` is appended to the variant.
+A non-default `representation.split.name` is appended to the variant.
 
 Ordinary pipeline runs refuse existing variant outputs, including interrupted
 evaluations. Choose a new `workspace.run_id` to retain both experiments, or
@@ -876,7 +959,7 @@ standalone scoring and low-level workflows.
 
 ### External test sets
 
-`external_test_sets` lists test-only datasets scored with the model fitted on
+`dataset.external_test_sets` lists test-only datasets scored with the model fitted on
 the workspace dataset. They are never used for training, tuning, or selection,
 and must share the main dataset's label contract. After the main Predict and
 Score, each set is tokenized with the same settings, embedded by the same
@@ -888,27 +971,25 @@ verify its mapping against setHARD before interpreting that external score.
 `localization_prediction.yaml` configures `flair-bio/sethard` this way:
 
 ```yaml
-external_test_sets:
-  - name: sethard
-    dataset_repo_id: flair-bio/sethard
-    split: test
+dataset:
+  external_test_sets:
+    - name: sethard
+      dataset_repo_id: flair-bio/sethard
+      split: test
 ```
 
 Outputs use the external dataset's own workspace and the same variant:
 `<task>/<external.name>/models/<model>/<variant>-<run_id>/`.
 Its comparison table lives directly inside that run.
 All requested output targets are checked before training or replacement. Sets are
-skipped with a warning under `evaluate_as_is` (no fitted probe) and ignored by
-cross-validation.
+skipped with a warning under `evaluate_as_is` (no fitted probe).
 
 ### Reading results
 
 `<workspace>/scores/scores_long.parquet` is the table for comparing runs.
 Every row carries the run identity (`model_name`, `dataset_name`, `task_type`,
 `split`, `model_repo_id`, `dataset_repo_id`, `head_type`, `layer_index`,
-`variant`, `seed`) plus a `metric`. Cross-validation fold (`-fold_<k>`) and
-pooled (`-oof`) runs also set `cv_id`, `fold_id`, and `split_seed` (see
-[Cross-validation](#cross-validation)):
+`variant`, `seed`) plus a `metric`:
 
 | Row | `control` | Filled columns |
 |---|---|---|
@@ -925,7 +1006,7 @@ pooled (`-oof`) runs also set `cv_id`, `fold_id`, and `split_seed` (see
   favorable direction and `p_value_adjusted` is small. Which controls matter
   for which claim: [Interpreting results](docs/controls.md#interpreting-results).
 
-Combine every run under one `workspace.base_path` (repo IDs have `/` replaced
+Combine every run under one `runtime.output_root` (repo IDs have `/` replaced
 by `_`, so workspaces are always two levels deep):
 
 ```python
@@ -957,23 +1038,21 @@ normal run.
 Cached MLP probing is already the base default. Each alternative probe overlay
 (`knn.yaml`, `sklearn_linear.yaml`, `random_forest.yaml`,
 `xgboost.yaml`, `torch_linear.yaml`) is self-contained: it sets
-`steps.mode=tune_probe` and the embedding cache itself, so it is just one more
+`predictor.mode=tune_probe` and the embedding cache itself, so it is just one more
 file after the dataset overlay:
 
 ```bash
-uv run accelerate launch modules/evaluate/src/run_evaluate.py \
-    modules/evaluate/configs/smoke_test.yaml \
-    modules/evaluate/configs/models/amplify_120m.yaml \
-    modules/evaluate/configs/tasks/sequence_classification.yaml \
-    modules/evaluate/configs/datasets/localization_prediction.yaml \
-    modules/evaluate/configs/predictors/random_forest.yaml
+uv run python -m modules.evaluate.src.run_evaluate \
+    --suite /path/to/localization_suite.yaml \
+    --model amplify_120m model.revision=<40-char-commit-sha> \
+    --config modules/evaluate/configs/predictors/random_forest.yaml
 ```
 
 The exception is `mlp_finetuning.yaml`, which trains the trunk too and so does
 not use the embedding cache.
 
-These are composable presets over existing `steps.prepare`, `steps.tune` and
-`steps.predict` settings, not a separate selector or registry. Later overlays
+These are composable presets over existing `representation`, `training` and
+`prediction` settings, not a separate selector or registry. Later overlays
 and CLI overrides remain authoritative, subject to normal task/protocol validation.
 Existing metadata and output variants identify the head and trunk condition;
 contacts use `bilinear512-frozen_trunk` under the shared `contact_prediction` task.
@@ -989,20 +1068,18 @@ and bootstrap included). The embedding cache is recommended for sequence tasks:
 each layer is extracted once per split and reused across epochs and runs.
 
 ```bash
-uv run accelerate launch modules/evaluate/src/run_evaluate.py \
-    modules/evaluate/configs/config.yaml \
-    modules/evaluate/configs/models/amplify_120m.yaml \
-    modules/evaluate/configs/tasks/sequence_classification.yaml \
-    modules/evaluate/configs/datasets/localization_prediction.yaml \
-    steps.layerwise.enabled=true \
-    steps.layerwise.layers=all \
-    steps.tune.head.head_type=torch_linear \
-    steps.tune.hyperparameter_search.enabled=false \
-    steps.tune.refit_on_train_validation=false \
-    steps.prepare.embedding_cache.enabled=true
+uv run python -m modules.evaluate.src.run_evaluate \
+    --suite /path/to/localization_suite.yaml \
+    --model amplify_120m model.revision=<40-char-commit-sha> \
+    predictor.layerwise.enabled=true \
+    predictor.layerwise.layers=all \
+    predictor.head.head_type=torch_linear \
+    training.hyperparameter_search.enabled=false \
+    training.refit_on_train_validation=false \
+    representation.embedding_cache.enabled=true
 ```
 
-**Layers.** `steps.layerwise.layers` is `all` or a list such as `"[0,6,-1]"`.
+**Layers.** `predictor.layerwise.layers` is `all` or a list such as `"[0,6,-1]"`.
 
 - `0` is the token-embedding output; mean-pooled, it is an amino-acid
   composition baseline, so `scrambled_sequences` matches it by construction.
@@ -1013,21 +1090,21 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
 
 - Sequence tasks L2-normalize each residue, then mean-pool over residues
   (boundary and padding tokens excluded, unknown residues kept). Set
-  `steps.layerwise.normalize_before_pooling=false` to keep raw magnitudes, or
-  `steps.layerwise.pooling=cls` when the tokenizer has a CLS/BOS token.
+  `predictor.layerwise.normalize_before_pooling=false` to keep raw magnitudes, or
+  `predictor.layerwise.pooling=cls` when the tokenizer has a CLS/BOS token.
 - Token tasks use unpooled, label-aligned residues without L2 normalization,
   so norm differences between `-1` and the residual stream survive
   standardization.
 - Features are standardized with train-split statistics
-  (`steps.layerwise.standardize_features=false` disables this); regression
+  (`predictor.layerwise.standardize_features=false` disables this); regression
   targets are standardized too.
 - Extraction uses float32 tensors by default; float16/bfloat16 autocast is opt-in.
-  CUDA FP32 computation follows the top-level `tf32` setting.
+  CUDA FP32 computation follows the top-level `runtime.tf32` setting.
 
-**Training.** All heads share `steps.tune` optimizer settings and
+**Training.** All heads share `training` optimizer settings and
 `learning_rate`; each layer keeps its own best validation epoch, saved in its
 `probe_head.pt`. If every layer picks the last epoch, raise
-`steps.tune.max_epochs`. HPO and `variance_seeds` are not supported.
+`training.max_epochs`. HPO and `variance_seeds` are not supported.
 
 **Memory.** With the cache, sequence embeddings go to disk when eligible and
 token embeddings stay in memory (the size estimate is logged before
@@ -1051,65 +1128,13 @@ batches (`packed=true` needs CUDA; token-budget batches are single-process).
   one protein are resampled together, and its cost grows with the number of
   layers.
 
-### Cross-validation
+### Cross-validation (not implemented)
 
-Set `cross_validation.enabled=true` to wrap Prepare → Tune → Predict →
-Score in an outer K-fold loop (`src/runners/cross_validation.py`). Folds are
-planned on raw data (`src/dataset/folds.py`) from `pool_roles`, which defaults
-to `[train, validation]`; the official test split is never pooled. Both source
-splits must exist. Set `cross_validation.pool_roles=[train]` to use training
-data only (including datasets without a source validation split). Each fold
-trains a fresh probe on its
-train role, selects on an inner validation holdout (one fold of an inner
-`round(1 / inner_validation_fraction)`-fold split with the same strategy, so
-groups and strata are respected), and predicts its held-out outer fold.
-
-```bash
-uv run python -m modules.evaluate.src.run_evaluate \
-    modules/evaluate/configs/config.yaml <model/task/dataset overlays> \
-    cross_validation.enabled=true \
-    cross_validation.strategy=stratified_group_kfold \
-    cross_validation.group_column=sequence_cluster_id
-```
-
-CV settings live at the top level because they orchestrate the entire pipeline,
-rather than configuring an individual step. Replace the former
-`steps.cross_validation.*` overrides with `cross_validation.*`.
-
-**Restrictions:** `steps.mode=tune_probe`, scalar `sequence_classification` /
-`sequence_regression` tasks, layerwise disabled, `bootstrap_enabled=false`,
-`persist_to_disk=true`, no `variance_seeds`, and a single process. The pool
-must have finite scalar labels, non-null groups (group strategies), no
-duplicate sequences across groups, and enough examples per class for
-stratification.
-
-Fold membership depends only on the data, split config, and `split_seed`
-(not the training `seed`), so heads and models are compared on identical folds.
-The assignments' fingerprint gives the `cv_id`.
-
-**Outputs.** Each fold plan has a `cv_id`; each full configuration, including
-the training seed and hyperparameters, also gets a distinct `config_hash` in
-its output path. This lets runs share fold assignments without overwriting
-each other's results:
-
-| Path under `<workspace>/runs/` | Contents |
-| --- | --- |
-| `<variant>-cv_<cv_id>-run_<config_hash>/cv_manifest.json` | Status, config, per-fold counts and scores, fold summary (mean/std), OOF and control OOF scores |
-| `<variant>-cv_<cv_id>-run_<config_hash>/assignments.parquet` | One row per (pool row, fold) with `fold_id` and `role` |
-| `<variant>-cv_<cv_id>-run_<config_hash>/scores/scores_long.parquet` | Long-format fold + OOF rows with `cv_id`, `fold_id` (null for OOF), `split_seed` |
-| `<variant>-cv_<cv_id>-run_<config_hash>-fold_<k>/` | Ordinary run for fold `k` |
-| `<variant>-cv_<cv_id>-run_<config_hash>-oof/` | Pooled out-of-fold predictions and scores |
-
-A completed experiment is not overwritten. Rerunning an interrupted one
-reuses its finished folds when the fold plan and full config are unchanged
-(`fingerprint`/`config_hash` in the manifest). Different configs get separate
-paths, while configs with the same fold assignments retain the same `cv_id`.
-Older output directories without the config hash are left untouched and are
-not automatically resumed.
-
-**Interpretation:** the fold std is descriptive spread, not a confidence
-interval (folds share training data). Pooled OOF scores generally differ from
-the mean of fold scores, especially for rank or threshold metrics.
+Outer K-fold cross-validation is **not implemented** in this refactor. There is no
+`cross_validation` config namespace; the schema rejects those keys. Score a
+single fitted probe per dataset split, or compare seeds with `variance_seeds`
+where supported. Reintroducing CV requires a new design (fold planning on raw
+data, per-fold ordinary runs, pooled OOF scores) and its own tests.
 
 ### Contact predictor presets
 
@@ -1132,18 +1157,19 @@ modules/evaluate/
 ├── configs/                         ← base config + overlays; see Config files above
 ├── scripts/dataset_sourcing/        ← dataset sourcing entry points (docs/dataset-sourcing.md)
 └── src/
-    ├── config.py                    ← EvaluationConfig: top-level Pydantic schema
-    ├── run_evaluate.py              ← CLI entry point: runs the four steps in order
-    ├── run_proteingym_*.py          ← ProteinGym zero-shot and supervised runners
-    ├── runners/                     ← orchestration: shared step pipeline, cross-validation
-    ├── dataset/                     ← workspace path layout, dataset loading, collation, CV folds
-    ├── dataset_sourcing/            ← sourcing pipeline used by scripts/dataset_sourcing
-    ├── proteingym/                  ← ProteinGym sourcing, baselines, scoring
-    ├── schemas/artifacts.py         ← typed handoffs between steps
+    ├── config/                      ← EvaluationConfig (evaluation.py), canonical namespace aliases (namespaces.py), suite and model resolution
+    ├── tasks/                       ← task declarations and registry (registry.py, engines.py), one per task family
+    ├── predictors/                  ← cached-probe, pretrained-finetune, and contact predictors; embedding prep
+    ├── training/                    ← shared training code: torch trainer, HPO search, refit, classical, layerwise
+    ├── scoring/                     ← pure score computation (compute.py) and publication (run.py)
+    ├── artifacts/                   ← identity/fingerprint/provenance, predictions, scores, baselines, feature cache
+    ├── runners/baselines.py         ← shared-baseline generation (run once, validated, no overwrite)
+    ├── dataset/                     ← workspace layout, dataset loading, subsets, revisions, local data, collation
+    ├── dataset_sourcing/            ← sourcing pipeline (also present under scripts/dataset_sourcing)
+    ├── proteingym/                  ← ProteinGym sourcing, baselines, scoring (protected)
     ├── model/                       ← probe heads, contact head, categorical Jacobian, layerwise probes
-    ├── steps/                       ← prepare.py, tune.py, predict.py, score.py
-    ├── tasks/                       ← one TaskHandler per task_type (see Adding a Task Type)
     ├── metrics/                     ← metric callables, separation-binned contact metrics
+    ├── schemas/artifacts.py         ← typed artifact records
     └── utils/                       ← controls, bootstrap/permutation stats, embedding cache,
                                        HPO, config validation, I/O, tracking
 ```
@@ -1152,26 +1178,64 @@ Shared config loading helpers live in `modules/core/utils/config_loader.py`.
 
 ### Pipeline Architecture & Distributed Execution
 
-The four steps are separate objects (`PrepareStep`/`TuneStep`/`PredictStep`/`ScoreStep`) chained by `run_evaluate.py`:
+Every run follows one generic lifecycle, implemented in
+`evaluation/runner.py`: reserve outputs, prepare observations, fit one
+predictor, predict and score the main view, then predict and score each
+external view with the same fitted state. The engine branches on declared
+capabilities rather than task names. A task (`tasks/`) declares its label
+semantics, metrics, and predictor(s); the predictor (`predictors/`) owns
+feature extraction and inference; training code lives in `training/`; pure
+score computation is in `scoring/compute.py`, separate from publication in
+`scoring/run.py`.
 
-- **Prepare → Tune → Predict** share an in-memory `PreparedArtifacts` (`schemas/artifacts.py`): model, tokenizer, and train/validation/test dataloaders. With embedding caching, `embedding_backend` retains the frozen trunk and token loaders: Tune trains a separate random-trunk probe on development features, and Predict re-embeds test tokens for model-based controls.
-- **Score** runs on rank 0 only, as a plain CPU step. `run_evaluate.py` passes it the in-memory `PredictOutput`; without one, it rebuilds predictions from `run_manifest.json` and the parquet files it lists, so scoring can be rerun standalone.
+**Current limitations of this architecture (honest status):**
+
+- The canonical config namespaces (`runtime`, `training`, `scoring`, ...) are
+  implemented at the YAML/CLI boundary (`src/config/namespaces.py`; see
+  [Config namespaces](#config-namespaces)). Internally, `evaluation/runner.py`
+  (`run_evaluation`) is still typed on the legacy `EvaluationConfig`: it reads
+  `config.steps.mode`, `config.steps.tune.head.head_type`, and
+  `config.steps.layerwise`. Engine selection in `tasks/engines.py` follows those
+  same internal attributes. Separate `DatasetSpec`/`TaskSpec`/`PredictorSpec`
+  classes are not implemented.
+- Shared baselines (`runners/baselines.py`, `runners/structural_baselines.py`)
+  are generated for `sequence_regression`, `sequence_classification`
+  (sequence protocols), `contact_prediction` (`separation_prior`) and
+  `pseudo_perplexity` (`amino_acid_frequency`, from a pinned train-only
+  reference corpus). Token and multilabel classification reject `--baselines`
+  with an error; their baseline protocols are not implemented.
+- Outer cross-validation is not implemented (see
+  [Cross-validation](#cross-validation-not-implemented)).
+- Predictor identity is recorded per run (in the run manifest), not in the
+  shared workspace identity, because sibling predictor variants may share a
+  workspace label.
+- Packed/`max_tokens_per_batch` execution (`tasks/masked_lm.py`) requires CUDA
+  and is single-process only. It is unvalidated on GPU hardware in this
+  environment.
+
+- **Preparation** builds observations (dataloaders, cached embeddings) once per
+  run, with pinned data and model identities.
+- **Fit/tune** is shared: HPO and refit run through `training/`. The random-trunk
+  control reuses ordinary fitting on a freshly reset trunk, not a nested run.
+- **Predict and score** write `predictions.parquet`, `bootstrap_results.parquet`,
+  and the long-format `scores_long.parquet` sidecar, then update the run
+  manifest.
 
 #### Distributed execution (`accelerate`) patterns
 
-Under `accelerate launch`, several processes (ranks) run the same code, usually one per GPU. These patterns recur across `tune.py`, `predict.py`, `utils/controls.py`, and `utils/hpo.py`:
+Under `accelerate launch`, several processes (ranks) run the same code, usually one per GPU. These patterns recur across `training/`, `predictors/`, `utils/controls.py`, and `utils/hpo.py`:
 
 1. **Every rank must reach every collective call.** `accelerator.gather_for_metrics()`, `broadcast()`, and `broadcast_object_list()` are collective operations: every process must call them, in the same order, or the ranks that do call them hang forever waiting for the ones that don't. So a branch that looks like it should be gated on `if accelerator.is_main_process:` (e.g. "only build this control's model") often *can't* be, if anything inside it issues a collective call. `ControlBuilder.build`'s docstring shows a branch that is deliberately *not* wrapped in error handling for this reason.
 2. **Decide once on rank 0, then broadcast the decision.** For a choice that must be identical on every rank (e.g. "does a cached file exist," "should this HPO trial be pruned"), only rank 0 evaluates the condition; the boolean is wrapped in a tensor and sent to every rank via `broadcast(..., from_process=0)` before anyone branches on it. Letting each rank decide independently can split them, because filesystem state, floating-point rounding, or the Optuna `trial` object (which exists only on rank 0) can differ.
-3. **Freeze/unfreeze parameters *before* `accelerator.prepare()`, never after.** Changing `requires_grad` on a model already wrapped for DDP leaves its gradient-reduction buckets built around the wrong parameter set. `configure_trainable_params()` always runs before `accelerator.prepare(model)` in `TuneStep`.
+3. **Freeze/unfreeze parameters *before* `accelerator.prepare()`, never after.** Changing `requires_grad` on a model already wrapped for DDP leaves its gradient-reduction buckets built around the wrong parameter set. `configure_trainable_params()` always runs before `accelerator.prepare(model)`.
 4. **Classical probes fit identically on every rank.** Each rank holds the full gathered training embeddings and fits the estimator with the same seed, so no live sklearn object has to be broadcast; only rank 0 saves it.
 
-Before adding a control condition, training-loop branch, or cross-rank decision, search for `broadcast(` and `is_main_process` in `utils/controls.py` and `steps/tune.py`; the pattern you need likely exists already.
+Before adding a control condition, training-loop branch, or cross-rank decision, search for `broadcast(` and `is_main_process` in `utils/controls.py` and `training/`; the pattern you need likely exists already.
 
 ### Adding a Task Type
 
 Every step (`prepare`/`tune`/`predict`/`score`) is task-agnostic: it looks up a
-`TaskHandler` for `workspace.task_type` via `modules.evaluate.src.tasks.get_task`
+`TaskHandler` for `task.type` via `modules.evaluate.src.tasks.get_task`
 and delegates all task-specific behavior to it. Adding a new task type means
 adding one handler module, not editing the steps.
 
@@ -1192,7 +1256,7 @@ adding one handler module, not editing the steps.
    self-registers.
 3. Add a task config under `modules/evaluate/configs/tasks/`, and declare the
    accepted dataset target types and label formats on the handler.
-   If the head size comes from `workspace.num_labels` (classification-style
+   If the head size comes from `dataset.num_labels` (classification-style
    heads), also override `validate_num_labels()` to check it against the labels
    actually present in the dataset (see `sequence_classification.py`/
    `token_classification.py`). This catches a wrong `num_labels` before the
@@ -1258,10 +1322,10 @@ overrides the ragged-label hooks (`is_ragged`, `aligns_labels`,
 | Symptom | Cause and fix |
 |---|---|
 | Results from before the positional-label or multilabel-control fixes | Rerun affected positional evaluations. Regenerate older softmax-based multilabel controls and their score comparisons; embedding caches remain reusable and trained-model scores are unaffected by the control-probability fix. |
-| `One of the subprocesses has abruptly died during map operation` | A tokenization worker exited, often because the job exceeded its CPU RAM allocation. Check Slurm/cgroup OOM counters; `steps.prepare.tokenize_num_proc=1` disables map multiprocessing for diagnosis (Accelerate's `--num_processes` does not). Pseudo-perplexity expands each protein into one masked row per residue, so it uses one source protein per map batch to bound RAM; the expanded on-disk dataset can still be large. |
-| `ValueError: Configured <role> source split '...' was not found` | The dataset doesn't publish that split; check `steps.prepare.split` against the listed available splits (see [Named benchmark splits](#named-benchmark-splits)) |
-| `ValueError: Packed evaluation requires CUDA.` | `steps.prepare.packed=true` on a machine without a GPU; set it to `false` |
-| `head_type='...' requires steps.prepare.embedding_cache.enabled=True` | Classical probes fit on cached pooled embeddings; add `steps.prepare.embedding_cache.enabled=true` or use a `configs/predictors/` overlay |
+| `One of the subprocesses has abruptly died during map operation` | A tokenization worker exited, often because the job exceeded its CPU RAM allocation. Check Slurm/cgroup OOM counters; `representation.tokenize_num_proc=1` disables map multiprocessing for diagnosis (Accelerate's `--num_processes` does not). Pseudo-perplexity expands each protein into one masked row per residue, so it uses one source protein per map batch to bound RAM; the expanded on-disk dataset can still be large. |
+| `ValueError: Configured <role> source split '...' was not found` | The dataset doesn't publish that split; check `representation.split` against the listed available splits (see [Named benchmark splits](#named-benchmark-splits)) |
+| `ValueError: Packed evaluation requires CUDA.` | `representation.packed=true` on a machine without a GPU; set it to `false` |
+| `head_type='...' requires representation.embedding_cache.enabled=True` | Classical probes fit on cached pooled embeddings; add `representation.embedding_cache.enabled=true` or use a `configs/predictors/` overlay |
 | Multi-GPU run hangs | A rank skipped a collective call; see [Distributed execution patterns](#distributed-execution-accelerate-patterns) |
 
 ---

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Sequence
+from collections.abc import Sequence
+from typing import Any, ClassVar
 
 import numpy as np
 import torch
@@ -24,6 +25,7 @@ class SequenceRegressionTask(TaskHandler):
     """One continuous target per sequence with regression metrics."""
 
     name = "sequence_regression"
+    is_regression = True
     # Same wrapper class as classification; problem_type switches the loss.
     auto_model_class = AutoModelForSequenceClassification
     label_dtype = torch.float

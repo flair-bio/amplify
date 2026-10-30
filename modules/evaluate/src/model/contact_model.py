@@ -206,11 +206,12 @@ def build_contact_model(
     predictor: str = "bilinear512",
     *,
     tokenizer: PreTrainedTokenizerBase | None = None,
+    revision: str | None = None,
 ) -> Any:
     if predictor == "attention_l1":
         from modules.evaluate.src.model.contact_attention import ContactAttentionModel
 
-        return ContactAttentionModel(load_contact_trunk(model_id))
+        return ContactAttentionModel(load_contact_trunk(model_id, revision=revision))
     if predictor == "categorical_jacobian":
         from modules.evaluate.src.model.contact_jacobian import (
             build_contact_jacobian_model,
@@ -218,10 +219,10 @@ def build_contact_model(
 
         if tokenizer is None:
             raise ValueError("The categorical Jacobian predictor requires a tokenizer")
-        return build_contact_jacobian_model(model_id, tokenizer)
+        return build_contact_jacobian_model(model_id, tokenizer, revision=revision)
     if predictor != "bilinear512":
         raise ValueError(f"Unknown CASP contact predictor: {predictor}")
-    return ContactPredictionModel(load_contact_trunk(model_id))
+    return ContactPredictionModel(load_contact_trunk(model_id, revision=revision))
 
 
 def fit_random_trunk_contact_control(
@@ -311,14 +312,17 @@ def fit_random_trunk_contact_control(
     }
 
 
-def load_contact_trunk(model_id: str) -> Any:
-    config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+def load_contact_trunk(model_id: str, *, revision: str | None = None) -> Any:
+    revision_kwargs: dict[str, Any] = {} if revision is None else {"revision": revision}
+    config = AutoConfig.from_pretrained(
+        model_id, trust_remote_code=True, **revision_kwargs
+    )
     # Masked-LM ESM checkpoints have no pooler; it is unused for residue features.
     kwargs: dict[str, Any] = (
         {"add_pooling_layer": False} if config.model_type == "esm" else {}
     )
     return AutoModel.from_pretrained(
-        model_id, config=config, trust_remote_code=True, **kwargs
+        model_id, config=config, trust_remote_code=True, **revision_kwargs, **kwargs
     )
 
 

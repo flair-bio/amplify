@@ -27,11 +27,11 @@ if TYPE_CHECKING:
 
 @dataclass
 class PreparedArtifacts:
-    """Output of :class:`~modules.evaluate.src.steps.prepare.PrepareStep`.
+    """Output of :func:`~modules.evaluate.src.predictors.probe_preparation.prepare_probe_artifacts`.
 
-    Consumed by :class:`~modules.evaluate.src.steps.tune.TuneStep` (which
+    Consumed by :func:`~modules.evaluate.src.training.tuning.fit_probe_protocol` (which
     returns an updated instance with a fine-tuned ``model``) and by
-    :class:`~modules.evaluate.src.steps.predict.PredictStep`.
+    :func:`~modules.evaluate.src.predictors.inference.predict_trained`.
     """
 
     model: nn.Module | BaseEstimator
@@ -82,7 +82,7 @@ class EvaluationMetadata(BaseModel):
     data that crosses a real serialization boundary (``run_manifest.json``),
     so ``.model_dump()``/``.model_validate()`` replace the
     ``dataclass_to_dict``/``EvaluationMetadata(**dict)`` round trip with one
-    that's actually validated on reload (see ``ScoreStep.load_predict_output``).
+    that's actually validated on reload (see ``artifacts.predictions.load_predict_output``).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -134,7 +134,7 @@ class ContactEvaluationMetadata(EvaluationMetadata):
 
 @dataclass
 class PredictOutput:
-    """Output of :class:`~modules.evaluate.src.steps.predict.PredictStep`.
+    """Output of :func:`~modules.evaluate.src.predictors.inference.predict_trained`.
 
     Intended to be consumed by a future metrics/scoring step that computes
     task-specific metrics from the per-example predictions here.
@@ -174,7 +174,7 @@ class PredictOutput:
 
 @dataclass
 class ScoreOutput:
-    """Output of :class:`~modules.evaluate.src.steps.score.ScoreStep`.
+    """Output of :func:`~modules.evaluate.src.scoring.run.score_predictions`.
 
     Combines the point-estimate task metrics with (optionally) bootstrap
     confidence intervals and trained-vs-control comparisons.

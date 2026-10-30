@@ -11,23 +11,26 @@ from accelerate import Accelerator
 from datasets import Dataset, DatasetDict
 from torch import nn
 
+from modules.evaluate.src.artifacts.feature_cache import (
+    EmbeddingCache,
+    EmbeddingCacheConfig,
+)
+from modules.evaluate.src.config.predict import PredictConfig
 from modules.evaluate.src.dataset.collator import (
     EvaluationCollator,
     EvaluationCollatorConfig,
 )
 from modules.evaluate.src.dataset.dataloader import DataLoaderConfig, build_dataloaders
 from modules.evaluate.src.model.heads import HeadConfig
-from modules.evaluate.src.steps.predict import PredictConfig, PredictStep
-from modules.evaluate.src.steps.tune import TuneConfig, TuneStep
-from modules.evaluate.src.artifacts.feature_cache import (
-    EmbeddingCache,
-    EmbeddingCacheConfig,
-)
 from modules.evaluate.src.predictors.embeddings import (
     build_embedding_dataloaders,
     extract_embeddings,
     find_embedding_dataset,
 )
+from modules.evaluate.src.predictors.inference import predict_trained
+from modules.evaluate.src.training.config import TuneConfig
+from modules.evaluate.src.training.torch_trainer import TorchProbeTrainer
+from modules.evaluate.src.training.tuning import fit_probe_protocol
 
 from .test_prepare import _make_workspace, _run_prepare
 
@@ -328,16 +331,22 @@ def test_prepare_and_prediction_controls_use_matching_order(
     controls = ["random_trunk", "random_both"]
     if task_type == "sequence_classification":
         controls.append("scrambled_sequences")
-    TuneStep(
-        TuneConfig(
-            head=HeadConfig(head_type="torch_linear"),
-            max_epochs=1,
-            save_best_model=False,
-        )
-    ).run(_make_workspace(tmp_path, task_type), artifacts, controls=controls)
-    output = PredictStep(PredictConfig(controls=controls)).run(
+    fit_probe_protocol(
+        TorchProbeTrainer(
+            TuneConfig(
+                head=HeadConfig(head_type="torch_linear"),
+                max_epochs=1,
+                save_best_model=False,
+            )
+        ),
         _make_workspace(tmp_path, task_type),
         artifacts,
+        controls=controls,
+    )
+    output = predict_trained(
+        _make_workspace(tmp_path, task_type),
+        artifacts,
+        PredictConfig(controls=controls),
     )
     for control in controls:
         assert (

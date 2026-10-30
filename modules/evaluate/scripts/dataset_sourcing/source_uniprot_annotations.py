@@ -11,14 +11,18 @@ import polars as pl
 from pydantic import ConfigDict, Field
 
 from modules.core.utils.hf_download import resolve_hf_token
-from modules.evaluate.scripts.dataset_sourcing.shared.config import UniProtDatasetSourcingConfig
+from modules.evaluate.scripts.dataset_sourcing.shared.config import (
+    UniProtDatasetSourcingConfig,
+)
 from modules.evaluate.scripts.dataset_sourcing.shared.downloads import (
     UNIPROT_STREAM_URL,
     build_uniprot_query,
     download_uniprot_tsv,
     read_uniprot_tsv,
 )
-from modules.evaluate.scripts.dataset_sourcing.shared.hf_io import upload_dataset_artifact
+from modules.evaluate.scripts.dataset_sourcing.shared.hf_io import (
+    upload_dataset_artifact,
+)
 from modules.evaluate.scripts.dataset_sourcing.shared.outputs import (
     generated_utc_date,
     mmseqs_settings_lines,
@@ -30,7 +34,9 @@ from modules.evaluate.scripts.dataset_sourcing.shared.pipeline import (
     resolve_datasets,
     run_script,
 )
-from modules.evaluate.scripts.dataset_sourcing.shared.preprocess import split_by_clusters
+from modules.evaluate.scripts.dataset_sourcing.shared.preprocess import (
+    split_by_clusters,
+)
 
 logger = logging.getLogger(__name__)
 

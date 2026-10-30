@@ -1,4 +1,4 @@
-"""Tests for modules.evaluate.src.steps.prepare.PrepareStep.
+"""Tests for modules.evaluate.src.predictors.probe_preparation.prepare_probe_artifacts.
 
 Parametrized across both model families evaluated in this repo (see eval/):
 ``flair-bio/amplify-120m`` (custom ``ProteinTokenizer`` + real AMPLIFY head
@@ -6,7 +6,7 @@ classes) and ``facebook/esm2_t12_35M_UR50D`` (real HF ``EsmTokenizer`` + real
 Esm head classes), both built offline with tiny dimensions via the
 ``model_family`` fixture (tests/evaluate/conftest.py).
 
-Only the network-bound calls inside ``PrepareStep.run`` (``AutoTokenizer.
+Only the network-bound calls inside ``prepare_probe_artifacts`` (``AutoTokenizer.
 from_pretrained``, ``load_evaluation_dataset``, and the Hub download in
 ``AutoModel*.from_pretrained``) are monkeypatched to these offline, real
 equivalents. Everything else (tokenization, collation, DataLoader
@@ -18,23 +18,27 @@ from __future__ import annotations
 
 import pytest
 import torch
-from datasets import Dataset, DatasetDict
 from accelerate import Accelerator as HFAccelerator
 from accelerate.state import AcceleratorState
+from datasets import Dataset, DatasetDict
 
+from modules.evaluate.src.dataset import resolution as resolution_module
 from modules.evaluate.src.dataset.dataloader import (
     DatasetSplitConfig,
     ExternalTestSetConfig,
 )
+from modules.evaluate.src.dataset.preparation import PrepareConfig
 from modules.evaluate.src.dataset.workspace import (
     EvaluationWorkspaceConfig,
     get_evaluation_workspace,
 )
-from modules.evaluate.src.steps import prepare as prepare_module
-from modules.evaluate.src.dataset import resolution as resolution_module
-from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
-from modules.evaluate.src.steps.prepare import PrepareConfig, PrepareStep
+from modules.evaluate.src.predictors import probe_preparation as prepare_module
 from modules.evaluate.src.predictors.embeddings import find_embedding_dataset
+from modules.evaluate.src.predictors.probe_preparation import (
+    prepare_external_probe_artifacts,
+    prepare_probe_artifacts,
+)
+from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
 
 from .conftest import ModelFamily, build_raw_dataset_dict, build_tiny_model
 
@@ -125,8 +129,8 @@ def _run_prepare(
         **config_kwargs,
     )
     workspace = _make_workspace(tmp_path, task_type, num_labels=num_labels)
-    step = PrepareStep(config)
-    prepared = step.run(
+    prepared = prepare_probe_artifacts(
+        config,
         workspace,
         layerwise_config=layerwise_config,
         dataset=dataset,
@@ -145,9 +149,10 @@ def _run_prepare(
     monkeypatch.setattr(
         resolution_module,
         "load_raw_evaluation_dataset",
-        lambda repo_id: external_dataset,
+        lambda repo_id, **kwargs: external_dataset,
     )
-    return prepared, step.prepare_external_test(
+    return prepared, prepare_external_probe_artifacts(
+        config,
         workspace,
         prepared,
         external,
@@ -176,9 +181,7 @@ def test_prepare_caches_configured_final_refit_split_separately(
     )
 
     train = find_embedding_dataset(prepared.train_dataloader)
-    excluded = find_embedding_dataset(
-        prepared.refit_dataloaders["tuning_excluded"]
-    )
+    excluded = find_embedding_dataset(prepared.refit_dataloaders["tuning_excluded"])
     assert train is not None and excluded is not None
     assert len(train) == len(raw["train"])
     assert excluded.ids == ["refit-only"]
@@ -224,11 +227,11 @@ class TestPrepareConfig:
 
 
 # ---------------------------------------------------------------------------
-# PrepareStep.run — end to end (with network boundaries mocked)
+# prepare_probe_artifacts — end to end (with network boundaries mocked)
 # ---------------------------------------------------------------------------
 
 
-class TestPrepareStepRun:
+class TestPrepareProbeArtifacts:
     def test_sequence_classification_end_to_end(
         self, monkeypatch, tmp_path, model_family
     ):

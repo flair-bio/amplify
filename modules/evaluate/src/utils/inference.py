@@ -1,11 +1,11 @@
 """
 Shared model-inference primitive: run a model over a dataloader and gather
 per-example ids/predictions/labels[/probabilities/sequences]. Used by
-:class:`~modules.evaluate.src.steps.predict.PredictStep` for the trained
+:func:`~modules.evaluate.src.predictors.inference.predict_trained` for the trained
 model's own predictions, by
 :class:`~modules.evaluate.src.utils.controls.ControlBuilder` for
 model-based control conditions, and by
-:class:`~modules.evaluate.src.steps.tune.TuneStep` for validation-time
+:func:`~modules.evaluate.src.training.tuning.fit_probe_protocol` for validation-time
 scoring -- kept in its own module so none of those need to import from
 one another just to share this loop.
 """

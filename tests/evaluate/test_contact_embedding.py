@@ -13,30 +13,42 @@ import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
 from datasets import Dataset, DatasetDict
-from transformers import EsmConfig, EsmModel
+from transformers import EsmConfig, EsmForMaskedLM, EsmModel
 
 from modules.evaluate.src import run_evaluate
 from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
+from modules.evaluate.src.evaluation.runner import run_evaluation
 from modules.evaluate.src.model.contact_model import (
     BilinearHead,
     ContactPredictionModel,
     fit_contact_head,
 )
-from modules.evaluate.src.runners.pipeline import run_pipeline
+from modules.evaluate.src.predictors.embeddings import contact_development_features
 from modules.evaluate.src.tasks import available_tasks, get_task
 from modules.evaluate.src.tasks.contact_prediction import (
     candidate_pairs,
     prepare_contact_dataset,
     tokenize_contact_chain,
 )
+from modules.evaluate.src.tasks.engines import resolve_engine
 from modules.evaluate.src.utils.config_loader import load_evaluation_config
-from modules.evaluate.src.predictors.embeddings import contact_development_features
-from modules.pretrain.src.model.modeling_amplify import register_amplify_auto_classes
+from modules.pretrain.src.model.modeling_amplify import (
+    AMPLIFYForMaskedLM,
+    register_amplify_auto_classes,
+)
 
 from .conftest import build_tiny_model
 from .test_contact_data import FEATURES, hf_data, row
 
 CONFIGS = Path("modules/evaluate/configs")
+MASKED_LM_CLASSES = {"amplify-120m": AMPLIFYForMaskedLM, "esm2-35m": EsmForMaskedLM}
+
+
+def run_engine(config, workspace, accelerator, **kwargs):
+    """Run through the generic lifecycle with the engine resolved from config."""
+    return run_evaluation(
+        config, workspace, accelerator, task=resolve_engine(config), **kwargs
+    )
 
 
 def small_trunk():
@@ -67,7 +79,9 @@ def family_trunk(model_family):
     ).base_model
 
 
-def development_dataset():
+def development_dataset(positives=False):
+    # Attention fitting needs both classes, so the CLI cases request positives.
+    positive_pairs = [[0, 6]] if positives else []
     return DatasetDict(
         {
             split: Dataset.from_list(
@@ -76,7 +90,7 @@ def development_dataset():
                         f"{split}-{i}",
                         split,
                         sequence="ACDEFGHIK"[: 7 + i % 3],
-                        positive_pairs=[],
+                        positive_pairs=positive_pairs,
                     )
                     for i in range(20)
                 ],
@@ -87,13 +101,19 @@ def development_dataset():
     )
 
 
-def config_for(tmp_path, model_path, seed=13):
+def config_for(
+    tmp_path,
+    model_path,
+    seed=13,
+    predictor="contact_embedding",
+    controls=("random_trunk",),
+):
     return load_evaluation_config(
         [
             CONFIGS / "config.yaml",
             CONFIGS / "tasks/contact_prediction.yaml",
             CONFIGS / "datasets/contact_prediction_casp.yaml",
-            CONFIGS / "predictors/contact_embedding.yaml",
+            CONFIGS / f"predictors/{predictor}.yaml",
         ],
         overrides=[
             f"workspace.output_dir={tmp_path / 'output'}",
@@ -103,9 +123,29 @@ def config_for(tmp_path, model_path, seed=13):
             f"workspace.dataset_repo_id={tmp_path / 'dataset'}",
             f"seed={seed}",
             "steps.tune.max_epochs=12",
-            "steps.predict.controls=[random_trunk]",
+            f"steps.predict.controls=[{','.join(controls)}]",
         ],
     )
+
+
+def install_casp_fixture(tmp_path, model_family, hf, *, masked_lm=False):
+    """Write a tiny trunk+tokenizer and the fixed HF CASP splits offline.
+
+    ``masked_lm`` saves a masked-LM checkpoint, which the Jacobian predictor
+    loads through ``AutoModelForMaskedLM``; base checkpoints carry no such
+    ``auto_map`` entry.
+    """
+    register_amplify_auto_classes()
+    model_path = tmp_path / ("trunk_mlm" if masked_lm else "trunk")
+    trunk = family_trunk(model_family)
+    model = MASKED_LM_CLASSES[model_family.name](trunk.config) if masked_lm else trunk
+    model.save_pretrained(model_path)
+    model_family.tokenizer.save_pretrained(model_path)
+    data = tmp_path / "dataset" / "data"
+    data.mkdir(parents=True)
+    for split, rows in hf.items():
+        rows.to_parquet(data / f"{split}-00000-of-00001.parquet")
+    return model_path
 
 
 def test_head_directional_symmetry_and_pair_weighted_gradient():
@@ -287,11 +327,7 @@ def test_development_cache_is_seed_independent_and_never_contains_test(
 def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
     tmp_path, model_family, monkeypatch
 ):
-    register_amplify_auto_classes()
     tokenizer = model_family.tokenizer
-    model_path = tmp_path / "trunk"
-    family_trunk(model_family).save_pretrained(model_path)
-    tokenizer.save_pretrained(model_path)
     hf = development_dataset()
     # Preserve a missing-label chain and an independently restricted EU output.
     hf["test"] = Dataset.from_list(
@@ -310,33 +346,48 @@ def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
         ],
         features=FEATURES,
     )
-    data = tmp_path / "dataset" / "data"
-    data.mkdir(parents=True)
-    for split, rows in hf.items():
-        rows.to_parquet(data / f"{split}-00000-of-00001.parquet")
+    model_path = install_casp_fixture(tmp_path, model_family, hf)
     config = config_for(tmp_path, model_path)
     workspace = get_evaluation_workspace(
         config.workspace, config.variant, seed=config.seed
     )
     results = []
 
-    def run(*args, **kwargs):
-        result = run_pipeline(*args, **kwargs)
-        results.append(result)
-        return result
+    assert not hasattr(run_evaluate, "run_pipeline"), "legacy pipeline must be retired"
+
+    real_run_evaluation = run_evaluate.run_evaluation
+
+    def capture(*args, **kwargs):
+        outcome = real_run_evaluation(*args, **kwargs)
+        results.append(outcome)
+        return outcome
 
     monkeypatch.setattr(run_evaluate, "load_evaluation_config", lambda **kwargs: config)
     monkeypatch.setattr(
         run_evaluate, "Accelerator", lambda **kwargs: Accelerator(cpu=True)
     )
-    monkeypatch.setattr(run_evaluate, "run_pipeline", run)
-    monkeypatch.setattr(sys, "argv", ["run_evaluate.py", "config.yaml"])
+    monkeypatch.setattr(run_evaluate, "run_evaluation", capture)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_evaluate.py",
+            "--suite",
+            "contact_prediction",
+            "--predictor",
+            "contact_embedding",
+            "--model",
+            "esm2_35m",
+        ],
+    )
     run_evaluate.main()
     result = results[0]
+    main_predictions = result.main.predictions[0].payload
+    main_scores = result.main.scores[0].payload
     assert workspace.run_root.name == "seed_13"
-    assert result.predictions[None].predictions.height == 3
-    assert set(result.predictions[None].controls) == {"random_trunk"}
-    assert result.scores[None].control_summaries["random_trunk"].height == 4
+    assert main_predictions.predictions.height == 3
+    assert set(main_predictions.controls) == {"random_trunk"}
+    assert main_scores.control_summaries["random_trunk"].height == 4
     assert (
         workspace.control_workspace("random_trunk").stats_path / "contact_training.json"
     ).is_file()
@@ -350,9 +401,9 @@ def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
     assert workspace.variant == "bilinear512-frozen_trunk"
     manifest = json.loads(workspace.run_manifest_path.read_text())
     assert manifest["predict"]["metadata"]["head_type"] == "bilinear512"
-    from modules.evaluate.src.steps.score import ScoreStep
+    from modules.evaluate.src.artifacts.predictions import load_predict_output
 
-    restored_predictions = ScoreStep.load_predict_output(workspace)
+    restored_predictions = load_predict_output(workspace)
     assert restored_predictions.metadata.head_type == "bilinear512"
     assert set(restored_predictions.controls) == {"random_trunk"}
     assert (
@@ -363,7 +414,7 @@ def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
     restored = ContactPredictionModel.from_pretrained(workspace.model_path)
     chain = prepare_contact_dataset(hf).splits["test"][0]
     predicted = restored.predict(chain, tokenizer).numpy()
-    frame = result.predictions[None].predictions
+    frame = main_predictions.predictions
     actual = frame.filter(frame["record_id"] == "scored").to_dicts()[0]
     np.testing.assert_allclose(
         actual["scores"],
@@ -371,18 +422,18 @@ def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
     )
     config2 = config_for(tmp_path, model_path, seed=14)
     sibling = get_evaluation_workspace(config2.workspace, config2.variant, seed=14)
-    run_pipeline(config2, sibling, Accelerator(cpu=True))
+    run_engine(config2, sibling, Accelerator(cpu=True))
     sibling_content = sibling.run_manifest_path.read_bytes()
     with pytest.raises(FileExistsError):
-        run_pipeline(config, workspace, Accelerator(cpu=True))
-    run_pipeline(config, workspace, Accelerator(cpu=True), overwrite=True)
+        run_engine(config, workspace, Accelerator(cpu=True))
+    run_engine(config, workspace, Accelerator(cpu=True), overwrite=True)
     assert sibling.run_manifest_path.read_bytes() == sibling_content
     assert len(list(workspace.embeddings_path.glob("*.safetensors"))) == 3
     # Changing input weights cannot silently share an experiment across seeds.
     different = family_trunk(model_family)
     different.save_pretrained(model_path)
     with pytest.raises(ValueError, match="inputs differs across seeds"):
-        run_pipeline(config, workspace, Accelerator(cpu=True), overwrite=True)
+        run_engine(config, workspace, Accelerator(cpu=True), overwrite=True)
 
 
 @pytest.mark.parametrize(

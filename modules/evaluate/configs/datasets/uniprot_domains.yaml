@@ -1,6 +1,6 @@
-workspace:
-  dataset_name: uniprot_domains
-  dataset_repo_id: flair-bio/uniprot_domains
+dataset:
+  name: uniprot_domains
+  repo_id: flair-bio/uniprot_domains
   target_type: categorical
   label_format: per_token
   num_labels: 2

@@ -30,14 +30,14 @@ from modules.evaluate.src.model.heads import (
     EmbeddingProbeHead,
     run_classical_inference,
 )
-from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
-from modules.evaluate.src.tasks import get_task
 from modules.evaluate.src.predictors.embeddings import (
     EmbeddingDataset,
     embedding_collate_fn,
     extract_embeddings,
     find_embedding_dataset,
 )
+from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
+from modules.evaluate.src.tasks import get_task
 from modules.evaluate.src.utils.inference import pad_for_gather, run_inference
 
 logger = logging.getLogger(__name__)
@@ -462,7 +462,7 @@ class ControlBuilder:
             if prepared.random_trunk_model is None:
                 raise ValueError(
                     "Cached random_trunk requires a fitted probe; pass the predict "
-                    "controls to TuneStep before prediction."
+                    "controls to fit_probe_protocol before prediction."
                 )
             if prepared.random_trunk_seed != seed:
                 raise ValueError(
@@ -910,7 +910,11 @@ class ControlBuilder:
             num_labels = task.resolve_num_labels(
                 workspace.num_labels, workspace.dataset_name
             )
-            model = task.build_model(model_id, num_labels, workspace.model_kwargs)
+            model = task.build_model(
+                model_id,
+                num_labels,
+                {**workspace.model_kwargs, **workspace.model_load_kwargs},
+            )
             # `from_pretrained` always loads onto CPU; match the trained
             # model's device (already placed by accelerator.prepare() in
             # TuneStep or run_evaluate.py) so the (already-prepared)

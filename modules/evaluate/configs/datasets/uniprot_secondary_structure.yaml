@@ -1,6 +1,6 @@
-workspace:
-  dataset_name: uniprot_secondary_structure
-  dataset_repo_id: flair-bio/uniprot_secondary_structure
+dataset:
+  name: uniprot_secondary_structure
+  repo_id: flair-bio/uniprot_secondary_structure
   target_type: categorical
   label_format: per_token
   num_labels: 4

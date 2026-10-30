@@ -1,6 +1,6 @@
-workspace:
-  dataset_name: GO_bp
-  dataset_repo_id: flair-bio/uniprot-GO_bp
+dataset:
+  name: GO_bp
+  repo_id: flair-bio/uniprot-GO_bp
   target_type: categorical
   label_format: multilabel
   num_labels: 2333

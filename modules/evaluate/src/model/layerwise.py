@@ -10,13 +10,13 @@ from torch import nn
 
 from modules.evaluate.src.dataset.collator import unpack_packed
 from modules.evaluate.src.model.heads import EmbeddingProbeHead
-from modules.evaluate.src.tasks.token_classification import IGNORE_INDEX
 from modules.evaluate.src.predictors.embeddings import (
     AUTOCAST_DTYPES,
     autocast_context,
     pool_hidden_states,
     residue_attention_mask,
 )
+from modules.evaluate.src.tasks.token_classification import IGNORE_INDEX
 
 if TYPE_CHECKING:
     from modules.evaluate.src.config import LayerwiseConfig

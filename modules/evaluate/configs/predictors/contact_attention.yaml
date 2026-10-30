@@ -1,16 +1,16 @@
-steps:
+predictor:
   mode: tune_probe
-  prepare:
-    embedding_cache:
-      enabled: false
-      cache_policy: "off"
-  tune:
-    head:
-      head_type: attention_l1
-      hyperparameters: {}
-      search_space: {}
-    standardize_features: false
-    refit_on_train_validation: false
-    variance_seeds: []
-    hyperparameter_search:
-      enabled: false
+  head:
+    head_type: attention_l1
+    hyperparameters: {}
+    search_space: {}
+representation:
+  embedding_cache:
+    enabled: false
+    cache_policy: "off"
+training:
+  standardize_features: false
+  refit_on_train_validation: false
+  variance_seeds: []
+  hyperparameter_search:
+    enabled: false

@@ -15,9 +15,28 @@ of prediction, then skim the cartoon at the top of each source in
 [Datasets in Detail](#datasets-in-detail) and read the entries that
 interest you.
 
-## Table of Contents
+## Pinning, subsets and local data
 
-- [Evaluation Tasks](#evaluation-tasks)
+Every run records what it read. Composition validates these rules before any
+data or model is loaded (see `artifacts/identity.py`):
+
+- **Hub datasets** take `dataset.revision=<40-char commit SHA>`. The
+  contact dataset (`contact_prediction_casp`) requires one; the run fails
+  without it. Other Hub sequence datasets may run unpinned, but their identity
+  is recorded as `pinned: false` rather than hidden.
+- **Hub models** take `model.revision=<40-char commit SHA>`. A moving
+  name such as `main` is rejected. Local checkpoint directories take no revision.
+- **Local data** (`--data-root DIR`, or `runtime.data_root`) maps each dataset to `DIR/<local path>`
+  (default `DIR/<dataset-name>`). A missing directory is an error, never a
+  silent Hub fallback. A revision with a local path is rejected.
+- **Subsets** use `dataset.subset=<name>` for Hub datasets that expose
+  named subsets. Contact prediction does not support subsets.
+
+Pins and subsets are part of each run's identity: a reused output must match
+the dataset source, subset, revision, and model fingerprint, or it fails
+rather than being overwritten.
+
+
 - [Datasets by Task](#datasets-by-task)
 - [Datasets in Detail](#datasets-in-detail)
   - [Biomap-Research](#biomap-research)
@@ -32,10 +51,12 @@ interest you.
 
 ## Evaluation Tasks
 
-Each dataset is evaluated with one of seven tasks; the names are the
-`workspace.task_type` values. A task fixes what the model predicts (one value
+Each dataset is evaluated with one of seven task families; the names are the
+`task.type` values (legacy `workspace.task_type` still loads). A task fixes what the model predicts (one value
 per protein, per residue, or per residue pair) and therefore the shape of the
-dataset's `targets`.
+dataset's `targets`. `sequence_regression`, `sequence_classification`,
+`contact_prediction` and `pseudo_perplexity` have shared (non-model) baselines;
+`--baselines` is rejected for the other suites.
 
 ![The seven evaluation tasks, grouped by output level](../../../figures/downstream_tasks.png)
 

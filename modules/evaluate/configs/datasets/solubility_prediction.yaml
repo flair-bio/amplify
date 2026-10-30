@@ -1,6 +1,6 @@
-workspace:
-  dataset_name: solubility_prediction
-  dataset_repo_id: flair-bio/solubility_uesolds_original
+dataset:
+  name: solubility_prediction
+  repo_id: flair-bio/solubility_uesolds_original
   target_type: categorical
   label_format: scalar
   num_labels: 2

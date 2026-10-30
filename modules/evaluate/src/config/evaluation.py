@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import (
@@ -12,15 +13,15 @@ from pydantic import (
     model_validator,
 )
 
+from modules.evaluate.src.config.predict import PredictConfig
+from modules.evaluate.src.config.score import ScoreConfig
 from modules.evaluate.src.dataset.dataloader import (
     DEFAULT_SPLIT_NAME,
     ExternalTestSetConfig,
 )
+from modules.evaluate.src.dataset.preparation import PrepareConfig
 from modules.evaluate.src.dataset.workspace import EvaluationWorkspaceConfig
-from modules.evaluate.src.steps.predict import PredictConfig
-from modules.evaluate.src.steps.prepare import PrepareConfig
-from modules.evaluate.src.steps.score import ScoreConfig
-from modules.evaluate.src.steps.tune import TuneConfig
+from modules.evaluate.src.training.config import TuneConfig
 from modules.evaluate.src.utils.baselines import BaselinesConfig
 from modules.evaluate.src.utils.config_validation import (
     validate_cross_step_dependencies,
@@ -91,6 +92,9 @@ class EvaluationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     seed: int = 710019
     tf32: bool = True
+    # Canonical ``runtime.data_root``: local mirror for configured datasets.
+    # Applied at plan time by run_evaluate.py; recorded here for validation.
+    data_root: Path | None = None
 
     workspace: EvaluationWorkspaceConfig
     wandb: WandbConfig = Field(default_factory=WandbConfig)

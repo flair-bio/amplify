@@ -10,14 +10,15 @@ from torch.utils.data import DataLoader
 
 from modules.evaluate.src.model import heads
 from modules.evaluate.src.model.heads import EmbeddingProbeHead, HeadConfig
+from modules.evaluate.src.predictors.embeddings import EmbeddingDataset
 from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
-from modules.evaluate.src.steps.tune import (
+from modules.evaluate.src.training.config import (
     HyperparameterSearchConfig,
     HyperparameterSearchSpaceConfig,
     TuneConfig,
-    TuneStep,
 )
-from modules.evaluate.src.predictors.embeddings import EmbeddingDataset
+from modules.evaluate.src.training.torch_trainer import TorchProbeTrainer
+from modules.evaluate.src.training.tuning import fit_probe_protocol
 
 from .test_prepare import _make_workspace
 
@@ -36,14 +37,14 @@ def test_cached_probe_batches_transfer_only_each_requested_batch():
     features = torch.arange(20, dtype=torch.float32).reshape(5, 4)
     labels = torch.arange(5)
     loader = _loader(features, labels)
-    step = TuneStep(TuneConfig())
+    trainer = TorchProbeTrainer(TuneConfig())
 
-    split = step._cached_embedding_split(loader)
+    split = trainer.cached_embedding_split(loader)
 
     assert split is not None
     assert split[0].data_ptr() == features.data_ptr()
     batches = list(
-        step._cached_batches(
+        trainer.cached_batches(
             split, batch_size=2, shuffle=False, device=torch.device("cpu")
         )
     )
@@ -143,7 +144,7 @@ def test_tuning_standardizes_training_features_and_persists_policy(
     )
     workspace = _make_workspace(tmp_path, "sequence_classification")
     options = {} if enabled else {"standardize_features": False}
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             head=HeadConfig(head_type=head_type, hidden_size=5),
             max_epochs=1,
@@ -152,7 +153,9 @@ def test_tuning_standardizes_training_features_and_persists_policy(
         )
     )
 
-    result = step.run(workspace, prepared, accelerator=Accelerator(cpu=True))
+    result = fit_probe_protocol(
+        trainer, workspace, prepared, accelerator=Accelerator(cpu=True)
+    )
 
     if enabled:
         torch.testing.assert_close(
@@ -198,11 +201,13 @@ def test_token_standardization_ignores_unlabeled_positions(tmp_path, monkeypatch
         test_dataloader=None,
     )
     workspace = _make_workspace(tmp_path, "token_classification")
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(max_epochs=1, early_stopping_patience=None, save_best_model=False)
     )
 
-    trained = step.run(workspace, prepared, accelerator=Accelerator(cpu=True))
+    trained = fit_probe_protocol(
+        trainer, workspace, prepared, accelerator=Accelerator(cpu=True)
+    )
 
     torch.testing.assert_close(
         trained.model.feature_mean, torch.tensor([5.0, 16.0, 7.0])
@@ -229,7 +234,7 @@ def test_hpo_and_seed_variance_keep_training_standardization(monkeypatch, tmp_pa
         return fit_standardization(self, features, **kwargs)
 
     monkeypatch.setattr(EmbeddingProbeHead, "fit_standardization", record_fit)
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             max_epochs=1,
             early_stopping_patience=None,
@@ -246,7 +251,8 @@ def test_hpo_and_seed_variance_keep_training_standardization(monkeypatch, tmp_pa
         )
     )
 
-    trained = step.run(
+    trained = fit_probe_protocol(
+        trainer,
         _make_workspace(tmp_path, "sequence_classification"),
         prepared,
         accelerator=Accelerator(cpu=True),

@@ -1,10 +1,9 @@
-workspace:
-  dataset_name: uniprot_protparams
-  dataset_repo_id: flair-bio/uniprot_protparams
+dataset:
+  name: uniprot_protparams
+  repo_id: flair-bio/uniprot_protparams
   target_type: continuous
   label_format: scalar
   num_labels: null
 
-steps:
-  prepare:
-    label_column: gravy
+representation:
+  label_column: gravy

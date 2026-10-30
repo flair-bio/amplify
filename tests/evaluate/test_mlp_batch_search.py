@@ -11,18 +11,22 @@ from accelerate import Accelerator
 from pydantic import ValidationError
 from torch.utils.data import DataLoader
 
-from modules.core.utils.config_loader import load_and_parse
 from modules.evaluate.src.config import EvaluationConfig
 from modules.evaluate.src.model.heads import EmbeddingProbeHead, HeadConfig
 from modules.evaluate.src.model.layerwise import LayerwiseProbeModel
+from modules.evaluate.src.predictors.embeddings import EmbeddingDataset
 from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
-from modules.evaluate.src.steps.tune import (
+from modules.evaluate.src.training.config import (
     HyperparameterSearchConfig,
     HyperparameterSearchSpaceConfig,
     TuneConfig,
-    TuneStep,
 )
-from modules.evaluate.src.predictors.embeddings import EmbeddingDataset
+from modules.evaluate.src.training.search import generate_candidates
+from modules.evaluate.src.training.torch_trainer import TorchProbeTrainer
+from modules.evaluate.src.training.tuning import fit_probe_protocol
+from modules.evaluate.src.utils.config_loader import (
+    load_and_parse_evaluation as load_and_parse,
+)
 from modules.evaluate.src.utils.hpo import build_optimizer, build_scheduler
 
 from .test_prepare import _make_workspace
@@ -82,7 +86,7 @@ def test_cached_accumulated_gradients_match_full_batch(
     accelerator = Accelerator(
         cpu=True, mixed_precision="no", gradient_accumulation_steps=accumulation_steps
     )
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             batch_size=batch_size,
             accumulation_steps=accumulation_steps,
@@ -127,7 +131,7 @@ def test_cached_accumulated_gradients_match_full_batch(
 
     monkeypatch.setattr(accelerator, "clip_grad_norm_", record_gradients)
 
-    step._train(
+    trainer.train(
         MagicMock(task_type="sequence_classification", num_labels=2),
         prepared,
         accelerator,
@@ -154,7 +158,7 @@ def test_batch_search_rejects_empty_or_nonpositive_batches(batch_sizes):
 
 @pytest.mark.parametrize("pattern", ["grid", "random"])
 def test_batch_and_width_candidates_cover_the_joint_space(pattern):
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             hyperparameter_search=_search(
                 pattern, batch_sizes=_BATCH_SIZES, widths=[3, 5]
@@ -162,13 +166,23 @@ def test_batch_and_width_candidates_cover_the_joint_space(pattern):
         )
     )
 
-    candidates = step._generate_candidates(pattern, n_trials=10, seed=42)
+    candidates = generate_candidates(
+        trainer.config.hyperparameter_search.search_space,
+        pattern,
+        n_trials=10,
+        seed=42,
+    )
 
     assert len(candidates) == 10
     assert {(item["hidden_size"], item["batch_size"]) for item in candidates} == {
         (width, batch) for width in [3, 5] for batch in _BATCH_SIZES
     }
-    assert candidates == step._generate_candidates(pattern, n_trials=10, seed=42)
+    assert candidates == generate_candidates(
+        trainer.config.hyperparameter_search.search_space,
+        pattern,
+        n_trials=10,
+        seed=42,
+    )
 
 
 @pytest.mark.parametrize("pattern", ["random", "bohb"])
@@ -177,7 +191,7 @@ def test_limited_search_covers_every_batch_size_and_width(
 ):
     if pattern == "bohb":
         pytest.importorskip("optuna")
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             head=HeadConfig(head_type="mlp", hidden_size=4),
             hyperparameter_search=_search(
@@ -192,9 +206,10 @@ def test_limited_search_covers_every_batch_size_and_width(
         candidates.append(dict(hparams))
         return float(hparams["batch_size"])
 
-    monkeypatch.setattr(step, "_train", train)
+    monkeypatch.setattr(trainer, "train", train)
 
-    step.run(
+    fit_probe_protocol(
+        trainer,
         _make_workspace(tmp_path, "sequence_classification"),
         _prepared(train_rows=4, val_rows=4),
         accelerator=Accelerator(cpu=True),
@@ -212,7 +227,7 @@ def test_trial_batch_size_controls_training_validation_and_scheduler(
 ):
     prepared = _prepared()
     accelerator = Accelerator(cpu=True, gradient_accumulation_steps=3)
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             batch_size=3,
             accumulation_steps=3,
@@ -237,9 +252,11 @@ def test_trial_batch_size_controls_training_validation_and_scheduler(
     scheduler = MagicMock(wraps=build_scheduler)
     monkeypatch.setattr(prepared.model, "forward", record_forward)
     monkeypatch.setattr(
-        "modules.evaluate.src.steps.tune.build_optimizer", track_optimizer
+        "modules.evaluate.src.training.torch_trainer.build_optimizer", track_optimizer
     )
-    monkeypatch.setattr("modules.evaluate.src.steps.tune.build_scheduler", scheduler)
+    monkeypatch.setattr(
+        "modules.evaluate.src.training.torch_trainer.build_scheduler", scheduler
+    )
     hparams = {
         "learning_rate": 1e-3,
         "weight_decay": 0.0,
@@ -247,7 +264,7 @@ def test_trial_batch_size_controls_training_validation_and_scheduler(
         "batch_size": batch_size,
     }
 
-    score = step._train(
+    score = trainer.train(
         MagicMock(task_type="sequence_classification", num_labels=2),
         prepared,
         accelerator,
@@ -274,7 +291,9 @@ def test_fixed_batch_monitor_keeps_validation_loader_inheritance(
 ):
     prepared = _prepared(train_rows=11, val_rows=13)
     prepared.val_dataloader = DataLoader(prepared.val_dataloader.dataset, batch_size=5)
-    step = TuneStep(TuneConfig(batch_size=batch_size, save_best_model=False))
+    trainer = TorchProbeTrainer(
+        TuneConfig(batch_size=batch_size, save_best_model=False)
+    )
     minibatches = {"train": [], "validation": []}
     forward = prepared.model.forward
 
@@ -285,7 +304,7 @@ def test_fixed_batch_monitor_keeps_validation_loader_inheritance(
 
     monkeypatch.setattr(prepared.model, "forward", record_forward)
 
-    step._train(
+    trainer.train(
         MagicMock(task_type="sequence_classification", num_labels=2),
         prepared,
         Accelerator(cpu=True),
@@ -302,7 +321,7 @@ def test_batch_search_preserves_winner_for_fallback_validation_variance_and_savi
 ):
     if pattern == "bohb":
         pytest.importorskip("optuna")
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             head=HeadConfig(head_type="mlp", hidden_size=4),
             batch_size=3,
@@ -331,7 +350,6 @@ def test_batch_search_preserves_winner_for_fallback_validation_variance_and_savi
             }
         )
         # No epoch-level score: HPO must use its fallback validation path.
-        return None
 
     def validate(
         workspace, artifacts, accelerator, metric_name, *, batch_size=None, **kwargs
@@ -341,16 +359,19 @@ def test_batch_search_preserves_winner_for_fallback_validation_variance_and_savi
         validations.append(batch_size)
         return current["batch_size"] + current["hidden_size"] / 100
 
-    monkeypatch.setattr(step, "_train", train)
-    monkeypatch.setattr(step, "_evaluate_validation", validate)
+    monkeypatch.setattr(trainer, "train", train)
+    monkeypatch.setattr(trainer, "evaluate_validation", validate)
 
-    result = step.run(workspace, prepared, seed=42, accelerator=Accelerator(cpu=True))
+    result = fit_probe_protocol(
+        trainer, workspace, prepared, seed=42, accelerator=Accelerator(cpu=True)
+    )
 
     search_trials = trials[:4]
     best = max(
         search_trials,
-        key=lambda trial: trial["hparams"]["batch_size"]
-        + trial["hparams"]["hidden_size"] / 100,
+        key=lambda trial: (
+            trial["hparams"]["batch_size"] + trial["hparams"]["hidden_size"] / 100
+        ),
     )
     assert len(trials) == 6
     assert len(validations) == 6
@@ -382,20 +403,21 @@ def test_batch_search_rejects_unsupported_probe_paths(tmp_path, unsupported):
         prepared.train_dataloader = DataLoader([{"labels": 0}], batch_size=1)
     elif unsupported == "layerwise":
         prepared.model = MagicMock(spec=LayerwiseProbeModel)
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             head=HeadConfig(
                 head_type="torch_linear" if unsupported == "torch_linear" else "mlp"
             ),
             hyperparameter_search=_search("grid", batch_sizes=[8, 16]),
         ),
-        mode="finetune" if unsupported == "finetune" else "tune_probe",
+        train_trunk=unsupported == "finetune",
     )
 
     with pytest.raises(
         ValueError, match="batch_size search requires a cached MLP probe"
     ):
-        step.run(
+        fit_probe_protocol(
+            trainer,
             _make_workspace(tmp_path, "sequence_classification"),
             prepared,
             accelerator=Accelerator(cpu=True),
@@ -407,7 +429,7 @@ def test_disabled_batch_search_keeps_fixed_training_configuration(
 ):
     search = _search("grid", batch_sizes=_BATCH_SIZES)
     search.enabled = False
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             head=HeadConfig(head_type="mlp", hidden_size=4),
             batch_size=32,
@@ -416,16 +438,17 @@ def test_disabled_batch_search_keeps_fixed_training_configuration(
         )
     )
     train = MagicMock()
-    monkeypatch.setattr(step, "_train", train)
+    monkeypatch.setattr(trainer, "train", train)
 
-    step.run(
+    fit_probe_protocol(
+        trainer,
         _make_workspace(tmp_path, "sequence_classification"),
         _prepared(train_rows=4, val_rows=4),
         accelerator=Accelerator(cpu=True),
     )
 
     assert "batch_size" not in train.call_args.args[3]
-    assert step.config.batch_size == 32
+    assert trainer.config.batch_size == 32
 
 
 def test_default_mlp_enables_requested_batch_size_choices():

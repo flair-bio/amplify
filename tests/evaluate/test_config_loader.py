@@ -4,12 +4,16 @@ from pathlib import Path
 
 import pytest
 
-from modules.core.utils.config_loader import load_and_parse
 from modules.evaluate.src.config import EvaluationConfig
-from modules.evaluate.src.steps.tune import HyperparameterSearchConfig
+from modules.evaluate.src.training.config import HyperparameterSearchConfig
+from modules.evaluate.src.utils.config_loader import (
+    load_and_parse_evaluation as load_and_parse,
+)
 from modules.evaluate.src.utils.config_loader import load_evaluation_config
 
 CONFIGS = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
+# Hub CASP contact data must be pinned to a full commit SHA (plan: contact pins).
+CASP_PIN = f"dataset.revision={'a' * 40}"
 
 # Representative dataset -> task pairings (what a suite supplies explicitly).
 TASK_FOR_DATASET = {
@@ -69,7 +73,9 @@ def test_legacy_bohb_search_pattern_is_accepted_as_tpe():
     assert legacy.engine_pattern == "bohb"
     current = HyperparameterSearchConfig(enabled=True, search_pattern="tpe")
     assert current.engine_pattern == "bohb"
-    assert HyperparameterSearchConfig(search_pattern="random").engine_pattern == "random"
+    assert (
+        HyperparameterSearchConfig(search_pattern="random").engine_pattern == "random"
+    )
 
 
 @pytest.mark.parametrize(
@@ -108,7 +114,7 @@ def test_contact_rejects_unsupported_heads(head, error):
     with pytest.raises(ValueError, match=error):
         load_evaluation_config(
             overlays("contact_prediction_casp"),
-            overrides=[f"steps.tune.head.head_type={head}"],
+            overrides=[f"steps.tune.head.head_type={head}", CASP_PIN],
         )
 
 
@@ -124,8 +130,10 @@ def test_contact_predictors_cannot_be_used_for_other_tasks(predictor):
 
 def test_contact_predictor_overlay_keeps_task_default_and_cli_precedence():
     config = load_evaluation_config(
-        overlays("contact_prediction_casp", CONFIGS / "predictors/contact_embedding.yaml"),
-        overrides=["steps.tune.max_epochs=25"],
+        overlays(
+            "contact_prediction_casp", CONFIGS / "predictors/contact_embedding.yaml"
+        ),
+        overrides=["steps.tune.max_epochs=25", CASP_PIN],
     )
     assert config.workspace.task_type == "contact_prediction"
     assert config.steps.tune.head.head_type == "bilinear512"
@@ -134,7 +142,10 @@ def test_contact_predictor_overlay_keeps_task_default_and_cli_precedence():
 
 def test_contact_attention_preset_selects_fixed_predictor():
     config = load_evaluation_config(
-        overlays("contact_prediction_casp", CONFIGS / "predictors/contact_attention.yaml")
+        overlays(
+            "contact_prediction_casp", CONFIGS / "predictors/contact_attention.yaml"
+        ),
+        overrides=[CASP_PIN],
     )
     assert config.workspace.task_type == "contact_prediction"
     assert config.steps.tune.head.head_type == "attention_l1"
@@ -144,7 +155,10 @@ def test_contact_attention_preset_selects_fixed_predictor():
 
 def test_contact_jacobian_preset_selects_zero_shot_predictor():
     config = load_evaluation_config(
-        overlays("contact_prediction_casp", CONFIGS / "predictors/contact_jacobian.yaml")
+        overlays(
+            "contact_prediction_casp", CONFIGS / "predictors/contact_jacobian.yaml"
+        ),
+        overrides=[CASP_PIN],
     )
     assert config.workspace.task_type == "contact_prediction"
     assert config.steps.tune.head.head_type == "categorical_jacobian"
@@ -197,7 +211,10 @@ def test_zero_shot_tasks_disable_default_training(task, dataset):
 
 def test_contact_probe_does_not_inherit_cached_mlp_search():
     config = load_evaluation_config(
-        overlays("contact_prediction_casp", CONFIGS / "predictors/contact_embedding.yaml")
+        overlays(
+            "contact_prediction_casp", CONFIGS / "predictors/contact_embedding.yaml"
+        ),
+        overrides=[CASP_PIN],
     )
     assert config.steps.tune.head.head_type == "bilinear512"
     assert config.steps.mode == "tune_probe"
@@ -229,9 +246,16 @@ def test_explicit_task_and_dataset_compose_to_validated_config(dataset):
         else []
     )
     paths = overlays(dataset, *extra)
-    config = load_evaluation_config(paths)
+    # Hub CASP contact data must be pinned; the same overrides apply to both loaders.
+    overrides = (
+        [CASP_PIN] if TASK_FOR_DATASET[dataset] == "contact_prediction" else None
+    )
+    config = load_evaluation_config(paths, overrides=overrides)
     assert config.workspace.task_type == TASK_FOR_DATASET[dataset]
-    assert config.model_dump() == load_and_parse(paths, EvaluationConfig).model_dump()
+    assert (
+        config.model_dump()
+        == load_and_parse(paths, EvaluationConfig, overrides=overrides).model_dump()
+    )
 
 
 @pytest.mark.parametrize(
@@ -257,7 +281,8 @@ def test_task_control_defaults(task, dataset, controls):
                 if task == "contact_prediction"
                 else []
             ),
-        ]
+        ],
+        overrides=[CASP_PIN] if task == "contact_prediction" else None,
     )
     assert config.steps.predict.controls == controls
     expected_baselines = {

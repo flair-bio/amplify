@@ -1,16 +1,15 @@
-workspace:
-  dataset_name: meltome_human
-  dataset_repo_id: flair-bio/meltome_human
+dataset:
+  name: meltome_human
+  repo_id: flair-bio/meltome_human
   target_type: continuous
   label_format: scalar
   num_labels: null
 
-steps:
-  tune:
-    hyperparameter_search:
-      metric: spearmanr
-      direction: maximize
-  score:
-    metrics: [spearmanr]
-  predict:
-    controls: [random_trunk]
+training:
+  hyperparameter_search:
+    metric: spearmanr
+    direction: maximize
+scoring:
+  metrics: [spearmanr]
+prediction:
+  controls: [random_trunk]

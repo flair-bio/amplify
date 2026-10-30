@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from torch.utils.data import DataLoader, Sampler
 from transformers import PreTrainedTokenizerBase
 
+from modules.evaluate.src.artifacts.identity import validate_identity_label
 from modules.evaluate.src.dataset.collator import EvaluationCollator
 from modules.evaluate.src.tasks import TaskType, get_task
 from modules.evaluate.src.tasks.contact_prediction import (
@@ -64,7 +65,13 @@ class ExternalTestSetConfig(BaseModel):
         description="Filesystem-safe label used for this test set's outputs.",
     )
     dataset_repo_id: str = Field(..., min_length=1)
+    # Immutable commit SHA for Hub sources; unused for local data.
+    dataset_revision: str | None = None
+    # Named view of a shared repo (HF builder config / local subdirectory).
+    dataset_subset: str | None = None
     split: str = Field("test", min_length=1)
+    # Relative directory under --data-root (defaults to the repo name's tail).
+    local_path: str | None = None
 
 
 class DatasetSplitConfig(BaseModel):
@@ -369,23 +376,34 @@ def load_raw_evaluation_dataset(
     dataset_repo_id: str | Path,
     *,
     revision: str | None = None,
+    subset: str | None = None,
     cache_dir: str | Path | None = None,
 ) -> DatasetDict:
-    """Load every source split as-is, without role mapping or synthesized splits."""
+    """Load every source split as-is, without role mapping or synthesized splits.
+
+    ``subset`` selects one named view of a multi-subset repository: a
+    subdirectory ``<root>/<subset>/data/`` for local data, or the HF builder
+    config ``name`` for Hub data.
+    """
     kwargs: dict[str, Any] = {}
     if cache_dir is not None:
         kwargs["cache_dir"] = str(cache_dir)
+    if subset is not None:
+        validate_identity_label(subset, "Dataset subset")
     path = Path(dataset_repo_id)
+    local_root = path if subset is None else path / subset
     files = (
         {
             split: sorted(
-                str(file) for file in (path / "data").glob(f"{split}-*.parquet")
+                str(file) for file in (local_root / "data").glob(f"{split}-*.parquet")
             )
             for split in ("train", "validation", "test")
         }
         if path.is_dir()
         else {}
     )
+    if subset is not None and path.is_dir() and not local_root.is_dir():
+        raise FileNotFoundError(f"Dataset subset {subset!r} not found under {path}")
     if files and all(files.values()):
         if revision is not None:
             raise ValueError("revision applies only to Hub datasets")
@@ -397,6 +415,8 @@ def load_raw_evaluation_dataset(
             raise FileNotFoundError(path)
         if revision is not None:
             kwargs["revision"] = revision
+        if subset is not None:
+            kwargs["name"] = subset
         dataset = load_dataset(str(dataset_repo_id), **kwargs)
     if not isinstance(dataset, DatasetDict):
         raise ValueError(
@@ -445,18 +465,19 @@ def load_evaluation_dataset(
     split: DatasetSplitConfig | None = None,
     *,
     revision: str | None = None,
+    subset: str | None = None,
 ) -> DatasetDict:
     """Load the configured evaluation and final-refit splits from the Hub.
 
     If the loaded dataset has no ``validation`` split, one is synthesized
     from ``train`` (see :func:`ensure_validation_split`).
     """
-    dataset = (
-        load_raw_evaluation_dataset(dataset_repo_id, revision=revision)
-        if revision is not None
-        else load_raw_evaluation_dataset(dataset_repo_id)
+    dataset = load_raw_evaluation_dataset(
+        dataset_repo_id, revision=revision, subset=subset
     )
     if any("positive_pairs" in data.column_names for data in dataset.values()):
+        if subset is not None:
+            raise ValueError("CASP contact data does not support dataset subsets")
         if not Path(dataset_repo_id).is_dir() and (
             revision is None or re.fullmatch(r"[0-9a-fA-F]{40}", revision) is None
         ):
@@ -572,6 +593,7 @@ def tokenize_dataset(
         attention_mask_batch: list[list[int]] = []
         labels_batch: list[Any] = []
         ids_batch: list[Any] = []
+        positions_batch: list[list[int]] = []
         emit_ids = False
 
         for i, residue_ids in enumerate(residue_ids_batch):
@@ -622,7 +644,19 @@ def tokenize_dataset(
                 input_ids_batch.append(row["input_ids"])
                 attention_mask_batch.append(row["attention_mask"])
                 labels_batch.append(row["label"])
+                if task_type == "token_classification":
+                    positions_batch.append(
+                        [
+                            start + position
+                            for position, value in enumerate(
+                                label[offset : offset + len(residue_ids)]
+                            )
+                            if value != -100
+                        ]
+                    )
                 row_id = row.get("id", original_id)
+                if row_id is None and task_type == "token_classification":
+                    row_id = indices[i]
                 if row_id is not None:
                     emit_ids = True
                     ids_batch.append(row_id)
@@ -636,6 +670,8 @@ def tokenize_dataset(
         }
         if emit_ids:
             output[id_column] = ids_batch
+        if task_type == "token_classification":
+            output["evaluated_positions"] = positions_batch
 
         return output
 

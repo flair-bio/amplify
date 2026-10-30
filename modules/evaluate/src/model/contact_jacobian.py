@@ -228,6 +228,10 @@ def build_contact_jacobian_model(
     tokenizer: PreTrainedTokenizerBase,
     *,
     mutant_batch_size: int = MUTANT_BATCH_SIZE,
+    revision: str | None = None,
 ) -> ContactJacobianModel:
-    trunk = AutoModelForMaskedLM.from_pretrained(model_id, trust_remote_code=True)
+    revision_kwargs = {} if revision is None else {"revision": revision}
+    trunk = AutoModelForMaskedLM.from_pretrained(
+        model_id, trust_remote_code=True, **revision_kwargs
+    )
     return ContactJacobianModel(trunk, tokenizer, mutant_batch_size=mutant_batch_size)

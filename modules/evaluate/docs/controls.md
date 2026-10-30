@@ -22,47 +22,116 @@ steps.predict.controls → Predict: build each control's predictions
 
 - Predict writes model controls next to `predictions.parquet`.
   `scrambled_labels` needs no inference and has no file.
-- Sequence `majority_class` and `train_mean` run separately with
-  `run_evaluate.py --baselines`. Score loads their shared artifacts; model
-  evaluations never generate them.   Token majority still runs inside Predict. CASP contact controls are not yet
-  integrated with the contact-specific inference and scoring path.
+- Shared `majority_class` and `train_mean` are generated and scored by a separate
+  baseline run (`--suite <suite> --baselines`). Model evaluation never requires
+  these artifacts. Token majority is also a shared train-only baseline.
+  CASP contact controls are not yet integrated with the
+  contact-specific inference and scoring path.
 - Model-control predictions are rebuilt from the current head; only
   frozen-trunk embeddings are reused through the embedding cache.
 - Comparisons only exist when `steps.score.bootstrap_enabled=true`. The
   base config enables it; the schema default is `false`. Without it,
-  controls are predicted but never scored.
+  controls receive point scores but no paired uncertainty/significance results.
 
 ### Shared sequence baselines
 
 Generate dataset-level artifacts once, without a model overlay or accelerator
-launch:
+launch. `--baselines` selects every job of the suite whose task declares shared
+baselines:
 
 ```bash
-uv run python -m modules.evaluate.src.run_evaluate --baselines \
-  modules/evaluate/configs/config.yaml \
-  modules/evaluate/configs/datasets/solubility_prediction.yaml
+uv run python -m modules.evaluate.src.run_evaluate \
+  --suite sequence_classification --baselines \
+  --output-root /path/to/eval
 ```
 
-Then run the normal model evaluation with the same dataset/split settings and
-`workspace.base_path`. Task presets select `baselines.names=[majority_class]`
-for sequence classification and `[train_mean]` for sequence regression.
-`baselines.names=[]` disables shared comparisons independently of model controls.
+Run model evaluation and baseline evaluation in either order with the same
+dataset/split settings and `runtime.output_root` (`--output-root`). Task presets
+select `baselines.names=[majority_class]` for sequence/token classification and
+`[train_mean]` for sequence regression. These names select generation defaults,
+not implicit comparisons. Model runs save provenance even with `baselines.names=[]`.
 The baseline route ignores model/tuning settings and uses train-only labels,
 never validation or final-refit-only data. External test predictions use the
 same source training prior.
 
-Artifacts live under `<base_path>/baselines/<name>/<fit-hash>/tests/<test-hash>/`.
+Artifacts live under
+`<output-root>/<task>/<dataset>/baselines/<name>/protocol-<hash>/fit-<hash>/test-<hash>/`.
 Identity includes actual sequence/ID/label content, source split mappings, and
 the task/class contract. Completed artifacts are reused; inconsistent or
 corrupt files fail explicitly. Scoring checks IDs, labels, and observation
-counts, retaining repeated observations. The run manifest records artifact
-references and baseline point scores even without bootstrap comparisons.
+counts, retaining repeated sequence observations. Token comparisons require unique
+source IDs and match original evaluated residue positions/masks, including cropping
+and ignored labels (`-100`). Baseline predictions cover all valid test residues;
+comparison scores are recomputed on the model's evaluated population, not copied
+from full-population standalone scores. Standalone baseline score reports live in
+`scores/<metric-protocol-hash>.json` beside their predictions.
 Constant-prediction Spearman is NaN; undefined paired comparisons are omitted.
 
-Missing artifacts are an error with instructions to run `--baselines`, not an
-automatic baseline job. CV and shared token/contact baselines are not supported
-by this route yet; use `baselines.names=[]` for CV. Existing token/contact
-controls are unchanged. Composition and MMseqs remain unimplemented.
+### Disk-only rescoring, comparison and recovery
+
+Generate missing baselines for **every** token dataset in the suite, not just
+datasets whose model jobs failed:
+
+```bash
+uv run python -m modules.evaluate.src.run_evaluate \
+  --suite token_classification --baselines --output-root /path/to/eval
+
+# Rescore saved predictions without loading a model or running inference.
+uv run python -m modules.evaluate.src.run_score \
+  --manifest /path/to/model/run_manifest.json
+
+# Explicitly select conditions, regardless of the run's original baselines.names.
+uv run python -m modules.evaluate.src.run_score \
+  --manifest /path/to/model/run_manifest.json \
+  --baseline majority_class --control random_trunk
+```
+
+Comparison outputs are separate under the model run's `comparisons/<protocol-hash>/`.
+Missing/incompatible baselines fail only this explicit stage; standalone model
+scores remain intact. Repeat `--baseline`/`--control` to select more conditions;
+unselected saved controls are excluded. Both stages accept `--score-config FILE`
+(a `ScoreConfig` JSON object) to change metrics or enable bootstrap/significance.
+
+For older failed runs, first rescore their saved predictions. Add
+`--recover-context` when comparing if provenance or token coordinates are missing.
+Recovery loads the **producing run's saved evaluation config**, original data and
+pinned tokenizer to reconstruct its exact crop/mask population; it does not train
+or perform model inference, nor rewrite prediction files. Changed fingerprints,
+ambiguous IDs or unmatched populations are rejected. Never infer residue coordinates
+from matching labels alone. Recovery requires the original datasets and configuration
+to remain available. Standalone rescoring needs neither baselines nor token coordinates.
+
+Available shared sequence/token baselines (multilabel classification is unsupported):
+
+| Name | Tasks | Protocol (version 1, identity-bound) |
+| --- | --- | --- |
+| `majority_class` | sequence/token classification | Most frequent valid training label; ignored residues excluded (default for classification) |
+| `train_mean` | regression | Training-label mean (default for regression) |
+| `composition` | classification, regression | Normalized frequencies over 20 canonical amino acids; ambiguous residues excluded from the denominator. Classification: `LogisticRegression(C=1.0, lbfgs, max_iter=1000)`; regression: `Ridge(alpha=1.0)`. Preset `baselines/composition.yaml`. |
+| `mmseqs_knn` | classification, regression | MMseqs2 search against the training split (sensitivity 7.5, e-value 1e-3, max 300 hits, k=5). Classification votes are bit-weighted, with the training-label prior used when there is no hit; regression is a bit-weighted mean, with the training mean as fallback. Requires `mmseqs` on `PATH`. Preset `baselines/mmseqs_knn.yaml`. |
+
+Each protocol dict is part of the artifact identity. Changing a setting
+(e.g., `C`) creates a new `protocol-<hash>` directory. Artifacts from before
+this identity change live at the old paths and are **not** adopted: run
+`--baselines` again to create the protocol-bound artifacts.
+
+The AA-frequency and contact separation-prior estimators are wired into the
+baseline-only route (`--baselines`, see below). The contact protocol is
+`separation_prior`; the PPL protocol is `amino_acid_frequency`.
+
+### Structural baselines (approved conservative defaults)
+
+| Name | Task | Protocol |
+| --- | --- | --- |
+| `separation_prior` | `contact_prediction` | Residue-pair contact rate per original separation, fit on the **train** split's labelled CASP chains. Canonical pair IDs (clean sequence, original `i`, `j`) are de-duplicated; only pairs at separation ≥ 6 count (`MIN_SEPARATION`); Laplace smoothing over the eligible separations; unseen separations fall back to the smoothed global rate. Scored on the test split with the CASP metrics. |
+| `amino_acid_frequency` | `pseudo_perplexity` | Multinomial over the 20 canonical amino acids, Laplace(1), ambiguous/non-canonical residues excluded. Fit on a **declared public train-only reference corpus** (`baselines.amino_acid_reference` in `configs/tasks/pseudo_perplexity.yaml`: `flair-bio/contact_prediction_casp`, split `train`, pinned SHA `258a928…`). Never the PPL test split. PPL = exp(-mean log p) per residue. Baseline-only; not row-aligned to model predictions. |
+
+Limitations: the reference corpus is small (the CASP train structures, not a
+large UniRef-scale sample), so the amino-acid frequency prior is a weak
+reference. Structural baselines exist only as `--baselines` artifacts; the
+contact separation prior is never a model control. Both are unavailable (with
+an explicit error) when their inputs cannot be resolved; nothing falls back to
+test data.
 
 ## Catalog
 
@@ -140,9 +209,10 @@ Each task config ships a preset; override it with `steps.predict.controls`
 `random_trunk` is the per-model default. Other controls remain available by
 explicit override where supported. Shared sequence baselines run once per
 dataset/split/protocol with `--baselines`; token majority computes per run.
-Composition, MMseqs k-NN,
-multilabel priors, and amino-acid-frequency baselines are not configured
-because they are not implemented.
+Composition and MMseqs k-NN are available as opt-in sequence presets (see
+above). Multilabel priors and token baselines are not wired. The contact
+separation prior and pseudo-perplexity amino-acid frequency are baseline-only
+(see Structural baselines).
 
 Config validation ([`utils/config_validation.py`](../src/utils/config_validation.py))
 rejects these combinations before any work starts:

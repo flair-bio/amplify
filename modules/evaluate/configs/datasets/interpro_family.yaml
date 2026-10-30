@@ -1,6 +1,6 @@
-workspace:
-  dataset_name: interpro_family
-  dataset_repo_id: flair-bio/interpro_family
+dataset:
+  name: interpro_family
+  repo_id: flair-bio/interpro_family
   target_type: categorical
   label_format: multilabel
   num_labels: 9

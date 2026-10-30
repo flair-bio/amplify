@@ -1,4 +1,4 @@
-"""Tests for modules.evaluate.src.steps.score.ScoreStep.
+"""Tests for modules.evaluate.src.scoring.run (score_predictions, compare_layers).
 
 Builds ``PreparedArtifacts``/``PredictOutput`` from the tiny, offline
 ``model_family`` fixtures (tests/evaluate/conftest.py), so these tests
@@ -24,6 +24,8 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
+from modules.evaluate.src.config.predict import PredictConfig
+from modules.evaluate.src.config.score import ScoreConfig
 from modules.evaluate.src.dataset.collator import (
     EvaluationCollator,
     EvaluationCollatorConfig,
@@ -43,13 +45,13 @@ from modules.evaluate.src.metrics.metrics import (
     multilabel_mcc,
     roc_auc,
 )
+from modules.evaluate.src.predictors.inference import predict_trained
 from modules.evaluate.src.schemas.artifacts import (
     EvaluationMetadata,
     PredictOutput,
     PreparedArtifacts,
 )
-from modules.evaluate.src.steps.predict import PredictConfig, PredictStep
-from modules.evaluate.src.steps.score import ScoreConfig, ScoreStep
+from modules.evaluate.src.scoring.run import compare_layers, score_predictions
 from modules.evaluate.src.tasks import get_task
 from modules.evaluate.src.utils.bootstrap import (
     as_indexable_array,
@@ -142,15 +144,17 @@ def test_score_and_bootstrap_keep_classes_missing_from_test_split(tmp_path, num_
         controls={"untrained": pl.DataFrame({"id": ["a", "b"], "prediction": values})},
         requested_controls=["untrained"],
     )
-    result = ScoreStep(
+    result = score_predictions(
         ScoreConfig(
             metrics=["f1"],
             metric_aggregation="macro",
             bootstrap_enabled=True,
             n_samples=8,
             n_permutations=8,
-        )
-    ).run(workspace, predict_result=output)
+        ),
+        workspace,
+        predict_result=output,
+    )
     assert result.scores["f1"] == pytest.approx(1 / num_labels)
     assert result.resamples["f1"].to_list() == pytest.approx([1 / num_labels] * 8)
     comparison = result.control_comparisons["untrained"]["f1"]
@@ -164,7 +168,7 @@ def test_score_and_bootstrap_keep_classes_missing_from_test_split(tmp_path, num_
 def test_token_confusion_bootstrap_preserves_results(
     tmp_path, monkeypatch, average, cached_rows
 ):
-    from modules.evaluate.src.steps import score as score_module
+    from modules.evaluate.src.scoring import compute as score_module
     from modules.evaluate.src.utils import bootstrap as bootstrap_module
 
     rng = np.random.default_rng(42)
@@ -212,16 +216,15 @@ def test_token_confusion_bootstrap_preserves_results(
             )
         )
         workspace.setup_directories()
-        step = ScoreStep(config)
-        result = step.run(workspace, seed=123, predict_result=output)
+        result = score_predictions(config, workspace, seed=123, predict_result=output)
         other_layer = PredictOutput(
             metadata=output.metadata,
             predictions=output.predictions.with_columns(
                 pl.Series("prediction", controls)
             ),
         )
-        comparison_path = step.compare_layers(
-            workspace, {0: output, 2: other_layer}, seed=123
+        comparison_path = compare_layers(
+            config, workspace, {0: output, 2: other_layer}, seed=123
         )
         return result, pl.read_parquet(comparison_path)
 
@@ -836,16 +839,18 @@ class TestScoreConfig:
         assert cfg.confidence_interval == 0.95
 
     def test_extra_fields_forbidden(self):
-        with pytest.raises(Exception):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
             ScoreConfig(not_a_real_field=1)
 
 
 # ---------------------------------------------------------------------------
-# ScoreStep.run — point-estimate metrics (offline, tiny real models)
+# score_predictions — point-estimate metrics (offline, tiny real models)
 # ---------------------------------------------------------------------------
 
 
-class TestScoreStepMetrics:
+class TestScoreMetrics:
     @pytest.mark.parametrize(
         ("task_type", "expected_metrics"),
         [
@@ -862,26 +867,30 @@ class TestScoreStepMetrics:
     ):
         prepared = _build_prepared_artifacts(model_family, task_type)
         workspace = _make_workspace(tmp_path, task_type)
-        PredictStep(
+        predict_trained(
+            workspace,
+            prepared,
             PredictConfig(
                 controls=[],
                 collect_probabilities=(task_type == "sequence_classification"),
-            )
-        ).run(workspace, prepared)
+            ),
+        )
 
-        result = ScoreStep(ScoreConfig()).run(workspace)
+        result = score_predictions(ScoreConfig(), workspace)
 
         assert set(result.scores) == expected_metrics
 
     def test_sequence_classification_writes_scores(self, tmp_path, model_family):
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
-        PredictStep(PredictConfig(collect_probabilities=True, controls=[])).run(
-            workspace, prepared
+        predict_trained(
+            workspace,
+            prepared,
+            PredictConfig(collect_probabilities=True, controls=[]),
         )
 
         config = ScoreConfig(metrics=["accuracy", "f1", "roc_auc"])
-        result = ScoreStep(config).run(workspace)
+        result = score_predictions(config, workspace)
 
         assert set(result.scores) == {"accuracy", "f1", "roc_auc"}
         assert all(0.0 <= v <= 1.0 for v in result.scores.values())
@@ -902,9 +911,9 @@ class TestScoreStepMetrics:
     ):
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
-        PredictStep(PredictConfig(controls=[])).run(workspace, prepared)
+        predict_trained(workspace, prepared, PredictConfig(controls=[]))
 
-        ScoreStep(ScoreConfig(metrics=["accuracy"])).run(workspace)
+        score_predictions(ScoreConfig(metrics=["accuracy"]), workspace)
 
         manifest = json.loads(workspace.run_manifest_path.read_text())
         assert set(manifest) == {"predict", "score"}
@@ -916,14 +925,14 @@ class TestScoreStepMetrics:
     ):
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
-        predicted = PredictStep(PredictConfig(controls=[], persist_to_disk=False)).run(
-            workspace, prepared
+        predicted = predict_trained(
+            workspace, prepared, PredictConfig(controls=[], persist_to_disk=False)
         )
 
         assert predicted.predictions_path is None
         assert not workspace.run_manifest_path.exists()
-        result = ScoreStep(ScoreConfig(metrics=["accuracy"])).run(
-            workspace, predict_result=predicted
+        result = score_predictions(
+            ScoreConfig(metrics=["accuracy"]), workspace, predict_result=predicted
         )
 
         assert set(result.scores) == {"accuracy"}
@@ -933,20 +942,20 @@ class TestScoreStepMetrics:
     ):
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
-        PredictStep(PredictConfig(controls=[])).run(workspace, prepared)
+        predict_trained(workspace, prepared, PredictConfig(controls=[]))
 
         config = ScoreConfig(metrics=["precision"])
         with pytest.raises(KeyError):
-            ScoreStep(config).run(workspace)
+            score_predictions(config, workspace)
 
     def test_token_classification_flattens_valid_positions(
         self, tmp_path, model_family
     ):
         prepared = _build_prepared_artifacts(model_family, "token_classification")
         workspace = _make_workspace(tmp_path, "token_classification")
-        PredictStep(PredictConfig(controls=[])).run(workspace, prepared)
+        predict_trained(workspace, prepared, PredictConfig(controls=[]))
 
-        result = ScoreStep(ScoreConfig()).run(workspace)
+        result = score_predictions(ScoreConfig(), workspace)
 
         assert set(result.scores) == {"accuracy", "f1", "precision", "recall", "mcc"}
         assert -1.0 <= result.scores["mcc"] <= 1.0
@@ -962,19 +971,19 @@ class TestScoreStepMetrics:
             model_family, "sequence_regression", num_labels=1
         )
         workspace = _make_workspace(tmp_path, "sequence_regression")
-        PredictStep(PredictConfig(controls=[])).run(workspace, prepared)
+        predict_trained(workspace, prepared, PredictConfig(controls=[]))
 
         config = ScoreConfig(metrics=["mse", "r2", "pearsonr", "spearmanr"])
-        result = ScoreStep(config).run(workspace)
+        result = score_predictions(config, workspace)
 
         assert set(result.scores) == {"mse", "r2", "pearsonr", "spearmanr"}
 
     def test_requires_predictions(self, tmp_path, model_family):
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
-        predicted = PredictStep(PredictConfig(controls=[])).run(workspace, prepared)
+        predicted = predict_trained(workspace, prepared, PredictConfig(controls=[]))
         assert predicted.predictions_path is not None
-        # Simulate PredictStep having produced no predictions, by overwriting
+        # Simulate predict_trained having produced no predictions, by overwriting
         # the just-written parquet with an empty frame of the same schema.
         write_parquet(
             pl.DataFrame(schema=predicted.predictions.schema),
@@ -982,15 +991,15 @@ class TestScoreStepMetrics:
         )
 
         with pytest.raises(ValueError, match="predictions"):
-            ScoreStep(ScoreConfig()).run(workspace)
+            score_predictions(ScoreConfig(), workspace)
 
 
 # ---------------------------------------------------------------------------
-# ScoreStep.run — bootstrap confidence intervals / control comparisons
+# score_predictions — bootstrap confidence intervals / control comparisons
 # ---------------------------------------------------------------------------
 
 
-class TestScoreStepBootstrap:
+class TestScoreBootstrap:
     def test_all_degenerate_bootstrap_resamples_do_not_abort(self):
         interval = ci_stats(np.array([np.nan, np.nan]), 0.025, 0.975)
 
@@ -999,12 +1008,12 @@ class TestScoreStepBootstrap:
     def test_bootstrap_disabled_by_default(self, tmp_path, model_family):
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
-        prediction = PredictStep(PredictConfig(controls=["random_trunk"])).run(
-            workspace, prepared
+        prediction = predict_trained(
+            workspace, prepared, PredictConfig(controls=["random_trunk"])
         )
 
-        step = ScoreStep(ScoreConfig(metrics=["accuracy", "f1"]))
-        result = step.run(workspace)
+        config = ScoreConfig(metrics=["accuracy", "f1"])
+        result = score_predictions(config, workspace)
         condition_path = workspace.run_root / "condition_scores.parquet"
         conditions = pl.read_parquet(condition_path)
         assert set(conditions["condition"]) == {"trained", "random_trunk"}
@@ -1018,7 +1027,7 @@ class TestScoreStepBootstrap:
         )
         actual = conditions.filter(pl.col("condition") == "random_trunk")
         assert dict(zip(actual["metric"], actual["score"])) == expected
-        step.run(workspace)
+        score_predictions(config, workspace)
         assert pl.read_parquet(condition_path).equals(conditions)
 
         assert result.confidence_intervals is None
@@ -1032,10 +1041,10 @@ class TestScoreStepBootstrap:
     ):
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
-        PredictStep(PredictConfig(controls=[control])).run(workspace, prepared)
+        predict_trained(workspace, prepared, PredictConfig(controls=[control]))
 
         config = ScoreConfig(metrics=["accuracy"], bootstrap_enabled=True, n_samples=5)
-        result = ScoreStep(config).run(workspace)
+        result = score_predictions(config, workspace)
 
         assert result.control_comparisons is not None
         assert control in result.control_comparisons
@@ -1070,7 +1079,7 @@ class TestScoreStepBootstrap:
     def test_n_permutations_is_independent_of_n_samples(self, tmp_path, model_family):
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
-        PredictStep(PredictConfig(controls=["random_trunk"])).run(workspace, prepared)
+        predict_trained(workspace, prepared, PredictConfig(controls=["random_trunk"]))
 
         config = ScoreConfig(
             metrics=["accuracy"],
@@ -1078,7 +1087,7 @@ class TestScoreStepBootstrap:
             n_samples=20,
             n_permutations=3,
         )
-        result = ScoreStep(config).run(workspace)
+        result = score_predictions(config, workspace)
 
         comparison = result.control_comparisons["random_trunk"]["accuracy"]
         # With only 3 permutations, the p-value can only take multiples of 1/4.
@@ -1088,13 +1097,13 @@ class TestScoreStepBootstrap:
         control = "random_trunk"
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
-        PredictStep(PredictConfig(controls=[control])).run(
-            workspace, prepared, seed=123
+        predict_trained(
+            workspace, prepared, PredictConfig(controls=[control]), seed=123
         )
 
         config = ScoreConfig(metrics=["accuracy"], bootstrap_enabled=True, n_samples=5)
-        first = ScoreStep(config).run(workspace, seed=123)
-        second = ScoreStep(config).run(workspace, seed=123)
+        first = score_predictions(config, workspace, seed=123)
+        second = score_predictions(config, workspace, seed=123)
 
         assert first.confidence_intervals == second.confidence_intervals
         assert first.control_comparisons == second.control_comparisons
@@ -1102,11 +1111,12 @@ class TestScoreStepBootstrap:
     def test_majority_class_control_produces_comparison(self, tmp_path, model_family):
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
-        PredictStep(PredictConfig(controls=["majority_class"])).run(workspace, prepared)
+        predict_trained(workspace, prepared, PredictConfig(controls=["majority_class"]))
 
-        result = ScoreStep(
-            ScoreConfig(metrics=["accuracy"], bootstrap_enabled=True, n_samples=5)
-        ).run(workspace)
+        result = score_predictions(
+            ScoreConfig(metrics=["accuracy"], bootstrap_enabled=True, n_samples=5),
+            workspace,
+        )
 
         assert result.control_comparisons is not None
         assert "majority_class" in result.control_comparisons
@@ -1114,26 +1124,27 @@ class TestScoreStepBootstrap:
     def test_train_mean_control_produces_comparison(self, tmp_path, model_family):
         prepared = _build_prepared_artifacts(model_family, "sequence_regression")
         workspace = _make_workspace(tmp_path, "sequence_regression")
-        PredictStep(PredictConfig(controls=["train_mean"])).run(workspace, prepared)
+        predict_trained(workspace, prepared, PredictConfig(controls=["train_mean"]))
 
-        result = ScoreStep(
-            ScoreConfig(metrics=["mse"], bootstrap_enabled=True, n_samples=5)
-        ).run(workspace)
+        result = score_predictions(
+            ScoreConfig(metrics=["mse"], bootstrap_enabled=True, n_samples=5),
+            workspace,
+        )
 
         assert result.control_comparisons is not None
         assert "train_mean" in result.control_comparisons
 
     def test_no_controls_yields_no_comparisons(self, tmp_path, model_family):
-        # When no controls are requested at predict time, ScoreStep still
+        # When no controls are requested at predict time, scoring still
         # produces point-estimate metrics and confidence intervals, but no
         # control comparisons.
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
 
-        PredictStep(PredictConfig(controls=[])).run(workspace, prepared)
+        predict_trained(workspace, prepared, PredictConfig(controls=[]))
 
         config = ScoreConfig(metrics=["accuracy"], bootstrap_enabled=True, n_samples=3)
-        result = ScoreStep(config).run(workspace)
+        result = score_predictions(config, workspace)
 
         assert result.control_comparisons is None
         assert set(result.confidence_intervals) == {"accuracy"}
@@ -1142,17 +1153,17 @@ class TestScoreStepBootstrap:
 
 
 # ---------------------------------------------------------------------------
-# ScoreStep.run — tidy long-format output (for cross-model plotting)
+# score_predictions — tidy long-format output (for cross-model plotting)
 # ---------------------------------------------------------------------------
 
 
-class TestScoreStepLongDf:
+class TestScoreLongDf:
     def test_written_without_bootstrap(self, tmp_path, model_family):
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
-        PredictStep(PredictConfig(controls=[])).run(workspace, prepared)
+        predict_trained(workspace, prepared, PredictConfig(controls=[]))
 
-        result = ScoreStep(ScoreConfig(metrics=["accuracy", "f1"])).run(workspace)
+        result = score_predictions(ScoreConfig(metrics=["accuracy", "f1"]), workspace)
 
         assert result.long_path is not None and result.long_path.exists()
         assert result.long_df is not None
@@ -1173,10 +1184,10 @@ class TestScoreStepLongDf:
     ):
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
-        PredictStep(PredictConfig(controls=["random_head"])).run(workspace, prepared)
+        predict_trained(workspace, prepared, PredictConfig(controls=["random_head"]))
 
         config = ScoreConfig(metrics=["accuracy"], bootstrap_enabled=True, n_samples=5)
-        result = ScoreStep(config).run(workspace)
+        result = score_predictions(config, workspace)
 
         long_df = result.long_df
         assert long_df is not None
@@ -1227,7 +1238,7 @@ class TestScoreStepLongDf:
 
 
 # ---------------------------------------------------------------------------
-# ScoreStep.run — across all task types (not just sequence_classification)
+# score_predictions — across all task types (not just sequence_classification)
 # ---------------------------------------------------------------------------
 
 
@@ -1238,17 +1249,17 @@ TASK_TYPE_METRICS = [
 ]
 
 
-class TestScoreStepAcrossTaskTypes:
+class TestScoreAcrossTaskTypes:
     @pytest.mark.parametrize(("task_type", "metrics"), TASK_TYPE_METRICS)
     def test_confidence_intervals_bracket_point_estimate(
         self, tmp_path, model_family, task_type, metrics
     ):
         prepared = _build_prepared_artifacts(model_family, task_type)
         workspace = _make_workspace(tmp_path, task_type)
-        PredictStep(PredictConfig(controls=[])).run(workspace, prepared)
+        predict_trained(workspace, prepared, PredictConfig(controls=[]))
 
         config = ScoreConfig(metrics=metrics, bootstrap_enabled=True, n_samples=10)
-        result = ScoreStep(config).run(workspace)
+        result = score_predictions(config, workspace)
 
         assert set(result.confidence_intervals) == set(metrics)
         for name in metrics:
@@ -1261,12 +1272,12 @@ class TestScoreStepAcrossTaskTypes:
     def test_scrambled_labels_control(self, tmp_path, model_family, task_type, metrics):
         prepared = _build_prepared_artifacts(model_family, task_type)
         workspace = _make_workspace(tmp_path, task_type)
-        PredictStep(PredictConfig(controls=["scrambled_labels"])).run(
-            workspace, prepared
+        predict_trained(
+            workspace, prepared, PredictConfig(controls=["scrambled_labels"])
         )
 
         config = ScoreConfig(metrics=metrics, bootstrap_enabled=True, n_samples=5)
-        result = ScoreStep(config).run(workspace)
+        result = score_predictions(config, workspace)
 
         assert result.control_comparisons is not None
         assert set(result.control_comparisons["scrambled_labels"]) == set(metrics)
@@ -1377,7 +1388,7 @@ def test_classification_scoring_preserves_list_metrics(task_name, average):
 def test_shared_control_labels_preserve_bootstrap_results(
     tmp_path, monkeypatch, task_name
 ):
-    from modules.evaluate.src.steps import score as score_module
+    from modules.evaluate.src.scoring import compute as score_module
 
     if task_name == "sequence_multilabel_classification":
         labels = [[1, 0, 1], [0, 1, 0], [0, 0, 1], [1, 1, 0], [1, 0, 0], [0, 1, 1]]
@@ -1428,7 +1439,9 @@ def test_shared_control_labels_preserve_bootstrap_results(
             )
         )
         workspace.setup_directories()
-        return ScoreStep(config).run(workspace, seed=123, predict_result=predict_output)
+        return score_predictions(
+            config, workspace, seed=123, predict_result=predict_output
+        )
 
     collect = score_module.collect_control_arrays
 

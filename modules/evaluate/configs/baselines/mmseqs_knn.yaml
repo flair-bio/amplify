@@ -1,0 +1,2 @@
+baselines:
+  names: [mmseqs_knn]

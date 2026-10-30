@@ -1,4 +1,4 @@
-"""Tests for modules.evaluate.src.steps.predict.PredictStep.
+"""Tests for modules.evaluate.src.predictors.inference (predict_trained/predict_layerwise).
 
 Builds ``PreparedArtifacts`` directly from the tiny, offline ``model_family``
 fixtures (tests/evaluate/conftest.py) instead of going through ``PrepareStep``
@@ -12,38 +12,46 @@ calls ``from_pretrained`` against a real Hub repo id.
 from __future__ import annotations
 
 from types import SimpleNamespace
-import sys
+from typing import ClassVar
+from unittest.mock import MagicMock
 
+import polars as pl
+import pytest
 import torch
 from accelerate import Accelerator
-import pytest
-import polars as pl
 from datasets import DatasetDict
+from pydantic import ValidationError
 
+from modules.evaluate.src.artifacts.feature_cache import EmbeddingCacheConfig
+from modules.evaluate.src.config import EvaluationConfig, LayerwiseConfig
+from modules.evaluate.src.config.predict import PredictConfig
+from modules.evaluate.src.config.score import ScoreConfig
 from modules.evaluate.src.dataset.collator import (
     EvaluationCollator,
     EvaluationCollatorConfig,
 )
-from modules.evaluate.src.dataset.dataloader import DataLoaderConfig, build_dataloaders
-from modules.evaluate.src.dataset.dataloader import tokenize_dataset
+from modules.evaluate.src.dataset.dataloader import (
+    DataLoaderConfig,
+    build_dataloaders,
+    tokenize_dataset,
+)
 from modules.evaluate.src.dataset.workspace import (
     EvaluationWorkspaceConfig,
     get_evaluation_workspace,
 )
-from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
-from modules.evaluate.src.config import EvaluationConfig, LayerwiseConfig
-from modules.evaluate.src.steps.predict import PredictConfig, PredictStep
-from modules.evaluate.src.steps.score import ScoreConfig, ScoreStep
-from modules.evaluate.src.steps.tune import TuneConfig, TuneStep
 from modules.evaluate.src.model.heads import HeadConfig
-from modules.evaluate.src.utils.controls import ControlBuilder
-from modules.evaluate.src.artifacts.feature_cache import EmbeddingCacheConfig
 from modules.evaluate.src.predictors.embeddings import find_embedding_dataset
-from unittest.mock import MagicMock
+from modules.evaluate.src.predictors.inference import predict_layerwise, predict_trained
+from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
+from modules.evaluate.src.scoring.run import compare_layers, score_predictions
+from modules.evaluate.src.training.config import TuneConfig
+from modules.evaluate.src.training.torch_trainer import TorchProbeTrainer
+from modules.evaluate.src.training.tuning import fit_probe_protocol
+from modules.evaluate.src.utils.controls import ControlBuilder
 from modules.evaluate.src.utils.inference import run_inference
 
 from .conftest import ModelFamily, build_raw_dataset_dict, build_tiny_model
-from .test_prepare import _make_workspace, _run_prepare
+from .test_prepare import _run_prepare
 
 
 @pytest.mark.parametrize("backend", ["live", "cached", "control", "layerwise"])
@@ -60,8 +68,8 @@ def test_prediction_batch_progress_is_scoped_and_throttled(
     monkeypatch.setattr(inference, "monotonic", lambda: now[0])
 
     class Model(torch.nn.Module):
-        layers = [0]
-        heads = {}
+        layers: ClassVar[list[int]] = [0]
+        heads: ClassVar[dict] = {}
 
         def forward(self, **kwargs):
             now[0] += 4.0
@@ -81,47 +89,62 @@ def test_prediction_batch_progress_is_scoped_and_throttled(
     with caplog.at_level("INFO"):
         if backend == "live":
             result = run_inference(
-                Model(), iter(batches), "sequence_classification", accelerator,
+                Model(),
+                iter(batches),
+                "sequence_classification",
+                accelerator,
                 progress_label=label,
             )
             assert result[:3] == (list(range(5)), [0] * 5, [0] * 5)
         elif backend == "cached":
             result = inference.run_local_embedding_inference(
-                Model(), torch.ones(5, 2), list(range(5)), torch.zeros(5, dtype=torch.long),
-                "sequence_classification", accelerator.device, 1,
+                Model(),
+                torch.ones(5, 2),
+                list(range(5)),
+                torch.zeros(5, dtype=torch.long),
+                "sequence_classification",
+                accelerator.device,
+                1,
                 progress_label=label if main else None,
             )
             assert result[:3] == (list(range(5)), [0] * 5, [0] * 5)
         elif backend == "control":
             from modules.evaluate.src.utils import controls
+
             monkeypatch.setattr(controls, "monotonic", lambda: now[0])
             result = ControlBuilder._run_local_head_inference(
-                Model(), torch.utils.data.DataLoader(batches, batch_size=None),
-                "sequence_classification", False, accelerator,
-                gather_across_processes=False, progress_label=label,
+                Model(),
+                torch.utils.data.DataLoader(batches, batch_size=None),
+                "sequence_classification",
+                False,
+                accelerator,
+                gather_across_processes=False,
+                progress_label=label,
             )
             assert result[:2] == (list(range(5)), [0] * 5)
         else:
             from modules.evaluate.src.utils import layerwise
+
             monkeypatch.setattr(layerwise, "monotonic", lambda: now[0])
             result = layerwise.run_layerwise_conditions(
-                Model(), iter(batches), "sequence_classification", accelerator,
+                Model(),
+                iter(batches),
+                "sequence_classification",
+                accelerator,
                 progress_label=label,
             )
             assert result["trained"][0].ids == list(range(5))
             assert result["trained"][0].predictions == [0] * 5
     messages = [m for m in caplog.messages if "batches completed" in m]
     if label and main:
-        assert messages == [
-            "Test prediction: 3 batches completed (12.0s elapsed)"
-        ]
+        assert messages == ["Test prediction: 3 batches completed (12.0s elapsed)"]
     else:
         assert not caplog.records
 
 
 def test_online_layerwise_cli_branch(monkeypatch, tmp_path, model_family):
     from modules.evaluate.src import run_evaluate
-    from modules.evaluate.src.runners import pipeline
+    from modules.evaluate.src.tasks import frozen_probe
 
     prepared = _run_prepare(
         monkeypatch,
@@ -154,10 +177,11 @@ def test_online_layerwise_cli_branch(monkeypatch, tmp_path, model_family):
         run_evaluate, "Accelerator", lambda **kwargs: Accelerator(cpu=True)
     )
     monkeypatch.setattr(
-        pipeline.PrepareStep, "run", lambda *args, **kwargs: prepared
+        frozen_probe, "prepare_probe_artifacts", lambda *args, **kwargs: prepared
     )
-    monkeypatch.setattr(sys, "argv", ["run_evaluate.py", "config.yaml"])
-    run_evaluate.main()
+    # Single-run body: the suite CLI requires --suite, so drive one resolved run
+    # through the generic runner (resolve_engine -> run_evaluation).
+    run_evaluate._run_model_evaluation(["config.yaml"], [], False)
     for layer in (0, 2):
         layer_workspace = get_evaluation_workspace(
             config.workspace,
@@ -193,19 +217,32 @@ def test_online_layerwise_pipeline_scores_each_layer(
         _make_workspace(tmp_path, task_type).config, variant="layerwise-test"
     )
     accelerator = Accelerator(cpu=True)
-    prepared = TuneStep(
-        TuneConfig(
-            head=HeadConfig(head_type="torch_linear"),
-            max_epochs=1,
-            early_stopping_patience=None,
-        )
-    ).run(workspace, prepared, accelerator=accelerator)
+    tune_config = TuneConfig(
+        head=HeadConfig(head_type="torch_linear"),
+        max_epochs=1,
+        early_stopping_patience=None,
+    )
+    prepared = fit_probe_protocol(
+        TorchProbeTrainer(tune_config, train_trunk=False),
+        workspace,
+        prepared,
+        accelerator=accelerator,
+    )
     with caplog.at_level("INFO"):
-        results = PredictStep(PredictConfig(controls=["untrained"])).run_layerwise(
-            workspace, prepared, accelerator, seed=710019
+        results = predict_layerwise(
+            workspace,
+            prepared,
+            PredictConfig(controls=["untrained"]),
+            accelerator,
+            710019,
         )
-    assert any("Layerwise prediction: trained, untrained started" in m for m in caplog.messages)
-    assert any("Layerwise prediction: trained, untrained finished in" in m for m in caplog.messages)
+    assert any(
+        "Layerwise prediction: trained, untrained started" in m for m in caplog.messages
+    )
+    assert any(
+        "Layerwise prediction: trained, untrained finished in" in m
+        for m in caplog.messages
+    )
     assert set(results) == {0, 2}
     for layer, result in results.items():
         assert result.metadata.layer_index == layer
@@ -226,8 +263,8 @@ def test_online_layerwise_pipeline_scores_each_layer(
         layer_workspace = get_evaluation_workspace(
             workspace.config, variant=f"layerwise-test-layer_{layer}"
         )
-        score = ScoreStep(ScoreConfig(metrics=[metric])).run(
-            layer_workspace, predict_result=result
+        score = score_predictions(
+            ScoreConfig(metrics=[metric]), layer_workspace, predict_result=result
         )
         assert metric in score.scores
         layer_scores = score.long_df.filter(
@@ -242,7 +279,8 @@ def test_online_layerwise_pipeline_scores_each_layer(
     score_paths = [
         get_evaluation_workspace(
             workspace.config, variant=f"layerwise-test-layer_{layer}"
-        ).comparison_path / "scores_long.parquet"
+        ).comparison_path
+        / "scores_long.parquet"
         for layer in results
     ]
     assert len(set(score_paths)) == 2
@@ -281,31 +319,34 @@ def test_cached_layerwise_pipeline_scores_each_layer(
         _make_workspace(tmp_path, task_type).config, variant="layerwise-cached"
     )
     accelerator = Accelerator(cpu=True)
-    prepared = TuneStep(
-        TuneConfig(
-            head=HeadConfig(head_type="torch_linear"),
-            batch_size=7,
-            max_epochs=1,
-            early_stopping_patience=None,
-        )
-    ).run(workspace, prepared, accelerator=accelerator)
+    tune_config = TuneConfig(
+        head=HeadConfig(head_type="torch_linear"),
+        batch_size=7,
+        max_epochs=1,
+        early_stopping_patience=None,
+    )
+    prepared = fit_probe_protocol(
+        TorchProbeTrainer(tune_config, train_trunk=False),
+        workspace,
+        prepared,
+        accelerator=accelerator,
+    )
     assert prepared.train_dataloader.batch_sampler.batch_size == 7
     assert prepared.val_dataloader.batch_sampler.batch_size == 7
     forward = MagicMock(wraps=prepared.model.forward_conditions)
     monkeypatch.setattr(prepared.model, "forward_conditions", forward)
-    predict_step = PredictStep(
-        PredictConfig(
-            controls=["untrained"], store_sequences=True, embedding_batch_size=7
-        )
+    predict_config = PredictConfig(
+        controls=["untrained"], store_sequences=True, embedding_batch_size=7
     )
-    decode_sequences = MagicMock(wraps=predict_step._decode_token_dataloader)
-    monkeypatch.setattr(predict_step, "_decode_token_dataloader", decode_sequences)
-    results = predict_step.run_layerwise(
-        workspace, prepared, accelerator, seed=710019
+    from modules.evaluate.src.predictors import inference as predict_inference
+
+    decode_sequences = MagicMock(wraps=predict_inference.decode_token_sequences)
+    monkeypatch.setattr(predict_inference, "decode_token_sequences", decode_sequences)
+    results = predict_layerwise(
+        workspace, prepared, predict_config, accelerator, 710019
     )
     assert all(
-        call.kwargs["inputs_embeds"].shape[0] <= 7
-        for call in forward.call_args_list
+        call.kwargs["inputs_embeds"].shape[0] <= 7 for call in forward.call_args_list
     )
     if task_type == "token_classification":
         assert any(
@@ -323,8 +364,8 @@ def test_cached_layerwise_pipeline_scores_each_layer(
         layer_workspace = get_evaluation_workspace(
             workspace.config, variant=f"layerwise-cached-layer_{layer}"
         )
-        score = ScoreStep(ScoreConfig(metrics=[metric])).run(
-            layer_workspace, predict_result=result
+        score = score_predictions(
+            ScoreConfig(metrics=[metric]), layer_workspace, predict_result=result
         )
         assert metric in score.scores
 
@@ -333,7 +374,11 @@ def test_cached_layerwise_pipeline_scores_each_layer(
 @pytest.mark.parametrize("embedding_batch_size", [1, 3])
 @pytest.mark.parametrize("with_ids", [False, True])
 def test_cached_token_controls_preserve_extraction_order(
-    monkeypatch, tmp_path, model_family, length_grouped_sampling, embedding_batch_size,
+    monkeypatch,
+    tmp_path,
+    model_family,
+    length_grouped_sampling,
+    embedding_batch_size,
     with_ids,
 ):
     if with_ids:
@@ -373,16 +418,28 @@ def test_cached_token_controls_preserve_extraction_order(
             expected_labels.extend([[value] for value in valid_labels])
             example_offset += 1
 
-    TuneStep(
-        TuneConfig(
-            head=HeadConfig(head_type="torch_linear"),
-            max_epochs=1,
-            save_best_model=False,
-        )
-    ).run(workspace, prepared, controls=["random_trunk"], accelerator=Accelerator(cpu=True))
-    result = PredictStep(
-        PredictConfig(controls=["untrained", "random_head", "random_trunk", "random_both"])
-    ).run(workspace, prepared, accelerator=Accelerator(cpu=True))
+    fit_probe_protocol(
+        TorchProbeTrainer(
+            TuneConfig(
+                head=HeadConfig(head_type="torch_linear"),
+                max_epochs=1,
+                save_best_model=False,
+            ),
+            train_trunk=False,
+        ),
+        workspace,
+        prepared,
+        controls=["random_trunk"],
+        accelerator=Accelerator(cpu=True),
+    )
+    result = predict_trained(
+        workspace,
+        prepared,
+        PredictConfig(
+            controls=["untrained", "random_head", "random_trunk", "random_both"]
+        ),
+        accelerator=Accelerator(cpu=True),
+    )
     assert result.predictions["id"].to_list() == expected_ids
     assert result.predictions["label"].to_list() == expected_labels
     for control in result.controls.values():
@@ -390,7 +447,9 @@ def test_cached_token_controls_preserve_extraction_order(
         assert control.height == len(expected_labels)
 
 
-@pytest.mark.parametrize("task_type", ["token_classification", "sequence_classification"])
+@pytest.mark.parametrize(
+    "task_type", ["token_classification", "sequence_classification"]
+)
 def test_cached_prediction_batching_is_independent_of_protein_batches(
     monkeypatch, tmp_path, model_family, task_type, caplog
 ):
@@ -405,28 +464,40 @@ def test_cached_prediction_batching_is_independent_of_protein_batches(
     loader = prepared.test_dataloader
     backend = prepared.embedding_backend
     controls = ["untrained", "random_head", "random_trunk", "random_both"]
-    TuneStep(
-        TuneConfig(
-            head=HeadConfig(head_type="torch_linear"),
-            max_epochs=1,
-            save_best_model=False,
-        )
-    ).run(workspace, prepared, controls=controls, accelerator=Accelerator(cpu=True))
+    fit_probe_protocol(
+        TorchProbeTrainer(
+            TuneConfig(
+                head=HeadConfig(head_type="torch_linear"),
+                max_epochs=1,
+                save_best_model=False,
+            ),
+            train_trunk=False,
+        ),
+        workspace,
+        prepared,
+        controls=controls,
+        accelerator=Accelerator(cpu=True),
+    )
     with caplog.at_level("INFO"):
-        baseline = PredictStep(
-            PredictConfig(controls=controls, collect_probabilities=True)
-        ).run(workspace, prepared, accelerator=Accelerator(cpu=True))
+        baseline = predict_trained(
+            workspace,
+            prepared,
+            PredictConfig(controls=controls, collect_probabilities=True),
+            accelerator=Accelerator(cpu=True),
+        )
     assert "Control 'random_trunk' embedding extraction started" in caplog.messages
     assert any(
         m.startswith("Control 'random_trunk' embedding extraction finished in")
         for m in caplog.messages
     )
 
+    from modules.evaluate.src.predictors import inference as predict_module
     from modules.evaluate.src.utils import controls as control_module
-    from modules.evaluate.src.steps import predict as predict_module
 
     local_inference = MagicMock(wraps=predict_module.run_local_embedding_inference)
-    monkeypatch.setattr(predict_module, "run_local_embedding_inference", local_inference)
+    monkeypatch.setattr(
+        predict_module, "run_local_embedding_inference", local_inference
+    )
     control_inference = ControlBuilder._run_local_head_inference
     control_batch_sizes = []
 
@@ -439,13 +510,16 @@ def test_cached_prediction_batching_is_independent_of_protein_batches(
         "_run_local_head_inference",
         staticmethod(capture_batches),
     )
-    result = PredictStep(
+    result = predict_trained(
+        workspace,
+        prepared,
         PredictConfig(
             embedding_batch_size=7,
             controls=controls,
             collect_probabilities=True,
-        )
-    ).run(workspace, prepared, accelerator=Accelerator(cpu=True))
+        ),
+        accelerator=Accelerator(cpu=True),
+    )
     assert local_inference.call_args.args[6] == 7
     assert control_batch_sizes == [7] * len(controls)
     assert prepared.test_dataloader is loader
@@ -554,14 +628,23 @@ def test_cached_layerwise_token_controls(monkeypatch, tmp_path, model_family):
         "random_both",
         "majority_class",
     ]
-    prepared = TuneStep(
-        TuneConfig(
-            head=HeadConfig(head_type="torch_linear"),
-            max_epochs=1,
-        )
-    ).run(workspace, prepared, accelerator=accelerator, controls=controls)
-    results = PredictStep(PredictConfig(controls=controls)).run_layerwise(
-        workspace, prepared, accelerator, seed=710019
+    tune_config = TuneConfig(
+        head=HeadConfig(head_type="torch_linear"),
+        max_epochs=1,
+    )
+    prepared = fit_probe_protocol(
+        TorchProbeTrainer(tune_config, train_trunk=False),
+        workspace,
+        prepared,
+        accelerator=accelerator,
+        controls=controls,
+    )
+    results = predict_layerwise(
+        workspace,
+        prepared,
+        PredictConfig(controls=controls),
+        accelerator,
+        710019,
     )
     for layer, result in results.items():
         assert set(result.controls) == set(controls)
@@ -579,9 +662,11 @@ def test_cached_layerwise_token_controls(monkeypatch, tmp_path, model_family):
         )
         assert (
             "accuracy"
-            in ScoreStep(ScoreConfig(metrics=["accuracy"]))
-            .run(layer_workspace, predict_result=result)
-            .scores
+            in score_predictions(
+                ScoreConfig(metrics=["accuracy"]),
+                layer_workspace,
+                predict_result=result,
+            ).scores
         )
 
 
@@ -594,7 +679,9 @@ def test_layerwise_random_trunk_controls_require_tuned_baseline(control):
         layerwise_token_dataloaders=None,
         layerwise_random_model=None,
     )
-    with pytest.raises(ValueError, match="pass the predict controls to TuneStep"):
+    with pytest.raises(
+        ValueError, match="need the random-trunk probes from the probe fit"
+    ):
         run_layerwise_control_conditions(
             prepared,
             "sequence_classification",
@@ -633,14 +720,23 @@ def test_online_layerwise_controls_and_bootstrap(
         "scrambled_sequences",
         "majority_class",
     ]
-    prepared = TuneStep(
-        TuneConfig(
-            head=HeadConfig(head_type="torch_linear"),
-            max_epochs=1,
-        )
-    ).run(workspace, prepared, accelerator=accelerator, controls=controls)
-    results = PredictStep(PredictConfig(controls=controls)).run_layerwise(
-        workspace, prepared, accelerator, seed=710019
+    tune_config = TuneConfig(
+        head=HeadConfig(head_type="torch_linear"),
+        max_epochs=1,
+    )
+    prepared = fit_probe_protocol(
+        TorchProbeTrainer(tune_config, train_trunk=False),
+        workspace,
+        prepared,
+        accelerator=accelerator,
+        controls=controls,
+    )
+    results = predict_layerwise(
+        workspace,
+        prepared,
+        PredictConfig(controls=controls),
+        accelerator,
+        710019,
     )
     for layer, result in results.items():
         assert set(result.controls) == set(controls) - {"scrambled_labels"}
@@ -654,22 +750,27 @@ def test_online_layerwise_controls_and_bootstrap(
         layer_workspace = get_evaluation_workspace(
             workspace.config, variant=f"layerwise-controls-layer_{layer}"
         )
-        score = ScoreStep(
+        score = score_predictions(
             ScoreConfig(
                 metrics=["accuracy"],
                 bootstrap_enabled=True,
                 n_samples=5,
                 n_permutations=5,
-            )
-        ).run(layer_workspace, predict_result=result)
+            ),
+            layer_workspace,
+            predict_result=result,
+        )
         assert set(score.control_comparisons) == set(controls)
         layer_scores = score.long_df.filter(
             score.long_df["variant"] == result.metadata.variant
         )
         assert layer_scores["layer_index"].unique().to_list() == [layer]
-    comparison_path = ScoreStep(
-        ScoreConfig(metrics=["accuracy"], n_samples=5, n_permutations=5)
-    ).compare_layers(workspace, results, seed=710019)
+    comparison_path = compare_layers(
+        ScoreConfig(metrics=["accuracy"], n_samples=5, n_permutations=5),
+        workspace,
+        results,
+        seed=710019,
+    )
     comparison = pl.read_parquet(comparison_path)
     assert comparison["layer_index"].to_list() == [0]
     assert comparison["reference_layer"].to_list() == [2]
@@ -696,16 +797,17 @@ def test_control_head_uses_task_probability_conversion(
             return SimpleNamespace(logits=inputs_embeds)
 
     logits = torch.tensor([[2.0, 0.0, -1.0], [1.0, 3.0, -2.0]])
-    rows = [
-        {"inputs_embeds": row, "id": index}
-        for index, row in enumerate(logits)
-    ]
+    rows = [{"inputs_embeds": row, "id": index} for index, row in enumerate(logits)]
     ids, predictions, probabilities = ControlBuilder._run_local_head_inference(
         Head(),
-        DataLoader(rows, batch_size=1, collate_fn=lambda batch: {
-            "inputs_embeds": torch.stack([row["inputs_embeds"] for row in batch]),
-            "id": [row["id"] for row in batch],
-        }),
+        DataLoader(
+            rows,
+            batch_size=1,
+            collate_fn=lambda batch: {
+                "inputs_embeds": torch.stack([row["inputs_embeds"] for row in batch]),
+                "id": [row["id"] for row in batch],
+            },
+        ),
         task_type,
         collect_probabilities,
         Accelerator(cpu=True),
@@ -758,24 +860,32 @@ def test_cached_multilabel_control_probabilities_persist_sigmoid(
         tmp_path, "sequence_multilabel_classification", num_labels=2
     )
     if control == "random_trunk":
-        TuneStep(
-            TuneConfig(
-                head=HeadConfig(head_type="torch_linear"),
-                max_epochs=1,
-                save_best_model=False,
-            )
-        ).run(workspace, prepared, controls=[control], accelerator=Accelerator(cpu=True))
-    result = PredictStep(
-        PredictConfig(controls=[control], collect_probabilities=True)
-    ).run(workspace, prepared, accelerator=Accelerator(cpu=True))
+        fit_probe_protocol(
+            TorchProbeTrainer(
+                TuneConfig(
+                    head=HeadConfig(head_type="torch_linear"),
+                    max_epochs=1,
+                    save_best_model=False,
+                ),
+                train_trunk=False,
+            ),
+            workspace,
+            prepared,
+            controls=[control],
+            accelerator=Accelerator(cpu=True),
+        )
+    result = predict_trained(
+        workspace,
+        prepared,
+        PredictConfig(controls=[control], collect_probabilities=True),
+        accelerator=Accelerator(cpu=True),
+    )
     expected = torch.cat(captured).sigmoid()
     torch.testing.assert_close(
         torch.tensor(result.controls[control]["probability"].to_list()), expected
     )
     saved = pl.read_parquet(result.control_paths[control])
-    torch.testing.assert_close(
-        torch.tensor(saved["probability"].to_list()), expected
-    )
+    torch.testing.assert_close(torch.tensor(saved["probability"].to_list()), expected)
 
 
 def test_distributed_inference_deduplicates_aligned_rows():
@@ -813,14 +923,20 @@ def test_distributed_inference_deduplicates_aligned_rows():
         },
     ]
     ids, predictions, labels, probabilities, sequences = run_inference(
-        Model(), batches, "sequence_classification", Accelerator(),
-        collect_probabilities=True, tokenizer=tokenizer,
+        Model(),
+        batches,
+        "sequence_classification",
+        Accelerator(),
+        collect_probabilities=True,
+        tokenizer=tokenizer,
     )
     assert ids == ["first", "second", "third"]
     assert predictions == [0, 1, 1]
     assert labels == [0, 1, 1]
     assert len(probabilities) == len(sequences) == 3
-    assert probabilities[0] == pytest.approx(torch.tensor([2.0, 0.0]).softmax(0).tolist())
+    assert probabilities[0] == pytest.approx(
+        torch.tensor([2.0, 0.0]).softmax(0).tolist()
+    )
     assert sequences == ["[2, 0]", "[0, 2]", "[0, 3]"]
 
 
@@ -1023,26 +1139,32 @@ class TestPredictConfig:
         assert cfg.predictions_filename == "predictions.parquet"
 
     def test_extra_fields_forbidden(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             PredictConfig(not_a_real_field=1)
 
 
 # ---------------------------------------------------------------------------
-# PredictStep.run — end to end (offline, tiny real models)
+# predict_trained — end to end (offline, tiny real models)
 # ---------------------------------------------------------------------------
 
 
-class TestPredictStepRun:
-    def test_in_memory_prediction_does_not_log_persistence(self, tmp_path, model_family, caplog):
+class TestPredictRun:
+    def test_in_memory_prediction_does_not_log_persistence(
+        self, tmp_path, model_family, caplog
+    ):
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
         with caplog.at_level("INFO"):
-            result = PredictStep(
-                PredictConfig(controls=[], persist_to_disk=False)
-            ).run(workspace, prepared)
+            result = predict_trained(
+                workspace,
+                prepared,
+                PredictConfig(controls=[], persist_to_disk=False),
+            )
         assert result.predictions_path is None
         assert "Trained prediction started" in caplog.messages
-        assert any(m.startswith("Trained prediction finished in") for m in caplog.messages)
+        assert any(
+            m.startswith("Trained prediction finished in") for m in caplog.messages
+        )
         assert not any("Persisting" in m for m in caplog.messages)
 
     def test_writes_predictions_parquet(self, tmp_path, model_family):
@@ -1050,7 +1172,7 @@ class TestPredictStepRun:
         prepared.split = "low_to_high_mutation"
         workspace = _make_workspace(tmp_path, "sequence_classification")
 
-        result = PredictStep(PredictConfig(controls=[])).run(workspace, prepared)
+        result = predict_trained(workspace, prepared, PredictConfig(controls=[]))
 
         assert result.predictions is not None
         assert result.predictions_path is not None
@@ -1067,8 +1189,8 @@ class TestPredictStepRun:
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
 
-        result = PredictStep(PredictConfig(store_sequences=True, controls=[])).run(
-            workspace, prepared
+        result = predict_trained(
+            workspace, prepared, PredictConfig(store_sequences=True, controls=[])
         )
 
         assert "sequence" in result.predictions.columns
@@ -1077,9 +1199,9 @@ class TestPredictStepRun:
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
 
-        result = PredictStep(
-            PredictConfig(collect_probabilities=True, controls=[])
-        ).run(workspace, prepared)
+        result = predict_trained(
+            workspace, prepared, PredictConfig(collect_probabilities=True, controls=[])
+        )
 
         assert "probability" in result.predictions.columns
 
@@ -1125,7 +1247,7 @@ class TestPredictStepRun:
         )
         workspace = _make_workspace(tmp_path, task_type)
 
-        result = PredictStep(PredictConfig(controls=[])).run(workspace, prepared)
+        result = predict_trained(workspace, prepared, PredictConfig(controls=[]))
 
         assert set(result.predictions["id"].to_list()) == {
             "test-0",
@@ -1140,7 +1262,7 @@ class TestPredictStepRun:
         workspace = _make_workspace(tmp_path, "sequence_classification")
 
         with pytest.raises(ValueError, match="test_dataloader"):
-            PredictStep(PredictConfig()).run(workspace, prepared)
+            predict_trained(workspace, prepared, PredictConfig())
 
     @pytest.mark.parametrize(
         "control", ["random_trunk", "random_head", "random_both", "scrambled_sequences"]
@@ -1152,9 +1274,15 @@ class TestPredictStepRun:
         workspace = _make_workspace(tmp_path, "sequence_classification")
 
         with caplog.at_level("INFO"):
-            result = PredictStep(PredictConfig(controls=[control])).run(workspace, prepared)
+            result = predict_trained(
+                workspace, prepared, PredictConfig(controls=[control])
+            )
 
-        for stage in ("Trained prediction", f"Control '{control}' prediction", "Persisting predictions"):
+        for stage in (
+            "Trained prediction",
+            f"Control '{control}' prediction",
+            "Persisting predictions",
+        ):
             assert any(m.startswith(f"{stage} started") for m in caplog.messages)
             assert any(m.startswith(f"{stage} finished in") for m in caplog.messages)
 
@@ -1198,8 +1326,8 @@ class TestPredictStepRun:
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
 
-        result = PredictStep(PredictConfig(controls=["scrambled_labels"])).run(
-            workspace, prepared
+        result = predict_trained(
+            workspace, prepared, PredictConfig(controls=["scrambled_labels"])
         )
 
         assert "scrambled_labels" not in result.controls
@@ -1212,9 +1340,11 @@ class TestPredictStepRun:
         prepared = _build_prepared_artifacts(model_family, "sequence_classification")
         workspace = _make_workspace(tmp_path, "sequence_classification")
 
-        result = PredictStep(
-            PredictConfig(controls=["majority_class"], collect_probabilities=True)
-        ).run(workspace, prepared)
+        result = predict_trained(
+            workspace,
+            prepared,
+            PredictConfig(controls=["majority_class"], collect_probabilities=True),
+        )
 
         control_df = result.controls["majority_class"]
         assert control_df.columns == ["id", "prediction", "probability"]
@@ -1226,8 +1356,8 @@ class TestPredictStepRun:
         prepared = _build_prepared_artifacts(model_family, "sequence_regression")
         workspace = _make_workspace(tmp_path, "sequence_regression")
 
-        result = PredictStep(PredictConfig(controls=["train_mean"])).run(
-            workspace, prepared
+        result = predict_trained(
+            workspace, prepared, PredictConfig(controls=["train_mean"])
         )
 
         control_df = result.controls["train_mean"]
@@ -1240,4 +1370,4 @@ class TestPredictStepRun:
         workspace = _make_workspace(tmp_path, "sequence_classification")
 
         with pytest.raises(ValueError, match="train_mean"):
-            PredictStep(PredictConfig(controls=["train_mean"])).run(workspace, prepared)
+            predict_trained(workspace, prepared, PredictConfig(controls=["train_mean"]))

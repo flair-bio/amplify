@@ -91,7 +91,7 @@ def test_cli_applies_tf32_before_model_work(
         monkeypatch.setattr(
             entrypoint, "get_evaluation_workspace", lambda config, **kwargs: config
         )
-        monkeypatch.setattr(entrypoint, "run_pipeline", check_settings)
+        monkeypatch.setattr(entrypoint, "run_evaluation", check_settings)
     else:
         monkeypatch.setattr(
             entrypoint.AutoTokenizer,
@@ -108,4 +108,13 @@ def test_cli_applies_tf32_before_model_work(
     # Stop at model work so this exercises the real CLI/configuration path
     # without loading datasets, downloading checkpoints or requiring a GPU.
     with pytest.raises(ModelWorkReached):
-        entrypoint.main()
+        if entrypoint_name == "run_evaluate":
+            # The suite CLI requires --suite; the single-run body is what applies
+            # TF32 and reaches run_evaluation, so exercise it with the same overrides.
+            entrypoint._run_model_evaluation(
+                [str(config_path)],
+                [] if override is None else [f"tf32={override}"],
+                False,
+            )
+        else:
+            entrypoint.main()

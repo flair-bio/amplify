@@ -1,23 +1,37 @@
-workspace:
-  task_type: pseudo_perplexity
+task:
+  type: pseudo_perplexity
 
-steps:
+baselines:
+  # Public train-only reference corpus for the amino_acid_frequency baseline
+  # (never the PPL test split). Pinned to a full commit SHA; resolved only when
+  # --baselines runs. baselines.names is supplied by the planner, not here.
+  amino_acid_reference:
+    repo_id: flair-bio/contact_prediction_casp
+    revision: 258a928947a5232be1a6292b0fb9466ec4dada8c
+    split: train
+    sequence_column: sequence
+
+predictor:
   mode: evaluate_as_is
-  tune:
-    hyperparameter_search:
-      enabled: false
-    refit_on_train_validation: false
-  score:
-    metrics: [pseudo_perplexity]
-  prepare:
-    # Prepare still requires three roles; only the test loader is scored.
-    split:
-      train: test
-      validation: test
-      test: test
-    random_truncate_by_split:
-      train: false
-    embedding_cache:
-      enabled: false
-  predict:
-    controls: [random_trunk]
+
+training:
+  hyperparameter_search:
+    enabled: false
+  refit_on_train_validation: false
+
+scoring:
+  metrics: [pseudo_perplexity]
+
+representation:
+  # Representation still requires three roles; only the test loader is scored.
+  split:
+    train: test
+    validation: test
+    test: test
+  random_truncate_by_split:
+    train: false
+  embedding_cache:
+    enabled: false
+
+prediction:
+  controls: [random_trunk]

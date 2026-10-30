@@ -1,6 +1,6 @@
-workspace:
-  dataset_name: uniprot_glycosylation
-  dataset_repo_id: flair-bio/uniprot_glycosylation
+dataset:
+  name: uniprot_glycosylation
+  repo_id: flair-bio/uniprot_glycosylation
   target_type: categorical
   label_format: per_token
   num_labels: 13

@@ -1,7 +1,7 @@
 """Tests for modules.evaluate.src.predictors.embeddings and artifacts.feature_cache (frozen-trunk embedding cache).
 
 Unit tests cover the storage/key primitives in isolation; the integration
-tests reuse ``PrepareStep`` via ``tests.evaluate.test_prepare._run_prepare``
+tests reuse ``prepare_probe_artifacts`` via ``tests.evaluate.test_prepare._run_prepare``
 (offline-mocked tokenizer/dataset/model, same as the rest of test_prepare.py)
 to verify the end-to-end cache-enabled Prepare flow with real tiny models.
 """
@@ -11,12 +11,18 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 from accelerate import Accelerator
 from accelerate.data_loader import BatchSamplerShard
 from torch import nn
 from torch.utils.data import DataLoader
 
+from modules.evaluate.src.artifacts.feature_cache import (
+    EmbeddingCache,
+    EmbeddingCacheConfig,
+    embedding_cache_key,
+)
 from modules.evaluate.src.config import EvaluationConfig, LayerwiseConfig
 from modules.evaluate.src.dataset.workspace import (
     EvaluationWorkspaceConfig,
@@ -24,25 +30,16 @@ from modules.evaluate.src.dataset.workspace import (
 )
 from modules.evaluate.src.model.heads import EmbeddingProbeHead
 from modules.evaluate.src.model.layerwise import LayerwiseProbeModel, resolve_layers
-from modules.evaluate.src.utils.layerwise import run_layerwise_conditions
-from modules.evaluate.src.artifacts.feature_cache import (
-    EmbeddingCache,
-    EmbeddingCacheConfig,
-    embedding_cache_key,
-)
 from modules.evaluate.src.predictors.embeddings import (
-    EmbeddingDataset,
     build_embedding_dataloaders,
-    embedding_collate_fn,
     extract_embeddings,
     pool_hidden_state_layers,
     pool_hidden_states,
     residue_attention_mask,
 )
+from modules.evaluate.src.utils.layerwise import run_layerwise_conditions
 
 from .test_prepare import _run_prepare
-
-import pytest
 
 
 @pytest.mark.parametrize("config_type", [LayerwiseConfig, EmbeddingCacheConfig])
@@ -69,7 +66,9 @@ def test_cached_and_online_pooling_exclude_boundary_tokens(
     packed: bool, normalize: bool
 ) -> None:
     tokenizer = SimpleNamespace(
-        cls_token_id=99, eos_token_id=98, pad_token_id=0,
+        cls_token_id=99,
+        eos_token_id=98,
+        pad_token_id=0,
         batch_decode=lambda rows, **kwargs: ["" for _ in rows],
     )
 
@@ -90,7 +89,8 @@ def test_cached_and_online_pooling_exclude_boundary_tokens(
     if packed:
         batch.update(
             input_ids=torch.tensor([[99, 2, 4, 98, 99, 8, 98, 0]]),
-            cu_seqlens=torch.tensor([0, 4, 7, 8]), num_sequences=2,
+            cu_seqlens=torch.tensor([0, 4, 7, 8]),
+            num_sequences=2,
         )
     else:
         batch.update(
@@ -98,18 +98,31 @@ def test_cached_and_online_pooling_exclude_boundary_tokens(
             attention_mask=torch.tensor([[1, 1, 1, 1], [1, 1, 1, 0]]),
         )
     accelerator = SimpleNamespace(
-        device=torch.device("cpu"), num_processes=1,
+        device=torch.device("cpu"),
+        num_processes=1,
         gather_for_metrics=lambda values, **kwargs: values,
     )
     cached, _, _, _ = extract_embeddings(
-        trunk, [batch], accelerator, "mean", "float32", layers=[0, 1], tokenizer=tokenizer,
+        trunk,
+        [batch],
+        accelerator,
+        "mean",
+        "float32",
+        layers=[0, 1],
+        tokenizer=tokenizer,
         normalize_before_pooling=normalize,
     )
-    expected = torch.ones((2, 2)) if normalize else torch.tensor([[3.0, 4.0], [8.0, 9.0]])
+    expected = (
+        torch.ones((2, 2)) if normalize else torch.tensor([[3.0, 4.0], [8.0, 9.0]])
+    )
     assert torch.equal(cached, expected)
     probe = LayerwiseProbeModel(
-        SimpleNamespace(base_model=trunk, config=trunk.config), 1, "sequence_regression",
-        LayerwiseConfig(enabled=True, layers=[0, 1], normalize_before_pooling=normalize),
+        SimpleNamespace(base_model=trunk, config=trunk.config),
+        1,
+        "sequence_regression",
+        LayerwiseConfig(
+            enabled=True, layers=[0, 1], normalize_before_pooling=normalize
+        ),
         tokenizer=tokenizer,
     )
     for head in probe.heads.values():
@@ -212,9 +225,14 @@ def test_layerwise_packed_pooling_matches_padded(pooling, normalize):
 
     trunk = Trunk()
     probe = LayerwiseProbeModel(
-        SimpleNamespace(base_model=trunk, config=trunk.config), 1, "sequence_regression",
+        SimpleNamespace(base_model=trunk, config=trunk.config),
+        1,
+        "sequence_regression",
         LayerwiseConfig(
-            enabled=True, layers="all", autocast_dtype="float32", pooling=pooling,
+            enabled=True,
+            layers="all",
+            autocast_dtype="float32",
+            pooling=pooling,
             normalize_before_pooling=normalize,
         ),
         tokenizer=tokenizer,
@@ -318,7 +336,9 @@ def test_layerwise_token_standardization_ignores_unlabeled_positions(model_famil
         )
 
 
-@pytest.mark.parametrize("task_type", ["sequence_classification", "token_classification"])
+@pytest.mark.parametrize(
+    "task_type", ["sequence_classification", "token_classification"]
+)
 def test_distributed_layerwise_deduplicates_examples(model_family, task_type):
     from .conftest import build_tiny_model
 
@@ -330,21 +350,28 @@ def test_distributed_layerwise_deduplicates_examples(model_family, task_type):
             return tensor
 
     probe = LayerwiseProbeModel(
-        build_tiny_model(model_family, task_type, 2), 2, task_type,
-        LayerwiseConfig(enabled=True, layers=[0, -1]), tokenizer=model_family.tokenizer,
+        build_tiny_model(model_family, task_type, 2),
+        2,
+        task_type,
+        LayerwiseConfig(enabled=True, layers=[0, -1]),
+        tokenizer=model_family.tokenizer,
     )
     batch = {
         "input_ids": torch.tensor([[3, 5, 6, 4]] * 3),
         "attention_mask": torch.ones(3, 4),
         "labels": (
-            torch.tensor([0, 1, 0]) if task_type == "sequence_classification" else
-            torch.tensor([[-100, 0, 1, -100]] * 3)
+            torch.tensor([0, 1, 0])
+            if task_type == "sequence_classification"
+            else torch.tensor([[-100, 0, 1, -100]] * 3)
         ),
         "id": ["first", "second", "first"],
     }
     results = run_layerwise_conditions(
-        probe, [batch, dict(batch, id=["third", "first", "second"])], task_type,
-        Accelerator(), collect_probabilities=task_type == "sequence_classification",
+        probe,
+        [batch, dict(batch, id=["third", "first", "second"])],
+        task_type,
+        Accelerator(),
+        collect_probabilities=task_type == "sequence_classification",
     )["trained"]
     for ids, predictions, labels, probabilities, _ in results.values():
         assert ids == ["first", "second", "third"]
@@ -473,7 +500,9 @@ class TestPoolHiddenStates:
         tokenizer = SimpleNamespace(cls_token_id=3, eos_token_id=4, pad_token_id=0)
         input_ids = torch.tensor([[3, 5, 6, 4, 0]])
         hidden_states = torch.tensor([[[100.0], [2.0], [4.0], [200.0], [300.0]]])
-        mask = residue_attention_mask(input_ids, torch.tensor([[1, 1, 1, 1, 0]]), tokenizer)
+        mask = residue_attention_mask(
+            input_ids, torch.tensor([[1, 1, 1, 1, 0]]), tokenizer
+        )
         assert pool_hidden_states(hidden_states, mask, "mean").item() == 3.0
         assert pool_hidden_states(hidden_states, mask, "cls").item() == 100.0
 
@@ -706,11 +735,15 @@ class TestExtractEmbeddings:
 
         class Trunk(nn.Module):
             def forward(self, input_ids, **kwargs):
-                return SimpleNamespace(last_hidden_state=input_ids.unsqueeze(-1).float())
+                return SimpleNamespace(
+                    last_hidden_state=input_ids.unsqueeze(-1).float()
+                )
 
         monkeypatch.setattr(embed, "tqdm", track_progress)
         accelerator = SimpleNamespace(
-            device=torch.device("cpu"), num_processes=1, is_main_process=main,
+            device=torch.device("cpu"),
+            num_processes=1,
+            is_main_process=main,
         )
         batches = [
             {
@@ -722,7 +755,11 @@ class TestExtractEmbeddings:
             for i in range(5)
         ]
         embeddings, ids, labels, _ = extract_embeddings(
-            Trunk(), batches, accelerator, "mean", "float32",
+            Trunk(),
+            batches,
+            accelerator,
+            "mean",
+            "float32",
             progress_label=label,
         )
         assert ids == list(range(5))
@@ -841,11 +878,11 @@ class TestExtractEmbeddings:
 
 
 # ---------------------------------------------------------------------------
-# PrepareStep integration (embedding_cache enabled)
+# prepare_probe_artifacts integration (embedding_cache enabled)
 # ---------------------------------------------------------------------------
 
 
-class TestPrepareStepWithEmbeddingCache:
+class TestPrepareProbeArtifactsWithEmbeddingCache:
     def test_rebatching_unwraps_accelerate_sampler_shards(
         self, monkeypatch, tmp_path, model_family
     ):

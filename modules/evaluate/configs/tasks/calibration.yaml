@@ -1,19 +1,23 @@
-workspace:
-  task_type: calibration
+task:
+  type: calibration
 
-steps:
+predictor:
   mode: evaluate_as_is
-  tune:
-    hyperparameter_search:
-      enabled: false
-    refit_on_train_validation: false
-  score:
-    metrics: [calibration] # 100 x mean per-position exp(-KL)
-  prepare:
-    # The handler cuts its own 512-residue window centred on each scored
-    # position, so the dataloader must keep full sequences (longest ~7k).
-    max_length: 100000
-    embedding_cache:
-      enabled: false
-  predict:
-    controls: [random_trunk]
+
+training:
+  hyperparameter_search:
+    enabled: false
+  refit_on_train_validation: false
+
+scoring:
+  metrics: [calibration] # 100 x mean per-position exp(-KL)
+
+representation:
+  # The handler cuts its own 512-residue window centred on each scored
+  # position, so the dataloader must keep full sequences (longest ~7k).
+  max_length: 100000
+  embedding_cache:
+    enabled: false
+
+prediction:
+  controls: [random_trunk]

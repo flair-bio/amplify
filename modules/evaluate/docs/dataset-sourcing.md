@@ -400,13 +400,14 @@ Notes:
 `train_<name>`/`validation_<name>`/`test_<name>`:
 
 ```bash
-uv run accelerate launch modules/evaluate/src/run_evaluate.py \
-    modules/evaluate/configs/config.yaml \
-    modules/evaluate/configs/models/amplify_120m.yaml \
-    modules/evaluate/configs/tasks/sequence_classification.yaml \
-    modules/evaluate/configs/datasets/localization_prediction.yaml \
+uv run python -m modules.evaluate.src.run_evaluate \
+    --suite /path/to/localization_suite.yaml \
+    --model amplify_120m workspace.model_revision=<40-char-commit-sha> \
     steps.prepare.split.name=cluster
 ```
+
+`/path/to/localization_suite.yaml` is a one-entry suite (`task:
+sequence_classification`, `evaluations: [{dataset: localization_prediction}]`).
 
 If the dataset does not publish those splits, Prepare fails and lists the
 splits it did find. Datasets with benchmark-specific split names set the roles
@@ -779,25 +780,23 @@ similar composition and random splits would be easier.
 uv run --with biopython modules/evaluate/scripts/dataset_sourcing/source_uniprot_protparams.py \
     modules/evaluate/configs/dataset_sourcing/source_uniprot_protparams.yaml
 
-# Frozen-trunk regression on gravy (the default property).
-uv run accelerate launch modules/evaluate/src/run_evaluate.py \
-    modules/evaluate/configs/config.yaml \
-    modules/evaluate/configs/models/amplify_120m.yaml \
-    modules/evaluate/configs/tasks/sequence_regression.yaml \
-    modules/evaluate/configs/datasets/uniprot_protparams.yaml \
-    modules/evaluate/configs/predictors/torch_linear.yaml \
-    workspace.base_path=./eval/protparams/gravy
+# Frozen-trunk regression on gravy (the default property). The suite is a
+# one-entry file: task sequence_regression, dataset uniprot_protparams.
+uv run python -m modules.evaluate.src.run_evaluate \
+    --suite /path/to/protparams_suite.yaml \
+    --model amplify_120m workspace.model_revision=<40-char-commit-sha> \
+    --config modules/evaluate/configs/predictors/torch_linear.yaml \
+    runtime.output_root=./eval/protparams/gravy
 
 # Run another of the 31 numeric properties independently. Use a separate
 # workspace path for every property so each run's scores/checkpoint is retained.
-uv run accelerate launch modules/evaluate/src/run_evaluate.py \
-    modules/evaluate/configs/config.yaml \
-    modules/evaluate/configs/models/amplify_120m.yaml \
-    modules/evaluate/configs/tasks/sequence_regression.yaml \
-    modules/evaluate/configs/datasets/uniprot_protparams.yaml \
-    modules/evaluate/configs/predictors/torch_linear.yaml \
+uv run python -m modules.evaluate.src.run_evaluate \
+    --suite /path/to/protparams_suite.yaml \
+    --model amplify_120m workspace.model_revision=<40-char-commit-sha> \
+    --config modules/evaluate/configs/predictors/torch_linear.yaml \
     steps.prepare.label_column=isoelectric_point \
-    workspace.base_path=./eval/protparams/isoelectric_point
+    runtime.output_root=./eval/protparams/isoelectric_point
+```
 ```
 
 Repeat for every column listed above. The task overlay supplies R² selection
@@ -805,7 +804,7 @@ and reporting defaults. Keep the property-level scores separate; if you
 report one summary across properties, average those R² values equally.
 
 The dataset overlay points to the local artifact. Override
-`workspace.dataset_repo_id` if you uploaded it.
+`dataset.repo_id` if you uploaded it.
 
 ### InterPro
 

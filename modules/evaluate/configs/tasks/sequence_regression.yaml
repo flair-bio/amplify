@@ -1,15 +1,16 @@
-workspace:
-  task_type: sequence_regression
+task:
+  type: sequence_regression
 
 baselines:
   names: [train_mean]
 
-steps:
-  tune:
-    hyperparameter_search:
-      metric: r2
-      direction: maximize
-  score:
-    metrics: [r2] # property-level ProtParams default; stability overrides this
-  predict:
-    controls: [random_trunk]
+training:
+  hyperparameter_search:
+    metric: r2
+    direction: maximize
+
+scoring:
+  metrics: [r2] # property-level ProtParams default; stability overrides this
+
+prediction:
+  controls: [random_trunk]

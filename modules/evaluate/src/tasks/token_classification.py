@@ -32,6 +32,7 @@ class TokenClassificationTask(TaskHandler):
     auto_model_class = AutoModelForTokenClassification
     is_ragged = True
     aligns_labels = True
+    masks_ignore_index = True
     accepted_target_types = frozenset({"categorical"})
     accepted_label_formats = frozenset({"per_token"})
 

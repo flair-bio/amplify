@@ -15,7 +15,9 @@ from pydantic import BaseModel
 
 from modules.core.utils.config_loader import load_runtime_config_from_argv
 from modules.core.utils.hf_download import resolve_hf_token
-from modules.evaluate.scripts.dataset_sourcing.shared.config import DatasetSourcingConfig
+from modules.evaluate.scripts.dataset_sourcing.shared.config import (
+    DatasetSourcingConfig,
+)
 from modules.evaluate.scripts.dataset_sourcing.shared.hf_io import (
     download_dataset,
     upload_dataset_artifact,
@@ -241,7 +243,7 @@ def run_for_dataset(
     )
 
 
-def run_cli[ConfigT: BaseModel](
+def run_cli[ConfigT: DatasetSourcingConfig](
     argv: list[str], model_cls: type[ConfigT], spec: DatasetSourceSpec
 ) -> None:
     """CLI for HF-repository sources handled by :func:`run_for_dataset`.

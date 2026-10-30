@@ -9,22 +9,29 @@ from accelerate import Accelerator
 from torch import nn
 from torch.utils.data import DataLoader
 
-from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
-from modules.evaluate.src.config import LayerwiseConfig
-from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
-from modules.evaluate.src.model.layerwise import LayerwiseProbeModel
-from modules.evaluate.src.steps.tune import (
-    HyperparameterSearchConfig,
-    HyperparameterSearchSpaceConfig,
-    TuneConfig,
-    TuneStep,
-    _improves,
-)
 from modules.evaluate.src.artifacts.feature_cache import (
     EmbeddingCache,
     EmbeddingCacheConfig,
 )
+from modules.evaluate.src.config import LayerwiseConfig
+from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.model.heads import EmbeddingProbeHead, HeadConfig
+from modules.evaluate.src.model.layerwise import LayerwiseProbeModel
+from modules.evaluate.src.predictors.embeddings import EmbeddingDataset
+from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
+from modules.evaluate.src.training.config import (
+    HyperparameterSearchConfig,
+    HyperparameterSearchSpaceConfig,
+    TuneConfig,
+)
+from modules.evaluate.src.training.search import (
+    generate_candidates,
+    improves,
+    suggest_weight_decay,
+)
+from modules.evaluate.src.training.search_loop import search_hyperparameters
+from modules.evaluate.src.training.torch_trainer import TorchProbeTrainer
+from modules.evaluate.src.training.tuning import fit_probe_protocol
 from modules.evaluate.src.utils.hpo import (
     build_optimizer,
     build_scheduler,
@@ -33,7 +40,6 @@ from modules.evaluate.src.utils.hpo import (
     sample_candidates,
     split_decay_parameters,
 )
-from modules.evaluate.src.predictors.embeddings import EmbeddingDataset
 
 from .test_prepare import _make_workspace, _run_prepare
 
@@ -78,11 +84,11 @@ def test_validation_f1_keeps_configured_classes_and_token_masks(
         [[0, 0], []] if task_type == "token_classification" else labels.tolist()
     )
     monkeypatch.setattr(
-        "modules.evaluate.src.steps.tune.run_inference",
+        "modules.evaluate.src.training.torch_trainer.run_inference",
         lambda *args, **kwargs: ([], live_labels, live_labels, None, None),
     )
-    step = TuneStep(TuneConfig(metric_aggregation="macro"))
-    score = step._evaluate_validation(
+    trainer = TorchProbeTrainer(TuneConfig(metric_aggregation="macro"))
+    score = trainer.evaluate_validation(
         _make_workspace(tmp_path, task_type, num_labels=num_labels),
         prepared,
         Accelerator(cpu=True),
@@ -147,14 +153,16 @@ def test_online_layerwise_tuning_saves_independent_heads(
     assert isinstance(prepared.model, LayerwiseProbeModel)
     workspace_config = _make_workspace(tmp_path, "sequence_classification").config
     workspace = get_evaluation_workspace(workspace_config, variant="layerwise-test")
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             head=HeadConfig(head_type="torch_linear"),
             max_epochs=1,
             early_stopping_patience=None,
         )
     )
-    trained = step.run(workspace, prepared, accelerator=Accelerator(cpu=True))
+    trained = fit_probe_protocol(
+        trainer, workspace, prepared, accelerator=Accelerator(cpu=True)
+    )
     assert isinstance(trained.model, LayerwiseProbeModel)
     assert all(parameter.grad is None for parameter in trained.model.trunk.parameters())
     for layer in (0, 2):
@@ -181,7 +189,7 @@ def test_online_layerwise_tuning_saves_independent_heads(
     ],
 )
 def test_layerwise_improvement_ignores_nan(score, best, direction, expected):
-    assert _improves(score, best, direction) is expected
+    assert improves(score, best, direction) is expected
 
 
 def test_checkpoint_state_is_independent_cpu_copy() -> None:
@@ -201,6 +209,7 @@ def test_checkpoint_state_is_independent_cpu_copy() -> None:
 @pytest.mark.parametrize("load_checkpoint", [False, True])
 def test_finetuning_norm_weight_decay(norm_type, load_checkpoint, tmp_path):
     from transformers import AutoModelForSequenceClassification
+
     from modules.pretrain.src.model.configuration_amplify import AMPLIFYConfig
     from modules.pretrain.src.model.modeling_amplify import (
         AMPLIFYForSequenceClassification,
@@ -267,13 +276,18 @@ def test_random_candidates_are_unique_and_bounded_by_grid() -> None:
         weight_decay=[0.0],
         max_epochs=[1, 2],
     )
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             hyperparameter_search=HyperparameterSearchConfig(search_space=search_space)
         )
     )
 
-    candidates = step._generate_candidates("random", n_trials=10, seed=42)
+    candidates = generate_candidates(
+        trainer.config.hyperparameter_search.search_space,
+        "random",
+        n_trials=10,
+        seed=42,
+    )
 
     assert len(candidates) == 4
     assert len({tuple(candidate.items()) for candidate in candidates}) == 4
@@ -302,7 +316,7 @@ def test_tpe_samples_weight_decay_continuously_and_reproducibly(
         else [{"labels": 0}],
         batch_size=2,
     )
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             hyperparameter_search=HyperparameterSearchConfig(
                 enabled=True,
@@ -326,7 +340,7 @@ def test_tpe_samples_weight_decay_continuously_and_reproducibly(
         samples.append(hparams["weight_decay"])
         return hparams["weight_decay"]
 
-    monkeypatch.setattr(step, "_train", train)
+    monkeypatch.setattr(trainer, "train", train)
     for _ in range(2):
         prepared = PreparedArtifacts(
             model=EmbeddingProbeHead(3, 2, "sequence_classification"),
@@ -335,7 +349,9 @@ def test_tpe_samples_weight_decay_continuously_and_reproducibly(
             val_dataloader=loader,
             test_dataloader=None,
         )
-        best = step._search_hyperparameters(workspace, prepared, accelerator, seed=42)
+        best = search_hyperparameters(
+            trainer, workspace, prepared, accelerator, seed=42
+        )
         assert best["weight_decay"] == max(samples[-4:])
 
     assert samples[:4] == samples[4:]
@@ -346,7 +362,7 @@ def test_tpe_samples_weight_decay_continuously_and_reproducibly(
 def test_categorical_weight_decay_preserves_zero_and_grid_candidates():
     trial = MagicMock()
     trial.suggest_categorical.return_value = 0.0
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             hyperparameter_search=HyperparameterSearchConfig(
                 search_space=HyperparameterSearchSpaceConfig(
@@ -357,18 +373,31 @@ def test_categorical_weight_decay_preserves_zero_and_grid_candidates():
             )
         )
     )
-    assert step._suggest_weight_decay(trial) == 0.0
+    assert (
+        suggest_weight_decay(trial, trainer.config.hyperparameter_search.search_space)
+        == 0.0
+    )
     trial.suggest_categorical.assert_called_once_with("weight_decay", [0.0, 1e-3])
     trial.suggest_float.assert_not_called()
     for pattern in ("random", "grid"):
-        candidates = step._generate_candidates(pattern, n_trials=10, seed=42)
+        candidates = generate_candidates(
+            trainer.config.hyperparameter_search.search_space,
+            pattern,
+            n_trials=10,
+            seed=42,
+        )
         assert {candidate["weight_decay"] for candidate in candidates} == {0.0, 1e-3}
 
-    space = step.config.hyperparameter_search.search_space
+    space = trainer.config.hyperparameter_search.search_space
     space.weight_decay = [1e-6, 1e-1]
     space.weight_decay_sampling = "log"
     for pattern in ("random", "grid"):
-        candidates = step._generate_candidates(pattern, n_trials=10, seed=42)
+        candidates = generate_candidates(
+            trainer.config.hyperparameter_search.search_space,
+            pattern,
+            n_trials=10,
+            seed=42,
+        )
         assert {candidate["weight_decay"] for candidate in candidates} == {1e-6, 1e-1}
 
 
@@ -405,7 +434,7 @@ def test_gather_embeddings_unwraps_accelerate_dataset_wrappers() -> None:
     wrapped_loader = LoaderWrapper(DatasetWrapper(embedding_dataset))
     accelerator = MagicMock()
 
-    actual_embeddings, actual_labels = TuneStep._gather_embeddings(
+    actual_embeddings, actual_labels = TorchProbeTrainer.gather_embeddings(
         wrapped_loader, accelerator
     )
 
@@ -417,22 +446,22 @@ def test_gather_embeddings_unwraps_accelerate_dataset_wrappers() -> None:
 def test_resolve_direction_flips_to_minimize_for_lower_is_better_metric() -> None:
     # "mse" (the sequence_regression default metric) is lower-is-better, so
     # an unset direction must resolve to minimize.
-    step = TuneStep(TuneConfig())
+    trainer = TorchProbeTrainer(TuneConfig())
 
-    assert step._resolve_direction("mse") == "minimize"
-    assert step._resolve_direction("f1") == "maximize"
+    assert trainer.resolve_direction("mse") == "minimize"
+    assert trainer.resolve_direction("f1") == "maximize"
 
 
 def test_resolve_direction_respects_explicit_direction() -> None:
     # An explicitly-set direction (even one that seems mismatched) must be
     # honored rather than overridden.
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             hyperparameter_search=HyperparameterSearchConfig(direction="maximize")
         )
     )
 
-    assert step._resolve_direction("mse") == "maximize"
+    assert trainer.resolve_direction("mse") == "maximize"
 
 
 def test_resolve_search_direction_uses_metric_default_unless_explicit() -> None:
@@ -441,7 +470,7 @@ def test_resolve_search_direction_uses_metric_default_unless_explicit() -> None:
 
 
 def test_save_model_persists_model_and_tokenizer_on_main_process(tmp_path) -> None:
-    step = TuneStep(TuneConfig())
+    trainer = TorchProbeTrainer(TuneConfig())
     workspace = MagicMock(model_path=tmp_path / "model")
 
     model = MagicMock()
@@ -458,7 +487,9 @@ def test_save_model_persists_model_and_tokenizer_on_main_process(tmp_path) -> No
     accelerator.unwrap_model.return_value = model
 
     best_hparams = {"learning_rate": 1e-4, "weight_decay": 1e-4, "max_epochs": 10}
-    step._save_model(workspace, prepared, model, accelerator, best_hparams, seed=710019)
+    trainer.save_model(
+        workspace, prepared, model, accelerator, best_hparams, seed=710019
+    )
 
     assert workspace.model_path.is_dir()
     accelerator.unwrap_model.assert_called_once_with(model)
@@ -480,7 +511,7 @@ def test_save_model_persists_model_and_tokenizer_on_main_process(tmp_path) -> No
 
 
 def test_save_model_skips_tokenizer_save_on_non_main_process(tmp_path) -> None:
-    step = TuneStep(TuneConfig())
+    trainer = TorchProbeTrainer(TuneConfig())
     workspace = MagicMock(model_path=tmp_path / "model")
 
     model = MagicMock()
@@ -497,7 +528,9 @@ def test_save_model_skips_tokenizer_save_on_non_main_process(tmp_path) -> None:
     accelerator.unwrap_model.return_value = model
 
     best_hparams = {"learning_rate": 1e-4, "weight_decay": 1e-4, "max_epochs": 10}
-    step._save_model(workspace, prepared, model, accelerator, best_hparams, seed=710019)
+    trainer.save_model(
+        workspace, prepared, model, accelerator, best_hparams, seed=710019
+    )
 
     model.save_pretrained.assert_called_once_with(
         workspace.model_path,
@@ -529,7 +562,7 @@ class TestVarianceSeeds:
             model_path=tmp_path / "model",
             num_labels=2,
         )
-        step = TuneStep(
+        trainer = TorchProbeTrainer(
             TuneConfig(
                 head=HeadConfig(head_type="mlp"),
                 max_epochs=1,
@@ -538,14 +571,14 @@ class TestVarianceSeeds:
                 variance_seeds=[1, 2],
             )
         )
-        trained = step.run(workspace, artifacts, seed=42)
+        trained = fit_probe_protocol(trainer, workspace, artifacts, seed=42)
         canonical_state = {
             name: tensor.clone() for name, tensor in trained.model.state_dict().items()
         }
 
         accelerator = Accelerator()
         with caplog.at_level("INFO"):
-            step._report_torch_seed_variance(
+            trainer.report_seed_variance(
                 workspace,
                 trained,
                 accelerator,
@@ -571,7 +604,7 @@ class TestVarianceSeeds:
             model_path=tmp_path / "model",
             num_labels=2,
         )
-        step = TuneStep(
+        trainer = TorchProbeTrainer(
             TuneConfig(
                 head=HeadConfig(head_type="sklearn_linear"),
                 save_best_model=False,
@@ -580,7 +613,7 @@ class TestVarianceSeeds:
         )
 
         with caplog.at_level("INFO"):
-            step.run(workspace, artifacts, seed=42)
+            fit_probe_protocol(trainer, workspace, artifacts, seed=42)
 
         assert "Seed variance (2 extra seeds" in caplog.text
 
@@ -608,7 +641,7 @@ class TestBohbAcrossTaskTypesAndSettings:
         workspace = MagicMock(
             task_type=task_type, model_path=tmp_path / "model", num_labels=2
         )
-        step = TuneStep(
+        trainer = TorchProbeTrainer(
             TuneConfig(
                 head=HeadConfig(head_type=head_type),
                 max_epochs=1,
@@ -626,7 +659,7 @@ class TestBohbAcrossTaskTypesAndSettings:
             )
         )
 
-        result = step.run(workspace, artifacts, seed=42)
+        result = fit_probe_protocol(trainer, workspace, artifacts, seed=42)
 
         assert result.model is not None
 
@@ -657,7 +690,7 @@ class TestBohbAcrossClassicalHeadTypes:
         workspace = MagicMock(
             task_type=task_type, model_path=tmp_path / "model", num_labels=2
         )
-        step = TuneStep(
+        trainer = TorchProbeTrainer(
             TuneConfig(
                 head=HeadConfig(
                     head_type=head_type,
@@ -670,7 +703,7 @@ class TestBohbAcrossClassicalHeadTypes:
             )
         )
 
-        result = step.run(workspace, artifacts, seed=42)
+        result = fit_probe_protocol(trainer, workspace, artifacts, seed=42)
 
         assert hasattr(result.model, "predict")
 
@@ -688,25 +721,25 @@ def test_cached_validation_features_are_prepared_once_per_training_run(
     )
     workspace = _make_workspace(tmp_path, "sequence_classification")
     accelerator = Accelerator(cpu=True)
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             max_epochs=3,
             early_stopping_patience=5 if monitor else None,
             save_best_model=False,
         )
     )
-    prepare_split = MagicMock(wraps=step._cached_embedding_split)
-    evaluate_validation = step._evaluate_validation
+    prepare_split = MagicMock(wraps=trainer.cached_embedding_split)
+    evaluate_validation = trainer.evaluate_validation
     validation_calls = MagicMock(wraps=evaluate_validation)
-    monkeypatch.setattr(step, "_cached_embedding_split", prepare_split)
-    monkeypatch.setattr(step, "_evaluate_validation", validation_calls)
+    monkeypatch.setattr(trainer, "cached_embedding_split", prepare_split)
+    monkeypatch.setattr(trainer, "evaluate_validation", validation_calls)
     hparams = {"learning_rate": 1e-3, "weight_decay": 0.0, "max_epochs": 3}
     previous_cached_val = None
 
     for _ in range(2):
         prepare_split.reset_mock()
         validation_calls.reset_mock()
-        score = step._train(workspace, prepared, accelerator, hparams)
+        score = trainer.train(workspace, prepared, accelerator, hparams)
 
         validation_preparations = [
             call
@@ -733,7 +766,7 @@ def test_cached_validation_features_are_prepared_once_per_training_run(
                     workspace,
                     prepared,
                     accelerator,
-                    step._resolve_metric_name(workspace),
+                    trainer.resolve_metric_name(workspace),
                 )
             assert validation_forward.called
             assert all(
@@ -756,17 +789,17 @@ def test_cached_training_features_are_transferred_only_when_training(
     )
     workspace = _make_workspace(tmp_path, "sequence_classification")
     accelerator = Accelerator(cpu=True)
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             max_epochs=1,
             early_stopping_patience=None,
             save_best_model=False,
         )
     )
-    prepare_split = MagicMock(wraps=step._cached_embedding_split)
-    monkeypatch.setattr(step, "_cached_embedding_split", prepare_split)
+    prepare_split = MagicMock(wraps=trainer.cached_embedding_split)
+    monkeypatch.setattr(trainer, "cached_embedding_split", prepare_split)
 
-    result = step.run(workspace, prepared, accelerator=accelerator)
+    result = fit_probe_protocol(trainer, workspace, prepared, accelerator=accelerator)
 
     assert result is prepared
     prepare_split.assert_called_once_with(prepared.train_dataloader)
@@ -798,7 +831,7 @@ def test_cached_probe_batch_size_honors_loader_and_override(
         val_dataloader=val_loader,
         test_dataloader=None,
     )
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             batch_size=batch_size,
             max_epochs=2,
@@ -816,14 +849,16 @@ def test_cached_probe_batch_size_honors_loader_and_override(
     scheduler = MagicMock(wraps=build_scheduler)
     forward = MagicMock(wraps=model.forward)
     monkeypatch.setattr(
-        "modules.evaluate.src.steps.tune.build_optimizer", track_optimizer
+        "modules.evaluate.src.training.torch_trainer.build_optimizer", track_optimizer
     )
-    monkeypatch.setattr("modules.evaluate.src.steps.tune.build_scheduler", scheduler)
+    monkeypatch.setattr(
+        "modules.evaluate.src.training.torch_trainer.build_scheduler", scheduler
+    )
     monkeypatch.setattr(model, "forward", forward)
     workspace = MagicMock(task_type="sequence_classification", num_labels=2)
     hparams = {"learning_rate": 1e-3, "weight_decay": 0.0, "max_epochs": 2}
 
-    step._train(workspace, prepared, accelerator, hparams)
+    trainer.train(workspace, prepared, accelerator, hparams)
 
     assert [
         call.kwargs["inputs_embeds"].shape[0] for call in forward.call_args_list
@@ -833,7 +868,7 @@ def test_cached_probe_batch_size_honors_loader_and_override(
     assert scheduler.call_args.kwargs["num_training_steps"] == expected_steps
 
     forward.reset_mock()
-    step._evaluate_validation(workspace, prepared, accelerator, "f1")
+    trainer.evaluate_validation(workspace, prepared, accelerator, "f1")
     assert [
         call.kwargs["inputs_embeds"].shape[0] for call in forward.call_args_list
     ] == val_batch_sizes
@@ -850,7 +885,7 @@ def test_cached_mlp_checkpoint_reloads_trained_head(
         embedding_cache=EmbeddingCacheConfig(enabled=True),
     )
     workspace = _make_workspace(tmp_path, "sequence_classification")
-    step = TuneStep(
+    trainer = TorchProbeTrainer(
         TuneConfig(
             head=HeadConfig(head_type="mlp", hidden_size=7),
             learning_rate=1e-2,
@@ -860,7 +895,9 @@ def test_cached_mlp_checkpoint_reloads_trained_head(
         )
     )
 
-    trained = step.run(workspace, prepared, accelerator=Accelerator(cpu=True))
+    trained = fit_probe_protocol(
+        trainer, workspace, prepared, accelerator=Accelerator(cpu=True)
+    )
 
     metadata = json.loads((workspace.model_path / "probe_head_config.json").read_text())
     assert metadata["probe_hidden_size"] == 7
@@ -876,7 +913,7 @@ def test_cached_mlp_checkpoint_reloads_trained_head(
     reloaded.load_state_dict(state, strict=True)
     for name, tensor in trained.model.state_dict().items():
         torch.testing.assert_close(state[name], tensor)
-    features, _ = step._cached_embedding_split(prepared.val_dataloader)
+    features, _ = trainer.cached_embedding_split(prepared.val_dataloader)
     with torch.inference_mode():
         torch.testing.assert_close(
             reloaded(inputs_embeds=features).logits,

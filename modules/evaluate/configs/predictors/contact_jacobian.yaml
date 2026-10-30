@@ -1,14 +1,14 @@
-steps:
+predictor:
   mode: evaluate_as_is
-  prepare:
-    embedding_cache:
-      enabled: false
-      cache_policy: "off"
-  tune:
-    head:
-      head_type: categorical_jacobian
-    hyperparameter_search:
-      enabled: false
-    refit_on_train_validation: false
-  predict:
-    controls: []
+  head:
+    head_type: categorical_jacobian
+representation:
+  embedding_cache:
+    enabled: false
+    cache_policy: "off"
+training:
+  hyperparameter_search:
+    enabled: false
+  refit_on_train_validation: false
+prediction:
+  controls: []

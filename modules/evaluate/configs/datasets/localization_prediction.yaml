@@ -1,14 +1,14 @@
-workspace:
-  dataset_name: localization_prediction
-  dataset_repo_id: flair-bio/biomap-research-localization_prediction
+dataset:
+  name: localization_prediction
+  repo_id: flair-bio/biomap-research-localization_prediction
   target_type: categorical
   label_format: scalar
   num_labels: 10
 
-# Evaluated with the DeepLoc-fitted probe; excluded from training, tuning,
-# and model selection.
-# Verify class-index compatibility before interpreting the setHARD score.
-external_test_sets:
-  - name: sethard
-    dataset_repo_id: flair-bio/sethard
-    split: test
+  # Evaluated with the DeepLoc-fitted probe; excluded from training, tuning,
+  # and model selection.
+  # Verify class-index compatibility before interpreting the setHARD score.
+  external_test_sets:
+    - name: sethard
+      dataset_repo_id: flair-bio/sethard
+      split: test

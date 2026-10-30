@@ -4,13 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from modules.evaluate.src import suites
-from modules.evaluate.src.suites import (
+from modules.evaluate.src.config import suites
+from modules.evaluate.src.config.suites import (
     SuiteError,
     expand_suite,
     model_label,
+    resolve_model,
     resolve_model_collection,
-    resolve_model_paths,
     select_jobs,
 )
 
@@ -87,9 +87,7 @@ def test_unknown_task_is_rejected(tmp_path: Path) -> None:
 
 
 def test_unknown_dataset_is_rejected(tmp_path: Path) -> None:
-    text = (
-        "suite: bad\ntask: calibration\nevaluations:\n  - dataset: missing_dataset\n"
-    )
+    text = "suite: bad\ntask: calibration\nevaluations:\n  - dataset: missing_dataset\n"
     with pytest.raises(SuiteError, match="unknown dataset"):
         expand_suite(_write(tmp_path, "bad_dataset", text))
 
@@ -141,25 +139,65 @@ def test_config_paths_follow_overlay_order() -> None:
 
 
 def test_model_name_and_yaml_paths_resolve() -> None:
-    (named,) = resolve_model_paths("amplify_120m")
-    assert named.name == "amplify_120m.yaml"
-    assert model_label(named) == "amplify_120m"
-    (explicit,) = resolve_model_paths(str(named))
-    assert explicit == named
+    named = resolve_model("amplify_120m")
+    assert named.source == "config"
+    assert named.config_path is not None
+    assert named.config_path.name == "amplify_120m.yaml"
+    assert named.label == "amplify_120m"
+    explicit = resolve_model(str(named.config_path))
+    assert explicit.config_path == named.config_path
+    assert explicit.overrides == ()
 
 
-def test_checkpoint_directory_is_rejected_explicitly(tmp_path: Path) -> None:
-    with pytest.raises(SuiteError, match="checkpoint"):
-        resolve_model_paths(str(tmp_path / "checkpoint"))
+def test_checkpoint_directory_resolves_to_model_overrides(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "amplify_ckpt_10000"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text("{}")
+    ref = resolve_model(str(checkpoint))
+    assert ref.source == "checkpoint"
+    assert ref.config_path is None
+    assert ref.label == "amplify_ckpt_10000"
+    assert f"model.repo_id={checkpoint.resolve()}" in ref.overrides
+    assert "model.name=amplify_ckpt_10000" in ref.overrides
+
+
+def test_checkpoint_directory_requires_config_json(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "ckpt"
+    checkpoint.mkdir()
+    with pytest.raises(SuiteError, match="config.json"):
+        resolve_model(str(checkpoint))
+
+
+def test_missing_local_model_path_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(SuiteError, match="not a checkpoint directory"):
+        resolve_model(str(tmp_path / "nope"))
+
+
+def test_unsafe_checkpoint_name_requires_model_name(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "bad name!"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text("{}")
+    with pytest.raises(SuiteError, match="--model-name"):
+        resolve_model(str(checkpoint))
+    ref = resolve_model(str(checkpoint), label="my-model")
+    assert ref.label == "my-model"
+
+
+def test_remote_identifier_gets_deterministic_or_explicit_label() -> None:
+    ref = resolve_model("flair-bio/amplify-120m")
+    assert ref.source == "remote"
+    assert ref.label == "flair-bio--amplify-120m"
+    assert "model.repo_id=flair-bio/amplify-120m" in ref.overrides
+    assert resolve_model("flair-bio/amplify-120m", label="amp").label == "amp"
 
 
 def test_missing_model_config_is_rejected() -> None:
     with pytest.raises(SuiteError, match="not found"):
-        resolve_model_paths("no_such_model")
+        resolve_model("no_such_model")
 
 
 def test_production_model_collection_resolves_in_order() -> None:
-    names = [p.name for p in resolve_model_collection("production")]
+    names = [ref.config_path.name for ref in resolve_model_collection("production")]
     assert names == [
         "amplify_120m.yaml",
         "amplify_350m.yaml",
@@ -173,6 +211,19 @@ def test_collection_rejects_duplicates(tmp_path: Path) -> None:
     path.write_text("models: [amplify_120m, amplify_120m]\n")
     with pytest.raises(SuiteError, match="duplicate"):
         resolve_model_collection(str(path))
+
+
+def test_collection_rejects_duplicate_labels_from_different_files(
+    tmp_path: Path,
+) -> None:
+    first, second = tmp_path / "a" / "x.yaml", tmp_path / "b" / "x.yaml"
+    for path in (first, second):
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("workspace: {}\n")
+    collection = tmp_path / "labels.yaml"
+    collection.write_text(f"models: [{first}, {second}]\n")
+    with pytest.raises(SuiteError, match="duplicate labels"):
+        resolve_model_collection(str(collection))
 
 
 def test_model_label_rejects_unsafe_names() -> None:

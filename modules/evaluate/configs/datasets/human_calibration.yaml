@@ -1,6 +1,6 @@
-workspace:
-  dataset_name: human_calibration
-  dataset_repo_id: flair-bio/human_calibration
+dataset:
+  name: human_calibration
+  repo_id: flair-bio/human_calibration
   target_type: categorical
   label_format: consensus_profile
   num_labels: null

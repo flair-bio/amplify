@@ -10,24 +10,26 @@ from accelerate import Accelerator
 from torch import nn
 from torch.utils.data import DataLoader
 
-from modules.evaluate.src.model.heads import EmbeddingProbeHead, HeadConfig
-from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
-from modules.evaluate.src.steps.predict import PredictConfig, PredictStep
-from modules.evaluate.src.steps.tune import (
-    HyperparameterSearchConfig,
-    HyperparameterSearchSpaceConfig,
-    TuneConfig,
-    TuneStep,
-)
-from modules.evaluate.src.utils.controls import ControlBuilder, build_random_trunk
 from modules.evaluate.src.artifacts.feature_cache import (
     EmbeddingCacheConfig,
     weights_fingerprint,
 )
+from modules.evaluate.src.config.predict import PredictConfig
+from modules.evaluate.src.model.heads import EmbeddingProbeHead, HeadConfig
 from modules.evaluate.src.predictors.embeddings import (
     EmbeddingDataset,
     find_embedding_dataset,
 )
+from modules.evaluate.src.predictors.inference import predict_trained
+from modules.evaluate.src.schemas.artifacts import PreparedArtifacts
+from modules.evaluate.src.training.config import (
+    HyperparameterSearchConfig,
+    HyperparameterSearchSpaceConfig,
+    TuneConfig,
+)
+from modules.evaluate.src.training.torch_trainer import TorchProbeTrainer
+from modules.evaluate.src.training.tuning import fit_probe_protocol
+from modules.evaluate.src.utils.controls import ControlBuilder, build_random_trunk
 
 from .test_prepare import _make_workspace, _run_prepare
 
@@ -142,7 +144,8 @@ def test_randomized_heads_preserve_training_feature_statistics(
 def test_cached_random_trunk_selects_and_refits_its_own_probe(
     monkeypatch, tmp_path, model_family, refit, head_type, task_type
 ):
-    from modules.evaluate.src.steps import tune as tune_module
+    from modules.evaluate.src.training import refit as refit_module
+    from modules.evaluate.src.training.search_loop import search_hyperparameters
 
     torch.manual_seed(1234)
     prepared = _run_prepare(
@@ -160,7 +163,7 @@ def test_cached_random_trunk_selects_and_refits_its_own_probe(
         prepared.test_dataloader,
     )
     extracted = []
-    original_build = tune_module.build_embedding_dataloaders
+    original_build = refit_module.build_embedding_dataloaders
 
     def capture_features(**kwargs):
         assert set(kwargs["splits"]) == {"train", "validation"}
@@ -168,15 +171,17 @@ def test_cached_random_trunk_selects_and_refits_its_own_probe(
         extracted.append((kwargs["model"], loaders))
         return loaders
 
-    monkeypatch.setattr(tune_module, "build_embedding_dataloaders", capture_features)
+    monkeypatch.setattr(refit_module, "build_embedding_dataloaders", capture_features)
     searches = []
-    original_search = TuneStep._search_hyperparameters
+    original_search = search_hyperparameters
 
-    def capture_search(self, ws, *args, **kwargs):
-        searches.append((ws.variant, self.config.hyperparameter_search.model_dump()))
-        return original_search(self, ws, *args, **kwargs)
+    def capture_search(trainer, ws, *args, **kwargs):
+        searches.append((ws.variant, trainer.config.hyperparameter_search.model_dump()))
+        return original_search(trainer, ws, *args, **kwargs)
 
-    monkeypatch.setattr(TuneStep, "_search_hyperparameters", capture_search)
+    monkeypatch.setattr(
+        "modules.evaluate.src.training.tuning.search_hyperparameters", capture_search
+    )
     config = TuneConfig(
         head=HeadConfig(
             head_type=head_type,
@@ -200,8 +205,13 @@ def test_cached_random_trunk_selects_and_refits_its_own_probe(
             ),
         ),
     )
-    TuneStep(config).run(
-        workspace, prepared, seed=42, controls=["random_trunk"], accelerator=accelerator
+    fit_probe_protocol(
+        TorchProbeTrainer(config),
+        workspace,
+        prepared,
+        seed=42,
+        controls=["random_trunk"],
+        accelerator=accelerator,
     )
     assert prepared.random_trunk_model is not prepared.model
     assert original_loaders == (
@@ -254,9 +264,13 @@ def test_cached_random_trunk_selects_and_refits_its_own_probe(
         monkeypatch.setattr(
             ControlBuilder, "_run_local_head_inference", staticmethod(check_head)
         )
-    result = PredictStep(
-        PredictConfig(controls=["random_trunk"], persist_to_disk=False)
-    ).run(workspace, prepared, seed=42, accelerator=accelerator)
+    result = predict_trained(
+        workspace,
+        prepared,
+        PredictConfig(controls=["random_trunk"], persist_to_disk=False),
+        seed=42,
+        accelerator=accelerator,
+    )
     assert (
         result.controls["random_trunk"]["id"].to_list()
         == result.predictions["id"].to_list()
@@ -276,7 +290,9 @@ def test_cached_random_trunk_requires_tuning():
         test_dataloader=None,
         embedding_backend=SimpleNamespace(trunk=_ControlTrunk(4)),
     )
-    with pytest.raises(ValueError, match="pass the predict controls to TuneStep"):
+    with pytest.raises(
+        ValueError, match="pass the predict controls to fit_probe_protocol"
+    ):
         ControlBuilder(False)._run_embedding_control_inference(
             "random_trunk",
             SimpleNamespace(task_type="sequence_classification"),
