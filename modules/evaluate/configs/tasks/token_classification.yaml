@@ -1,6 +1,9 @@
 workspace:
   task_type: token_classification
 
+baselines:
+  names: [majority_class]
+
 steps:
   tune:
     batch_size: 2048 # valid residues, not proteins; used when HPO is disabled
@@ -17,4 +20,3 @@ steps:
   predict:
     embedding_batch_size: 8192 # cached residues; trunk batches still use prepare settings
     controls: [random_trunk]
-    baselines: [majority_class] # training-only valid-residue prior; not a model control

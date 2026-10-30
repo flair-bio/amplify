@@ -2,7 +2,7 @@ workspace:
   task_type: sequence_regression
 
 baselines:
-  names: [train_mean]
+  names: [train_mean, composition, mmseqs_knn]
 
 steps:
   tune:

@@ -554,6 +554,8 @@ def tokenize_dataset(
                 )
 
             original_id = examples[id_column][i] if id_column in examples else None
+            if original_id is None and task_type == "token_classification":
+                original_id = indices[i]
             for row in task.expand_tokenized_example(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -632,9 +634,9 @@ def build_dataloaders(
         collate_fn=collator,
         num_workers=config.num_workers,
         pin_memory=config.pin_memory,
-        persistent_workers=config.persistent_workers
-        if config.num_workers > 0
-        else False,
+        persistent_workers=(
+            config.persistent_workers if config.num_workers > 0 else False
+        ),
     )
 
     def _build(

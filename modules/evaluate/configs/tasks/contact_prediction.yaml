@@ -2,9 +2,12 @@ workspace:
   task_type: contact_prediction
   model_kwargs: {}
 
+baselines:
+  names: [separation_prior]
+
 steps:
   predict:
-    controls: [random_trunk] # independent fitted head, or zero-shot Jacobian control
+    controls: [random_trunk]
     collect_probabilities: false
   score:
     metrics: [AUC, P@L, P@L/2, P@L/5, ROC-AUC]

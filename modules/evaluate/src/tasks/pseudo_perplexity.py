@@ -19,6 +19,7 @@ class PseudoPerplexityTask(FlatMetricsTask):
     """Score each residue by masking it and reading its MLM log-probability."""
 
     evaluation_modes = frozenset({"evaluate_as_is"})
+    dataset_baselines = frozenset({"amino_acid_frequency"})
 
     name = "pseudo_perplexity"
     auto_model_class = AutoModelForMaskedLM

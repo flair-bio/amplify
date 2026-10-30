@@ -21,7 +21,7 @@ class SequenceClassificationTask(FlatMetricsTask):
     """
 
     supports_layerwise = True
-    dataset_baselines = frozenset({"majority_class"})
+    dataset_baselines = frozenset({"majority_class", "composition", "mmseqs_knn"})
     prediction_baselines = frozenset({"majority_class"})
 
     name = "sequence_classification"

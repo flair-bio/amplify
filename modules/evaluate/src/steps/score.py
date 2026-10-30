@@ -26,6 +26,7 @@ from modules.evaluate.src.contracts.artifacts import (
 from modules.evaluate.src.contracts.config import ScoreConfig
 from modules.evaluate.src.dataset.baseline_data import (
     align_baseline,
+    align_token_baseline,
     artifact_identity,
     load_baseline_artifact,
 )
@@ -72,11 +73,23 @@ class ScoreStep:
                 frame, path = load_baseline_artifact(
                     predict_result.baseline_context, name
                 )
-                controls[name] = align_baseline(
-                    frame,
-                    predictions_df,
-                    regression="continuous" in task.accepted_target_types,
-                )
+                if task.name == "contact_prediction":
+                    if name != "separation_prior":
+                        raise ValueError(
+                            f"Unsupported shared contact baseline: {name}."
+                        )
+                    controls[name] = _align_contact_baseline(
+                        frame, predictions_df, name
+                    )
+                elif task.name == "token_classification":
+                    controls[name] = align_token_baseline(frame, predictions_df)
+                else:
+                    controls[name] = align_baseline(
+                        frame,
+                        predictions_df,
+                        regression="continuous" in task.accepted_target_types,
+                        match_labels=task.name != "pseudo_perplexity",
+                    )
                 requested_controls.append(name)
                 baseline_references[name] = {
                     "path": str(path),
@@ -93,6 +106,7 @@ class ScoreStep:
                 result=result,
                 output_dir=workspace.scores_path,
                 manifest_path=workspace.run_manifest_path,
+                baseline_references=baseline_references,
             )
         return self._publish_flat_scores(
             workspace, result, baseline_references, seed=seed
@@ -249,6 +263,7 @@ class ScoreStep:
         result: StructuredScoreOutput,
         output_dir: Path,
         manifest_path: Path,
+        baseline_references: dict[str, dict[str, Any]],
     ) -> StructuredScoreOutput:
         logger.info("Scores: %s", result.summaries)
         seed = result.metadata.seed
@@ -269,6 +284,13 @@ class ScoreStep:
                 result.control_summaries[name],
                 control_dir / "scores.parquet",
             )
+        for name, reference in baseline_references.items():
+            if name in result.control_summaries:
+                reference["scores"] = result.control_summaries[name].to_dicts()
+                reference["scores_path"] = str(result.control_summaries_paths[name])
+                reference["unit_scores_path"] = str(
+                    result.control_unit_scores_paths[name]
+                )
         write_settings_json(
             output_dir / result.settings_filename,
             seed,
@@ -292,6 +314,53 @@ class ScoreStep:
                     }
                     for name, frame in result.control_summaries.items()
                 },
+                "baselines": baseline_references,
             },
         )
         return result
+
+
+def _align_contact_baseline(
+    baseline: pl.DataFrame, predictions: pl.DataFrame, name: str
+) -> pl.DataFrame:
+    """Require exact candidate/label correspondence before scoring a shared prior."""
+    required = {
+        "id",
+        "record_id",
+        "unit_id",
+        "split",
+        "source",
+        "edition",
+        "complex_id",
+        "target",
+        "kind",
+        "labels_available",
+        "original_i",
+        "original_j",
+        "labels",
+        "length",
+        "status",
+    }
+    if not required.issubset(baseline.columns) or "scores" not in baseline.columns:
+        raise ValueError(f"{name} artifact is missing contact prediction columns.")
+    if not required.issubset(predictions.columns):
+        raise ValueError("Primary contact predictions are missing candidate columns.")
+
+    def keyed_rows(frame: pl.DataFrame) -> dict[str, dict[str, Any]]:
+        rows = frame.to_dicts()
+        keyed = {row["id"]: row for row in rows}
+        if len(keyed) != len(rows):
+            raise ValueError(f"{name} artifact contains duplicate contact IDs.")
+        return keyed
+
+    baseline_rows = keyed_rows(baseline)
+    prediction_rows = keyed_rows(predictions)
+    if set(baseline_rows) != set(prediction_rows):
+        raise ValueError(f"{name} contact rows do not match primary prediction IDs.")
+    for identifier, row in baseline_rows.items():
+        primary = prediction_rows[identifier]
+        if any(row[key] != primary[key] for key in required - {"id"}):
+            raise ValueError(
+                f"{name} contact candidates differ from primary predictions."
+            )
+    return baseline

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -14,11 +15,22 @@ from modules.evaluate.src.dataset import contact, dataloader
 from modules.evaluate.src.dataset.contact import load_contact_dataset
 from modules.evaluate.src.contracts.config import EvaluationWorkspaceConfig
 from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
-from modules.evaluate.src.contracts.artifacts import ContactArtifacts, ContactEvaluationMetadata, PreparedArtifacts
+from modules.evaluate.src.contracts.artifacts import (
+    ContactArtifacts,
+    ContactEvaluationMetadata,
+    PredictOutput,
+    PreparedArtifacts,
+)
 from modules.evaluate.src.contracts.config import PredictConfig
+from modules.evaluate.src.contracts.config import BaselineRunConfig, ScoreConfig
+from modules.evaluate.src.dataset.baseline_data import (
+    artifact_directory,
+    contact_baseline_context,
+    load_baseline_artifact,
+)
 from modules.evaluate.src.steps.predict import PredictStep
-from modules.evaluate.src.contracts.config import ScoreConfig
 from modules.evaluate.src.steps.score import ScoreStep
+from modules.evaluate.src.runners.baselines import run_baselines
 from modules.evaluate.src.dataset.contact import candidate_pairs, prepare_contact_dataset, tokenize_contact_chain
 
 FEATURES = Features(
@@ -144,6 +156,82 @@ def test_hub_loading_requires_and_passes_commit_sha(monkeypatch):
         "flair-bio/evaluation-suite", name="contact_prediction_casp", revision=sha
     )
     assert loaded.fingerprint == prepare_contact_dataset(hf_data([row()])).fingerprint
+
+
+def test_separation_prior_is_shared_and_scored_as_a_contact_baseline(tmp_path):
+    data = hf_data([row()])
+    config = BaselineRunConfig.model_validate(
+        {
+            "workspace": {
+                "dataset_name": "casp",
+                "dataset_repo_id": "local-casp",
+                "edition": 14,
+                "task_type": "contact_prediction",
+                "target_type": "categorical",
+                "label_format": "contact_pairs",
+                "base_path": str(tmp_path),
+            },
+            "baselines": {"names": ["separation_prior"]},
+        }
+    )
+    first = run_baselines(config, dataset=data)["test"]["separation_prior"]
+    second = run_baselines(config, dataset=data)["test"]["separation_prior"]
+    assert first == second
+
+    contacts = prepare_contact_dataset(
+        data, source="local-casp", edition=14
+    )
+    context = contact_baseline_context(
+        config.workspace, contacts, config.baselines.names
+    )
+    artifact, _ = load_baseline_artifact(context, "separation_prior")
+    assert artifact["id"].to_list() == ["chain/global/chain"]
+    assert artifact["status"].to_list() == ["scorable"]
+
+    other_edition_context = contact_baseline_context(
+        config.workspace.model_copy(update={"edition": 15}),
+        contacts,
+        config.baselines.names,
+    )
+    assert artifact_directory(context, "separation_prior") != artifact_directory(
+        other_edition_context, "separation_prior"
+    )
+
+    workspace = get_evaluation_workspace(
+        EvaluationWorkspaceConfig(
+            model_name="toy",
+            dataset_name="casp",
+            run_id="baseline-score",
+            task_type="contact_prediction",
+            target_type="categorical",
+            label_format="contact_pairs",
+            output_dir=tmp_path,
+        ),
+        variant="pretrained",
+        seed=0,
+    )
+    workspace.setup_directories()
+    metadata = ContactEvaluationMetadata(
+        model_name="toy",
+        dataset_name="casp",
+        task_type="contact_prediction",
+        split="test",
+        seed=0,
+        dataset_fingerprint=contacts.fingerprint,
+        schema_version=contact.SCHEMA_VERSION,
+        protocol_version=contact.PROTOCOL_VERSION,
+    )
+    scored = ScoreStep(ScoreConfig()).run(
+        workspace,
+        predict_result=PredictOutput(
+            metadata=metadata,
+            predictions=artifact,
+            baseline_context=context,
+        ),
+    )
+    assert "separation_prior" in scored.control_summaries
+    manifest = json.loads(workspace.run_manifest_path.read_text())
+    assert manifest["score"]["baselines"]["separation_prior"]["path"] == str(first)
 
 
 @pytest.mark.parametrize(

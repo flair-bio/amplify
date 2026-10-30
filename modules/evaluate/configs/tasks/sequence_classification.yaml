@@ -2,7 +2,7 @@ workspace:
   task_type: sequence_classification
 
 baselines:
-  names: [majority_class]
+  names: [majority_class, composition, mmseqs_knn]
 
 steps:
   tune:

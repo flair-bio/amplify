@@ -35,6 +35,7 @@ from modules.evaluate.src.contracts.config import (
 )
 from modules.evaluate.src.dataset.baseline_data import (
     baseline_context,
+    contact_baseline_context,
     external_baseline_context,
 )
 from modules.evaluate.src.dataset.collator import (
@@ -120,6 +121,17 @@ class PrepareStep:
                 dataset=dataset,
                 predictor=head_type,
             )
+            if baseline_names:
+                if task.name != "contact_prediction" or prepared.contact is None:
+                    raise ValueError(
+                        f"Shared baselines are not supported for structured task "
+                        f"'{task.name}'."
+                    )
+                prepared.baseline_context = contact_baseline_context(
+                    workspace.config,
+                    prepared.contact.dataset,
+                    baseline_names,
+                )
             self.prepare_features(workspace, prepared)
             if prepared.input_identity:
                 workspace.validate_experiment("inputs", prepared.input_identity)
@@ -154,6 +166,7 @@ class PrepareStep:
                 label_column=self.config.label_column,
                 id_column=self.config.id_column,
                 split_roles=self.config.split.model_dump(),
+                max_length=self.config.max_length,
             )
             if baseline_names
             else None
@@ -437,6 +450,7 @@ class PrepareStep:
                 sequence_column=self.config.sequence_column,
                 label_column=self.config.label_column,
                 id_column=self.config.id_column,
+                max_length=self.config.max_length,
             )
             if prepared.baseline_context
             else None
@@ -511,9 +525,11 @@ class PrepareStep:
         trunk = backend.trunk
         cache_config = (
             self._layerwise_cache_config(
-                layerwise_config
-                if layerwise_config and layerwise_config.enabled
-                else None,
+                (
+                    layerwise_config
+                    if layerwise_config and layerwise_config.enabled
+                    else None
+                ),
                 trunk,
             )
             or self.config.embedding_cache
@@ -696,9 +712,9 @@ class PrepareStep:
                     validation_random_truncate=self.config.random_truncate_by_split.get(
                         "validation", False
                     ),
-                    extraction_batch_size=None
-                    if self.config.packed
-                    else self.config.embedding_batch_size,
+                    extraction_batch_size=(
+                        None if self.config.packed else self.config.embedding_batch_size
+                    ),
                     pooling=cache_config.pooling,
                     layers=layers,
                     dtype=cache_config.dtype,
@@ -739,9 +755,9 @@ class PrepareStep:
         prepared.features = {}
         for name, request in task.feature_requests(prepared).items():
             values, fingerprint = load_tensor_cache(
-                cache_dir=workspace.embeddings_path
-                if config.cache_policy != "off"
-                else None,
+                cache_dir=(
+                    workspace.embeddings_path if config.cache_policy != "off" else None
+                ),
                 namespace=request.namespace,
                 identity=request.identity,
                 extract=request.extract,
