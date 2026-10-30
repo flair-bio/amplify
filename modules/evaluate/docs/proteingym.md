@@ -110,8 +110,39 @@ require train/validation/test splits:
 ```bash
 uv run modules/evaluate/src/run_proteingym_zero_shot.py \
     modules/evaluate/configs/proteingym_zero_shot.yaml \
-    model_id=flair-bio/amplify-120m
+    workspace.model_repo_id=flair-bio/amplify-120m
 ```
+
+The dedicated runners accept the same `workspace.*` input/output settings as
+`run_evaluate.py`; ProteinGym scoring does not run through the ordinary
+Prepare/Tune/Predict/Score pipeline. The shipped presets use
+`flair-bio/evaluation-suite` and its `proteingym-dms_substitutions` subfolder.
+`workspace.dataset_repo_id` may instead point to a local **suite root**;
+`workspace.dataset_revision` must then be null. For Hub inputs, set a commit
+SHA to pin the snapshot; only the selected subfolder is downloaded. Missing
+local data or unavailable Hub snapshots fail rather than silently switching
+sources. `workspace.dataset_config_name` selects the subfolder independently
+of the output label `workspace.dataset_name`.
+
+For example, launch on a single GPU with a local suite and checkpoint:
+
+```bash
+accelerate launch \
+    --config_file modules/evaluate/configs/accelerate/local.yaml \
+    --num_processes 1 \
+    --num_cpu_threads_per_process 4 \
+    modules/evaluate/src/run_proteingym_zero_shot.py \
+    modules/evaluate/configs/proteingym_zero_shot.yaml \
+    workspace.model_name=amplify-120m_checkpoint_100000 \
+    workspace.model_repo_id=/checkpoints/checkpoint_100000 \
+    workspace.dataset_repo_id=/datasets/evaluation-suite \
+    workspace.dataset_revision=null \
+    workspace.output_dir=/results \
+    workspace.run_id=run01 \
+    seed=710019
+```
+
+Both runners require one process; this launch does not shard assays across GPUs.
 
 Both ProteinGym runners enable TF32 for CUDA FP32 operations by default
 (`tf32: true`), matching the standard evaluation runner. Append `tf32=false` to
@@ -149,14 +180,43 @@ all available training rows. Splits can use an official fold column
 ```bash
 uv run modules/evaluate/src/run_proteingym_supervised.py \
     modules/evaluate/configs/proteingym_supervised.yaml \
-    model_id=flair-bio/amplify-120m
+    workspace.model_repo_id=flair-bio/amplify-120m
 ```
+
+Official fold columns must be present for official supervised schemes. The
+current prepared substitutions artifact may not contain them; sourcing only
+preserves folds already present and does not fetch/join the separate CV-fold
+archives. Synthetic split labels are not a substitute for official folds.
 
 ## Outputs
 
 Both runners write `<dms_id>_scored.parquet` (each variant's `model_score`),
 `assay_scores.parquet` (per-assay Spearman for continuous DMS scores or AUC for
-binary clinical labels), and `summary.json` under `output_dir`.
+binary clinical labels), and `summary.json`. Workspace presets construct the
+same hierarchy as the regular evaluator:
+
+```text
+<workspace.output_dir>/proteingym/<dataset_name>/models/<model_name>/
+  <variant>-<run_id>/seed_<seed>/
+```
+
+Zero-shot uses variant `zero_shot`; supervised uses
+`<probe_type>-frozen_trunk-<split>`. Runs also write a log and
+`run_manifest.json` containing the configuration, resolved inputs, and
+running/complete/failed status. A run lock prevents concurrent writes.
+Existing run outputs are rejected before model loading; pass `--overwrite`
+to replace that run while preserving sibling seeds and variants, or choose
+a new `workspace.run_id`. Sibling seeds must use the same configuration and
+resolved inputs. There is no per-assay resume.
+
+Existing flat configs containing `model_id`, `data_dir`, `output_dir`, and
+optional `data_repo_id` remain supported with their original direct paths
+and overwrite behavior, without workspace manifests or locking. Do not mix
+flat input/output overrides with workspace settings. To use the shipped
+preset in legacy mode, explicitly set `workspace=null` and provide all three
+flat paths. A standalone artifact repo can still be read through legacy
+`data_repo_id`; the workspace presets instead expect a suite with a named
+subfolder.
 
 Aggregation follows the track's benchmark protocol:
 

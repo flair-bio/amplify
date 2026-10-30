@@ -33,6 +33,7 @@ from modules.evaluate.src.proteingym.masked_marginal import (
     score_assay_masked_marginal,
 )
 from modules.evaluate.src.proteingym.runner import run_assay_loop
+from modules.evaluate.src.proteingym.workspace import protein_gym_run
 from modules.evaluate.src.utils.seed import seed_everything
 
 logging.basicConfig(
@@ -120,7 +121,14 @@ def _run_baseline(
     )
 
 
-def run(config: ProteinGymZeroShotConfig) -> dict[str, object]:
+def run(
+    config: ProteinGymZeroShotConfig, *, overwrite: bool = False
+) -> dict[str, object]:
+    with protein_gym_run(config, overwrite=overwrite) as resolved:
+        return _run(resolved)
+
+
+def _run(config: ProteinGymZeroShotConfig) -> dict[str, object]:
     seed_everything(config.seed)
     torch.set_float32_matmul_precision("high" if config.tf32 else "highest")
     torch.backends.cuda.matmul.allow_tf32 = config.tf32
@@ -142,7 +150,10 @@ def run(config: ProteinGymZeroShotConfig) -> dict[str, object]:
         AutoModelForMaskedLM.from_pretrained(
             config.model_id,
             trust_remote_code=True,
-            torch_dtype=_TORCH_DTYPE[config.dtype],
+            **{
+                "torch_dtype": _TORCH_DTYPE[config.dtype],
+                **(config.workspace.model_kwargs if config.workspace else {}),
+            },
         )
         .to(device)
         .eval()
@@ -181,15 +192,17 @@ def run(config: ProteinGymZeroShotConfig) -> dict[str, object]:
 
 def main() -> None:
     args = sys.argv[1:]
+    overwrite = "--overwrite" in args
+    args = [argument for argument in args if argument != "--overwrite"]
     if not args:
         print(
-            "Usage: run_proteingym_zero_shot.py <config.yaml> [key=value ...]",
+            "Usage: run_proteingym_zero_shot.py [--overwrite] <config.yaml> [key=value ...]",
             file=sys.stderr,
         )
         sys.exit(1)
 
     config = load_runtime_config_from_argv(args, model_cls=ProteinGymZeroShotConfig)
-    run(config)
+    run(config, overwrite=overwrite)
 
 
 if __name__ == "__main__":
