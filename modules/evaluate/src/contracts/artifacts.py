@@ -112,6 +112,7 @@ class PreparedArtifacts:
     split: str = "default"
 
     baseline_context: dict[str, Any] | None = None
+    test_original_positions: dict[str, list[int]] = field(default_factory=dict)
     features: dict[str, PreparedFeatures] = field(default_factory=dict)
     input_identity: dict[str, Any] = field(default_factory=dict)
 

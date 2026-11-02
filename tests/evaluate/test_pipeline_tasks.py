@@ -79,14 +79,17 @@ def test_task_pipeline_roundtrip(
                 "model_name": "tiny",
                 "model_repo_id": str(model_path),
                 "task_type": task,
-                "target_type": "continuous"
-                if task == "sequence_regression"
-                else "categorical",
+                "target_type": (
+                    "continuous" if task == "sequence_regression" else "categorical"
+                ),
                 "label_format": label_format,
-                "num_labels": None
-                if task in {"sequence_regression", "calibration"}
-                else 2,
+                "num_labels": (
+                    None if task in {"sequence_regression", "calibration"} else 2
+                ),
                 "output_dir": str(tmp_path / "output"),
+            },
+            "baselines": {
+                "names": ["majority_class"] if task == "sequence_classification" else []
             },
             "steps": {
                 "mode": mode,
@@ -125,3 +128,5 @@ def test_task_pipeline_roundtrip(
     restored = ScoreStep(config.steps.score).run(workspace)
     assert restored.scores == pytest.approx(result.scores[None].scores, nan_ok=True)
     assert np.isfinite(restored.scores[metric])
+    if task == "sequence_classification":
+        assert set(restored.condition_scores) == {"trained", "random_trunk"}

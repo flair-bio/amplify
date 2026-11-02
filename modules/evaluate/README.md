@@ -392,8 +392,8 @@ Sequence task presets request shared majority/mean, composition, and MMseqs
 baselines. The pseudo-perplexity preset requests the test-corpus amino-acid
 frequency baseline; token classification requests the all-training-residue
 majority prior and contact prediction requests the separation prior.
-Generate them before model evaluation using the same dataset,
-split settings, and `workspace.base_path` (no model overlay required):
+Generate standalone baseline predictions and scores independently of model
+evaluation using the same dataset and split settings (no model overlay required):
 
 ```bash
 uv run python -m modules.evaluate.src.run_evaluate --baselines \
@@ -401,9 +401,107 @@ uv run python -m modules.evaluate.src.run_evaluate --baselines \
     modules/evaluate/configs/datasets/solubility_prediction.yaml
 ```
 
-Model scoring loads these artifacts without fitting them. Use
-`baselines.names=[]` to disable shared baselines. See [Shared sequence
-baselines](docs/controls.md#shared-sequence-baselines).
+For example, generate the token-classification `majority_class` baseline for
+SSP-Q3 with the dataset/task preparation defaults:
+
+```bash
+uv run python -m modules.evaluate.src.run_evaluate --baselines \
+    modules/evaluate/configs/config.yaml \
+    modules/evaluate/configs/tasks/token_classification.yaml \
+    modules/evaluate/configs/datasets/ssp_q3.yaml \
+    baselines.names=[majority_class]
+```
+
+If model evaluation overrides `steps.prepare` (notably split roles,
+`max_length`, or crop policy), pass those same overrides when generating the
+baseline so its evaluated population identity matches.
+
+Model evaluation never loads shared baseline artifacts, even when its task
+preset lists them. It publishes only model and requested model-control scores.
+`baselines.names=[]` disables baseline generation requests for that run.
+Baselines publish their own predictions and `scores.json`; they do not need
+model controls. Comparisons are opt-in and disk-only:
+
+```bash
+# Rescore the saved model predictions without training or inference.
+uv run python -m modules.evaluate.src.run_evaluate --score \
+    modules/evaluate/configs/config.yaml \
+    modules/evaluate/configs/models/amplify_120m.yaml \
+    modules/evaluate/configs/tasks/sequence_classification.yaml \
+    modules/evaluate/configs/datasets/localization_prediction.yaml
+
+# Explicitly compare those predictions with a previously generated baseline.
+uv run python -m modules.evaluate.src.run_evaluate --compare \
+    modules/evaluate/configs/config.yaml \
+    modules/evaluate/configs/models/amplify_120m.yaml \
+    modules/evaluate/configs/tasks/sequence_classification.yaml \
+    modules/evaluate/configs/datasets/localization_prediction.yaml \
+    baselines.names=[majority_class]
+```
+
+Comparison files are written under the model run's `comparisons/` directory;
+standalone model and baseline reports are not modified. The comparison config
+must identify the same dataset, revision, split, task, labels, preprocessing,
+and evaluated population as the saved predictions. Missing or incompatible
+artifacts fail only the explicit comparison. Saved predictions with sufficient
+provenance can be rescored even after a later pipeline-stage failure. Legacy
+token predictions without original residue positions cannot be safely
+compared, and predictions without the prediction section of
+`run_manifest.json` cannot be reloaded; provenance is never inferred.
+
+### Tiny offline sequence-classification workflow
+
+This short smoke flow uses a local `DatasetDict` and a locally cached
+`amplify_120m` checkpoint/tokenizer. It avoids dataset downloads and training;
+model evaluation still performs inference, so run it only with the local model
+available. Create a tiny dataset with the standard `sequence`/`targets` columns:
+
+```bash
+uv run python - <<'PY'
+from datasets import Dataset, DatasetDict
+
+DatasetDict({
+    "train": Dataset.from_dict({"id": ["tr0", "tr1"], "sequence": ["ACDE", "FGHI"], "targets": [0, 1]}),
+    "validation": Dataset.from_dict({"id": ["va0", "va1"], "sequence": ["KLMN", "PQRS"], "targets": [0, 1]}),
+    "test": Dataset.from_dict({"id": ["te0", "te1"], "sequence": ["TVWY", "ACDF"], "targets": [0, 1]}),
+}).save_to_disk("/tmp/amplify-baseline-smoke-data")
+PY
+```
+
+Run model evaluation with no shared baselines, generate just the majority
+baseline afterward, then compare the persisted predictions without inference.
+Use the same overlays and overrides for all three commands; the model overlay
+is omitted only for baseline generation:
+
+```bash
+MODEL_CONFIGS="modules/evaluate/configs/config.yaml modules/evaluate/configs/models/amplify_120m.yaml modules/evaluate/configs/tasks/sequence_classification.yaml modules/evaluate/configs/datasets/localization_prediction.yaml modules/evaluate/configs/smoke_test.yaml"
+DATA_OVERRIDES="workspace.dataset_repo_id=/tmp/amplify-baseline-smoke-data workspace.dataset_revision=null workspace.dataset_name=local-smoke workspace.output_dir=/tmp/amplify-baseline-smoke"
+
+# 1. Inference and standalone model scores; no shared baseline lookup.
+uv run python -m modules.evaluate.src.run_evaluate $MODEL_CONFIGS \
+    $DATA_OVERRIDES baselines.names=[] steps.predict.controls=[]
+
+# 2. Generate only majority_class and its standalone scores.
+uv run python -m modules.evaluate.src.run_evaluate --baselines \
+    modules/evaluate/configs/config.yaml \
+    modules/evaluate/configs/tasks/sequence_classification.yaml \
+    modules/evaluate/configs/datasets/localization_prediction.yaml \
+    modules/evaluate/configs/smoke_test.yaml \
+    $DATA_OVERRIDES baselines.names=[majority_class]
+
+# 3. Compare the saved model predictions; this performs no inference.
+uv run python -m modules.evaluate.src.run_evaluate --compare $MODEL_CONFIGS \
+    $DATA_OVERRIDES baselines.names=[majority_class] steps.predict.controls=[]
+```
+
+The local model must already be cached; if it is not, replace the model overlay
+with a local model configuration/path rather than allowing an implicit model
+download. The exact overlay composition can be checked without running
+inference by loading these same config files with
+`load_evaluation_config(...)`.
+
+See [Shared sequence baselines](docs/controls.md#shared-sequence-baselines)
+for baseline protocols and output layout.
 
 CUDA evaluation enables TensorFloat-32 by default with top-level `tf32: true`,
 matching pretraining's `trainer.tf32` convention. Append `tf32=false` to any
@@ -802,8 +900,10 @@ null. Embedding extraction has its own `steps.prepare.embedding_batch_size` sett
 All tasks implement `score(predictions, config, seed=...)` without filesystem
 access. Tasks select metrics, aggregation and supported uncertainty methods;
 `metrics/scoring.py` supplies flat-task scoring and paired statistical analysis.
-`ScoreStep` loads baseline artifacts, invokes that common contract, then publishes
-the returned flat or structured results. It has no contact-specific dispatch.
+`ScoreStep` loads saved model predictions, invokes the task scoring contract,
+then publishes standalone model scores. Shared baselines are loaded only by the
+explicit disk-only comparison route; their independent score reports are
+published by `--baselines`.
 
 **Purpose:** Compute task-specific metrics from the Predict step's output and, optionally, bootstrap confidence intervals for those metrics plus a statistical comparison between the trained model and each configured control condition, to quantify how much of its performance is attributable to learning from the data rather than model/data artifacts.
 

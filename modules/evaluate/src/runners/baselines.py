@@ -12,9 +12,16 @@ from uuid import uuid4
 import polars as pl
 from datasets import DatasetDict
 
+from modules.evaluate.src.contracts.artifacts import (
+    ContactEvaluationMetadata,
+    EvaluationMetadata,
+    PredictOutput,
+    StructuredScoreOutput,
+)
 from modules.evaluate.src.contracts.config import (
     BaselineName,
     BaselineRunConfig,
+    ScoreConfig,
 )
 from modules.evaluate.src.dataset.baseline_data import (
     artifact_directory,
@@ -24,6 +31,7 @@ from modules.evaluate.src.dataset.baseline_data import (
     external_baseline_context,
     load_baseline_artifact,
     mmseqs_coverage,
+    preprocessing_identity,
     sequence_rows,
     unlabeled_sequence_rows,
 )
@@ -40,6 +48,7 @@ from modules.evaluate.src.model.baselines import (
     build_amino_acid_frequency_baseline,
     build_sequence_baseline,
 )
+from modules.evaluate.src.tasks import get_task
 from modules.evaluate.src.utils.io import log_to_file, write_json
 from modules.evaluate.src.utils.storage import cache_lock
 
@@ -76,6 +85,15 @@ def run_baselines(
         id_column=prepare.id_column,
         split_roles=prepare.split.model_dump(),
         max_length=prepare.max_length,
+        preprocessing=preprocessing_identity(
+            sequence_column=prepare.sequence_column,
+            label_column=prepare.label_column,
+            id_column=prepare.id_column,
+            split_roles=prepare.split.model_dump(),
+            max_length=prepare.max_length,
+            random_truncate_by_split=prepare.random_truncate_by_split,
+            seed=config.seed,
+        ),
     )
     row_options: dict[str, Any] = {
         "sequence_column": prepare.sequence_column,
@@ -116,6 +134,15 @@ def run_baselines(
             label_column=prepare.label_column,
             id_column=prepare.id_column,
             max_length=prepare.max_length,
+            preprocessing=preprocessing_identity(
+                sequence_column=prepare.sequence_column,
+                label_column=prepare.label_column,
+                id_column=prepare.id_column,
+                split_roles={"name": external.name, "test": external.split},
+                max_length=prepare.max_length,
+                random_truncate_by_split=prepare.random_truncate_by_split,
+                seed=config.seed,
+            ),
         )
         external_rows = (
             unlabeled_sequence_rows(
@@ -169,7 +196,16 @@ def run_baselines(
                         seed=config.seed,
                         max_residues=prepare.max_length - 2,
                     )
-                    _, path = load_baseline_artifact(test_context, name)
+                    frame, path = load_baseline_artifact(test_context, name)
+                    _publish_standalone_scores(
+                        directory,
+                        test_context,
+                        name,
+                        frame,
+                        config.score,
+                        workspace,
+                        config.seed,
+                    )
                     logger.info("Baseline predictions ready: %s", path)
                 outputs[test_name][name] = path
     return outputs
@@ -217,7 +253,36 @@ def _run_contact_baselines(
             else:
                 write_json(fit_path, fit_identity)
             _publish_contact_baseline(directory, context, name, frame)
-            _, path = load_baseline_artifact(context, name)
+            artifact, path = load_baseline_artifact(context, name)
+            metadata = ContactEvaluationMetadata(
+                model_name="baselines",
+                dataset_name=workspace.dataset_name,
+                dataset_repo_id=workspace.dataset_repo_id,
+                dataset_config_name=workspace.dataset_config_name,
+                dataset_revision=contacts.revision,
+                task_type=workspace.task_type,
+                seed=config.seed,
+                dataset_fingerprint=contacts.fingerprint,
+                schema_version=contacts.schema_version,
+                protocol_version="casp-contact-v1",
+            )
+            result = get_task(workspace.task_type).score(
+                PredictOutput(metadata=metadata, predictions=artifact),
+                config.score.model_copy(update={"bootstrap_enabled": False}),
+                seed=config.seed,
+            )
+            if not isinstance(result, StructuredScoreOutput):
+                raise TypeError(
+                    "Contact baseline scoring must return structured scores."
+                )
+            write_json(
+                directory / "scores.json",
+                {
+                    "identity": artifact_identity(context, name),
+                    "config": config.score.model_dump(mode="json"),
+                    "scores": result.summaries.to_dicts(),
+                },
+            )
             outputs["test"][name] = path
     return outputs
 
@@ -293,3 +358,57 @@ def _publish_baseline(
             )
         finally:
             temporary.unlink(missing_ok=True)
+
+
+def _publish_standalone_scores(
+    directory: Path,
+    context: dict[str, Any],
+    name: BaselineName,
+    artifact: pl.DataFrame,
+    config: ScoreConfig,
+    workspace: Any,
+    seed: int,
+) -> None:
+    task = get_task(workspace.task_type, workspace.num_labels)
+    if workspace.task_type == "token_classification":
+        rows = []
+        for row in artifact.to_dicts():
+            valid_labels = [label for label in row["label"] if label != -100]
+            item: dict[str, Any] = {
+                "id": row["id"],
+                "label": valid_labels,
+                "prediction": [row["prediction"]] * len(valid_labels),
+            }
+            if "probability" in row:
+                item["probability"] = [row["probability"]] * len(valid_labels)
+            rows.append(item)
+        artifact = pl.DataFrame(rows)
+    elif "label" not in artifact.columns:
+        artifact = artifact.with_columns(pl.lit(0).alias("label"))
+
+    metadata = EvaluationMetadata(
+        model_name="baselines",
+        dataset_name=workspace.dataset_name,
+        dataset_repo_id=workspace.dataset_repo_id,
+        dataset_config_name=workspace.dataset_config_name,
+        dataset_revision=workspace.dataset_revision,
+        task_type=workspace.task_type,
+        split=str(context["test"]["split"]),
+        seed=seed,
+    )
+    result = task.score(
+        PredictOutput(metadata=metadata, predictions=artifact),
+        config.model_copy(update={"bootstrap_enabled": False}),
+        seed=seed,
+    )
+    scores = (
+        result.summaries.to_dicts() if hasattr(result, "summaries") else result.scores
+    )
+    write_json(
+        directory / "scores.json",
+        {
+            "identity": artifact_identity(context, name),
+            "config": config.model_dump(mode="json"),
+            "scores": scores,
+        },
+    )

@@ -9,9 +9,11 @@ from modules.evaluate.src.contracts.config_loader import (
     load_baseline_config,
     load_evaluation_config,
 )
+from modules.evaluate.src.dataset.baseline_data import preprocessing_identity
 from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.runners.baselines import run_baselines
 from modules.evaluate.src.runners.pipeline import run_pipeline
+from modules.evaluate.src.steps.score import ScoreStep
 from modules.evaluate.src.utils.seed import seed_everything
 
 logging.basicConfig(
@@ -34,7 +36,7 @@ def main() -> None:
 
     Usage::
 
-        uv run run_evaluate.py [--baselines | --overwrite] <config.yaml> [<override.yaml> ...] [key=value ...]
+        uv run run_evaluate.py [--baselines | --score | --compare | --overwrite] <config.yaml> [<override.yaml> ...] [key=value ...]
 
     One or more YAML files may be supplied; later files override earlier ones
     for shared keys.  Any ``key=value`` arguments (containing ``=``) are
@@ -50,18 +52,24 @@ def main() -> None:
     """
     args = sys.argv[1:]
     baseline_only = "--baselines" in args
+    score_only = "--score" in args
+    compare_only = "--compare" in args
     overwrite = "--overwrite" in args
     args = [
-        argument for argument in args if argument not in {"--baselines", "--overwrite"}
+        argument
+        for argument in args
+        if argument not in {"--baselines", "--score", "--compare", "--overwrite"}
     ]
-    if baseline_only and overwrite:
+    if sum((baseline_only, score_only, compare_only)) > 1:
+        raise SystemExit("--baselines, --score, and --compare are mutually exclusive.")
+    if (baseline_only or score_only or compare_only) and overwrite:
         raise SystemExit(
-            "--overwrite applies to model runs only; baseline artifacts are validated "
-            "and reused by --baselines."
+            "--overwrite applies to model runs only; disk scoring and baseline artifacts "
+            "are validated and reused."
         )
     if not args:
         print(
-            "Usage: run_evaluate [--baselines | --overwrite] <config.yaml> [<override.yaml> ...] [key=value ...]",
+            "Usage: run_evaluate [--baselines | --score | --compare | --overwrite] <config.yaml> [<override.yaml> ...] [key=value ...]",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -81,9 +89,41 @@ def main() -> None:
                 logger.info("Baseline %s / %s: %s", test, name, path)
         return
 
-    logger.info("=== Starting Evaluation Pipeline ===")
-
     config = load_evaluation_config(path=config_paths, overrides=overrides or None)
+    workspace = get_evaluation_workspace(
+        config.workspace, variant=config.variant, seed=config.seed
+    )
+    if score_only:
+        ScoreStep(config.steps.score).run(
+            workspace,
+            seed=config.seed,
+        )
+        logger.info("Saved predictions rescored without model inference.")
+        return
+    if compare_only:
+        if not config.baselines.names and not config.steps.predict.conditions:
+            raise SystemExit(
+                "--compare requires baselines.names or explicitly selected saved controls."
+            )
+        path = ScoreStep(config.steps.score).compare_saved(
+            workspace,
+            shared_baselines=config.baselines.names,
+            controls=config.steps.predict.conditions,
+            seed=config.seed,
+            expected_preprocessing=preprocessing_identity(
+                sequence_column=config.steps.prepare.sequence_column,
+                label_column=config.steps.prepare.label_column,
+                id_column=config.steps.prepare.id_column,
+                split_roles=config.steps.prepare.split.model_dump(),
+                max_length=config.steps.prepare.max_length,
+                random_truncate_by_split=config.steps.prepare.random_truncate_by_split,
+                seed=config.seed,
+            ),
+        )
+        logger.info("Saved prediction comparison written to %s", path)
+        return
+
+    logger.info("=== Starting Evaluation Pipeline ===")
     torch.set_float32_matmul_precision("high" if config.tf32 else "highest")
     torch.backends.cuda.matmul.allow_tf32 = config.tf32
     torch.backends.cudnn.allow_tf32 = config.tf32
@@ -131,9 +171,6 @@ def main() -> None:
     # Nest outputs under this run's variant (head type + mode + non-default
     # split) so sweeping probes for the same model+dataset doesn't
     # overwrite a previous variant's checkpoint/predictions/scores.
-    workspace = get_evaluation_workspace(
-        config.workspace, variant=config.variant, seed=config.seed
-    )
     logger.info(
         "Initialized workspace: model %s dataset %s variant %s",
         workspace.model_name,

@@ -947,6 +947,7 @@ class BaselineRunConfig(BaseModel):
     prepare: PrepareConfig = Field(
         default_factory=lambda: PrepareConfig.model_validate({})
     )
+    score: ScoreConfig = Field(default_factory=ScoreConfig)
     baselines: BaselinesConfig = Field(default_factory=BaselinesConfig)
     external_test_sets: list[ExternalTestSetConfig] = Field(default_factory=list)
     seed: int = 710019

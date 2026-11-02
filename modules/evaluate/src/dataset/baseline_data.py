@@ -37,6 +37,29 @@ def identity_hash(payload: Any) -> str:
     return digest.hexdigest()
 
 
+def preprocessing_identity(
+    *,
+    sequence_column: str,
+    label_column: str,
+    id_column: str,
+    split_roles: dict[str, Any],
+    max_length: int | None,
+    random_truncate_by_split: dict[str, bool],
+    seed: int,
+) -> dict[str, Any]:
+    """Identify preprocessing settings that define the evaluated population."""
+    test_random_crop = random_truncate_by_split.get("test", False)
+    return {
+        "sequence_column": sequence_column,
+        "label_column": label_column,
+        "id_column": id_column,
+        "split_roles": split_roles,
+        "max_length": max_length,
+        "random_truncate_by_split": random_truncate_by_split,
+        "test_crop_seed": seed if test_random_crop else None,
+    }
+
+
 def sequence_rows(
     dataset: Dataset,
     *,
@@ -122,6 +145,7 @@ def baseline_context(
     id_column: str,
     split_roles: dict[str, Any],
     max_length: int | None = None,
+    preprocessing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Describe expected artifacts before model-specific preparation."""
     BaselinesConfig(names=names).validate_task(workspace.task_type)
@@ -145,6 +169,7 @@ def baseline_context(
             "columns": [sequence_column, id_column],
             "max_residues": None if max_length is None else max_length - 2,
             "corpus_fingerprint": identity_hash(rows),
+            "preprocessing": preprocessing or {},
         }
         return {
             "fit": fit,
@@ -152,19 +177,40 @@ def baseline_context(
                 "dataset": dataset_identity,
                 "split": split_roles["test"],
                 "fingerprint": identity_hash(rows),
+                "preprocessing": preprocessing or {},
             },
             "root": str((workspace.dataset_root / "baselines").resolve()),
             "names": names,
         }
-    arguments: dict[str, Any] = {
-        "sequence_column": sequence_column,
-        "label_column": label_column,
-        "id_column": id_column,
-        "task_type": workspace.task_type,
-        "num_labels": workspace.num_labels,
-    }
-    train_rows = sequence_rows(dataset["train"], **arguments)
-    test_rows = sequence_rows(dataset["test"], **arguments)
+
+    def provenance_rows(split: Dataset) -> list[dict[str, Any]]:
+        columns = [sequence_column, label_column]
+        if id_column in split.column_names:
+            columns.append(id_column)
+        rows = []
+        for index, row in enumerate(split.select_columns(columns)):
+            try:
+                identity_hash([row[label_column]])
+            except ValueError:
+                rows.append(
+                    {
+                        "id": row.get(id_column, index),
+                        "sequence": row[sequence_column],
+                        "label": repr(row[label_column]),
+                    }
+                )
+            else:
+                rows.append(
+                    {
+                        "id": row.get(id_column, index),
+                        "sequence": row[sequence_column],
+                        "label": row[label_column],
+                    }
+                )
+        return rows
+
+    train_rows = provenance_rows(dataset["train"]) if "train" in dataset else []
+    test_rows = provenance_rows(dataset["test"])
     fit = {
         "version": 2,
         "dataset": dataset_identity,
@@ -185,6 +231,7 @@ def baseline_context(
             "dataset": fit["dataset"],
             "split": split_roles["test"],
             "fingerprint": identity_hash(test_rows),
+            "preprocessing": preprocessing or {},
         },
         "root": str((workspace.dataset_root / "baselines").resolve()),
         "names": names,
@@ -198,8 +245,11 @@ def contact_baseline_context(
 ) -> dict[str, Any]:
     """Describe model-independent CASP contact artifacts."""
     BaselinesConfig(names=names).validate_task(workspace.task_type)
-    if workspace.task_type != "contact_prediction" or names != ["separation_prior"]:
-        raise ValueError("Contact baseline context requires separation_prior only.")
+    if workspace.task_type != "contact_prediction" or names not in (
+        [],
+        ["separation_prior"],
+    ):
+        raise ValueError("Contact baseline context supports separation_prior only.")
     source = dataset_source_identity(
         workspace.dataset_repo_id or workspace.dataset_name,
         workspace.dataset_config_name,
@@ -242,6 +292,7 @@ def external_baseline_context(
     label_column: str,
     id_column: str,
     max_length: int | None = None,
+    preprocessing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if workspace.task_type == "pseudo_perplexity":
         rows = unlabeled_sequence_rows(
@@ -255,6 +306,7 @@ def external_baseline_context(
             "dataset": external_identity,
             "max_residues": None if max_length is None else max_length - 2,
             "corpus_fingerprint": identity_hash(rows),
+            "preprocessing": preprocessing or {},
         }
         return {
             **context,
@@ -263,6 +315,7 @@ def external_baseline_context(
                 "dataset": external_identity,
                 "split": split,
                 "fingerprint": identity_hash(rows),
+                "preprocessing": preprocessing or {},
             },
         }
     rows = sequence_rows(
@@ -279,6 +332,7 @@ def external_baseline_context(
             "dataset": dataset_source_identity(dataset_id, config_name, revision),
             "split": split,
             "fingerprint": identity_hash(rows),
+            "preprocessing": preprocessing or {},
         },
     }
 
@@ -379,13 +433,18 @@ def load_baseline_artifact(
 def align_token_baseline(
     baseline: pl.DataFrame, predictions: pl.DataFrame
 ) -> pl.DataFrame:
-    """Broadcast a stored prior onto live or cached evaluated residue windows."""
+    """Broadcast a stored prior onto exact original evaluated residue positions."""
+    if "original_positions" not in predictions.columns:
+        raise ValueError(
+            "Token predictions do not record original residue positions; "
+            "this legacy artifact cannot be compared safely."
+        )
     source = {json.dumps(row["id"]): row for row in baseline.to_dicts()}
     if len(source) != baseline.height:
         raise ValueError("Shared token baseline contains duplicate source IDs.")
-    observed: dict[str, list[int]] = defaultdict(list)
+    observed: dict[str, set[int]] = defaultdict(set)
     rows = []
-    for row in predictions.select("id", "label").to_dicts():
+    for row in predictions.select("id", "label", "original_positions").to_dicts():
         key = json.dumps(row["id"])
         if key not in source:
             raise ValueError(
@@ -395,32 +454,47 @@ def align_token_baseline(
         labels = row["label"]
         ragged = isinstance(labels, list)
         labels = labels if ragged else [labels]
-        observed[key].extend(labels)
+        positions = row["original_positions"]
+        positions = positions if isinstance(positions, list) else [positions]
+        if len(positions) != len(labels):
+            raise ValueError(
+                "Token prediction labels and original residue positions differ in length."
+            )
+        source_labels = prior["label"]
+        if any(
+            not isinstance(position, int)
+            or position < 0
+            or position >= len(source_labels)
+            or source_labels[position] == -100
+            or source_labels[position] != label
+            for position, label in zip(positions, labels, strict=True)
+        ):
+            raise ValueError(
+                "Shared token baseline labels do not match model labels at the "
+                "recorded original residue positions."
+            )
+        if observed[key].intersection(positions) or len(positions) != len(
+            set(positions)
+        ):
+            raise ValueError(
+                "Token predictions contain duplicate original residue positions."
+            )
+        observed[key].update(positions)
+        aligned_predictions = [prior["prediction"]] * len(labels)
+        aligned_probabilities = [prior["probability"]] * len(labels)
         rows.append(
             {
                 "id": row["id"],
                 "prediction": (
-                    [prior["prediction"]] * len(labels)
-                    if ragged
-                    else prior["prediction"]
+                    aligned_predictions if ragged else aligned_predictions[0]
                 ),
                 "probability": (
-                    [prior["probability"]] * len(labels)
-                    if ragged
-                    else prior["probability"]
+                    aligned_probabilities if ragged else aligned_probabilities[0]
                 ),
             }
         )
-    for key, labels in observed.items():
-        original = [label for label in source[key]["label"] if label != -100]
-        # Cropping and ignored residues leave a contiguous window of valid labels.
-        if not any(
-            original[start : start + len(labels)] == labels
-            for start in range(len(original) - len(labels) + 1)
-        ):
-            raise ValueError(
-                "Shared token baseline labels do not match an evaluated residue window."
-            )
+    if set(source) != set(observed):
+        raise ValueError("Shared token baseline and model IDs do not match.")
     frame = pl.DataFrame(rows)
     return frame if "probability" in predictions.columns else frame.drop("probability")
 

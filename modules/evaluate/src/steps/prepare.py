@@ -10,13 +10,14 @@ then instantiate the model wrapper that matches the task type.
 from __future__ import annotations
 
 import inspect
+import json
 from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from accelerate import Accelerator
 from accelerate.logging import get_logger
-from datasets import DatasetDict
+from datasets import Dataset, DatasetDict
 from torch import nn
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
@@ -37,6 +38,7 @@ from modules.evaluate.src.dataset.baseline_data import (
     baseline_context,
     contact_baseline_context,
     external_baseline_context,
+    preprocessing_identity,
 )
 from modules.evaluate.src.dataset.collator import (
     EvaluationCollator,
@@ -73,6 +75,34 @@ if TYPE_CHECKING:
 # accelerate's logger adapter logs INFO/DEBUG only on the main process by
 # default, preventing duplicate lines when running under distributed launch.
 logger = get_logger(__name__)
+
+
+def _token_positions_by_id(
+    dataset: Dataset, config: PrepareConfig
+) -> dict[str, list[int]]:
+    columns = [config.id_column, config.label_column, "original_positions"]
+    missing = set(columns) - set(dataset.column_names)
+    if missing:
+        raise ValueError(
+            "Tokenized test data is missing provenance columns required for "
+            f"residue alignment: {sorted(missing)}."
+        )
+    positions: dict[str, list[int]] = {}
+    for row in dataset.select_columns(columns):
+        key = json.dumps(row[config.id_column], allow_nan=False)
+        if key in positions:
+            raise ValueError(
+                "Token comparisons require unique source protein IDs; "
+                f"duplicate ID {row[config.id_column]!r}."
+            )
+        positions[key] = [
+            position
+            for position, label in zip(
+                row["original_positions"], row[config.label_column], strict=True
+            )
+            if position >= 0 and label != -100
+        ]
+    return positions
 
 
 class PrepareStep:
@@ -121,16 +151,16 @@ class PrepareStep:
                 dataset=dataset,
                 predictor=head_type,
             )
-            if baseline_names:
-                if task.name != "contact_prediction" or prepared.contact is None:
-                    raise ValueError(
-                        f"Shared baselines are not supported for structured task "
-                        f"'{task.name}'."
-                    )
+            if task.name == "contact_prediction" and prepared.contact is not None:
                 prepared.baseline_context = contact_baseline_context(
                     workspace.config,
                     prepared.contact.dataset,
-                    baseline_names,
+                    baseline_names or [],
+                )
+            elif baseline_names:
+                raise ValueError(
+                    f"Shared baselines are not supported for structured task "
+                    f"'{task.name}'."
                 )
             self.prepare_features(workspace, prepared)
             if prepared.input_identity:
@@ -157,19 +187,24 @@ class PrepareStep:
             config_name=workspace.config.dataset_config_name,
             revision=workspace.config.dataset_revision,
         )
-        shared_context = (
-            baseline_context(
-                workspace.config,
-                dataset,
-                baseline_names,
+        shared_context = baseline_context(
+            workspace.config,
+            dataset,
+            baseline_names or [],
+            sequence_column=self.config.sequence_column,
+            label_column=self.config.label_column,
+            id_column=self.config.id_column,
+            split_roles=self.config.split.model_dump(),
+            max_length=self.config.max_length,
+            preprocessing=preprocessing_identity(
                 sequence_column=self.config.sequence_column,
                 label_column=self.config.label_column,
                 id_column=self.config.id_column,
                 split_roles=self.config.split.model_dump(),
                 max_length=self.config.max_length,
-            )
-            if baseline_names
-            else None
+                random_truncate_by_split=self.config.random_truncate_by_split,
+                seed=seed,
+            ),
         )
 
         num_labels = task.resolve_num_labels(
@@ -360,6 +395,11 @@ class PrepareStep:
             },
             split=self.config.split.name,
             baseline_context=shared_context,
+            test_original_positions=(
+                _token_positions_by_id(dataset["test"], self.config)
+                if workspace.task_type == "token_classification"
+                else {}
+            ),
             **embedding_extras,
         )
 
@@ -451,6 +491,15 @@ class PrepareStep:
                 label_column=self.config.label_column,
                 id_column=self.config.id_column,
                 max_length=self.config.max_length,
+                preprocessing=preprocessing_identity(
+                    sequence_column=self.config.sequence_column,
+                    label_column=self.config.label_column,
+                    id_column=self.config.id_column,
+                    split_roles={"name": external.name, "test": external.split},
+                    max_length=self.config.max_length,
+                    random_truncate_by_split=self.config.random_truncate_by_split,
+                    seed=seed,
+                ),
             )
             if prepared.baseline_context
             else None
@@ -515,6 +564,11 @@ class PrepareStep:
                 test_dataloader=token_test_dataloader,
                 layerwise=layerwise,
                 baseline_context=shared_context,
+                test_original_positions=(
+                    _token_positions_by_id(dataset["test"], self.config)
+                    if workspace.task_type == "token_classification"
+                    else {}
+                ),
             )
         if backend.cache is None or backend.model_id is None:
             raise ValueError(
@@ -587,6 +641,11 @@ class PrepareStep:
             embedding=EmbeddingArtifacts(backend=external_backend),
             layerwise=layerwise,
             baseline_context=shared_context,
+            test_original_positions=(
+                _token_positions_by_id(dataset["test"], self.config)
+                if workspace.task_type == "token_classification"
+                else {}
+            ),
         )
 
     def _apply_embedding_cache(

@@ -74,6 +74,7 @@ def load_baseline_config(
         {
             "workspace": workspace,
             "prepare": raw.get("steps", {}).get("prepare", {}),
+            "score": raw.get("steps", {}).get("score", {}),
             "baselines": raw.get("baselines", {}),
             "external_test_sets": raw.get("external_test_sets", []),
             "seed": raw.get("seed", 710019),

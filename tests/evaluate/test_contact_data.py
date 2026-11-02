@@ -11,27 +11,34 @@ import polars as pl
 import pytest
 from datasets import Dataset, DatasetDict, Features, List, Value
 
-from modules.evaluate.src.dataset import contact, dataloader
-from modules.evaluate.src.dataset.contact import load_contact_dataset
-from modules.evaluate.src.contracts.config import EvaluationWorkspaceConfig
-from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.contracts.artifacts import (
     ContactArtifacts,
     ContactEvaluationMetadata,
     PredictOutput,
     PreparedArtifacts,
 )
-from modules.evaluate.src.contracts.config import PredictConfig
-from modules.evaluate.src.contracts.config import BaselineRunConfig, ScoreConfig
+from modules.evaluate.src.contracts.config import (
+    BaselineRunConfig,
+    EvaluationWorkspaceConfig,
+    PredictConfig,
+    ScoreConfig,
+)
+from modules.evaluate.src.dataset import contact, dataloader
 from modules.evaluate.src.dataset.baseline_data import (
     artifact_directory,
     contact_baseline_context,
     load_baseline_artifact,
 )
+from modules.evaluate.src.dataset.contact import (
+    candidate_pairs,
+    load_contact_dataset,
+    prepare_contact_dataset,
+    tokenize_contact_chain,
+)
+from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
+from modules.evaluate.src.runners.baselines import run_baselines
 from modules.evaluate.src.steps.predict import PredictStep
 from modules.evaluate.src.steps.score import ScoreStep
-from modules.evaluate.src.runners.baselines import run_baselines
-from modules.evaluate.src.dataset.contact import candidate_pairs, prepare_contact_dataset, tokenize_contact_chain
 
 FEATURES = Features(
     {
@@ -178,9 +185,7 @@ def test_separation_prior_is_shared_and_scored_as_a_contact_baseline(tmp_path):
     second = run_baselines(config, dataset=data)["test"]["separation_prior"]
     assert first == second
 
-    contacts = prepare_contact_dataset(
-        data, source="local-casp", edition=14
-    )
+    contacts = prepare_contact_dataset(data, source="local-casp", edition=14)
     context = contact_baseline_context(
         config.workspace, contacts, config.baselines.names
     )
@@ -229,9 +234,10 @@ def test_separation_prior_is_shared_and_scored_as_a_contact_baseline(tmp_path):
             baseline_context=context,
         ),
     )
-    assert "separation_prior" in scored.control_summaries
+    assert scored.control_summaries == {}
     manifest = json.loads(workspace.run_manifest_path.read_text())
-    assert manifest["score"]["baselines"]["separation_prior"]["path"] == str(first)
+    assert manifest["score"]["baselines"] == {}
+    assert first.exists()
 
 
 @pytest.mark.parametrize(
