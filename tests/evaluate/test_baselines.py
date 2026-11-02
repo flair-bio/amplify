@@ -352,11 +352,10 @@ def test_score_loads_shared_predictions_and_standalone_manifest(
             workspace.preds_path / f"control_{name}_predictions.parquet"
         ).exists()
         score_manifest = json.loads(workspace.run_manifest_path.read_text())["score"]
-        conditions = pl.read_parquet(workspace.run_root / "condition_scores.parquet")
-        assert set(conditions["condition"]) == {"trained", name}
-        assert conditions.filter(pl.col("condition") == "trained")[
-            "score"
-        ].to_list() == list(result.scores.values())
+        assert not (workspace.run_root / "condition_scores.parquet").exists()
+        conditions = score_manifest["condition_scores"]
+        assert set(conditions) == {"trained", name}
+        assert conditions["trained"] == result.scores
         assert score_manifest["baselines"][name]["identity"]["fit"]["fit_policy"] == (
             "train_only"
         )
@@ -369,10 +368,7 @@ def test_score_loads_shared_predictions_and_standalone_manifest(
             }
         if name == "train_mean":
             assert np.isnan(score_manifest["baselines"][name]["scores"]["spearmanr"])
-            baseline_scores = conditions.filter(
-                (pl.col("condition") == name) & (pl.col("metric") == "spearmanr")
-            )
-            assert np.isnan(baseline_scores["score"][0])
+            assert np.isnan(conditions[name]["spearmanr"])
             assert "spearmanr" not in result.control_comparisons[name]
 
 
