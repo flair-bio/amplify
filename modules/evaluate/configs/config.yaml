@@ -1,9 +1,6 @@
 seed: 710019
 tf32: true # allow TensorFloat-32 for CUDA FP32 operations; false restores full FP32
 
-baselines:
-  names: [] # task presets request shared artifacts; generate with --baselines
-
 workspace:
   run_id: run01 # appended to the probe/mode variant; change to keep another run
   dataset_name: base_dataset
@@ -117,7 +114,7 @@ steps:
     predictions_filename: predictions.parquet
     store_sequences: false # include decoded input sequences in main predictions parquet (larger output)
     controls: [random_trunk] # model/input/label ablations only
-    baselines: [] # inline prediction baselines; shipped tasks use top-level baselines.names
+    baselines: [] # optional inline prediction baselines
   score:
     metrics: null # task overlays declare reported metrics explicitly
     metric_aggregation: macro # one of micro, macro, weighted, samples

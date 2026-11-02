@@ -1,9 +1,6 @@
 workspace:
   task_type: token_classification
 
-baselines:
-  names: [majority_class]
-
 steps:
   tune:
     batch_size: 2048 # valid residues, not proteins; used when HPO is disabled
@@ -15,7 +12,7 @@ steps:
         batch_size: [1024, 2048, 4096] # valid residues per optimizer batch
         max_epochs: [1, 2, 5, 10] # token-specific budget, not the sequence-task epoch space
   score:
-    metrics: [f1]
+    metrics: [f1, accuracy]
     metric_aggregation: macro # pool valid residues, then average classes; -100 positions are excluded
   predict:
     embedding_batch_size: 8192 # cached residues; trunk batches still use prepare settings

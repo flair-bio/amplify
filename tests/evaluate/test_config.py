@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
 from modules.core.utils.config_loader import load_and_parse
-from modules.evaluate.src.contracts.config import EvaluationConfig, LayerwiseConfig
-from modules.evaluate.src.contracts.config import PrepareConfig
-from modules.evaluate.src.contracts.config import EmbeddingCacheConfig
+from modules.evaluate.src.contracts.config import (
+    EmbeddingCacheConfig,
+    EvaluationConfig,
+    LayerwiseConfig,
+    PrepareConfig,
+)
 
 
 def _base_config_dict() -> dict:
@@ -269,7 +273,7 @@ class TestPrepareConfig:
 
 class TestShippedConfigOverlays:
     _CONFIG_ROOT = Path(__file__).parents[2] / "modules" / "evaluate" / "configs"
-    _BASE_PATHS = [
+    _BASE_PATHS: ClassVar[list[Path]] = [
         _CONFIG_ROOT / "config.yaml",
         _CONFIG_ROOT / "models" / "esm2_35m.yaml",
         _CONFIG_ROOT / "tasks" / "sequence_classification.yaml",
@@ -325,7 +329,9 @@ class TestShippedConfigOverlays:
         assert not config.steps.prepare.embedding_cache.enabled
         split = config.steps.prepare.split
         assert (split.train, split.validation, split.test) == (
-            "train", "validation", "test"
+            "train",
+            "validation",
+            "test",
         )
         assert not any(config.steps.prepare.random_truncate_by_split.values())
 
@@ -344,7 +350,7 @@ class TestShippedConfigOverlays:
         assert config.workspace.num_labels is None
         assert config.steps.tune.hyperparameter_search.metric == "spearmanr"
         assert config.steps.tune.hyperparameter_search.direction == "maximize"
-        assert config.steps.score.metrics == ["spearmanr"]
+        assert config.steps.score.metrics == ["spearmanr", "mse"]
         assert config.steps.predict.controls == ["random_trunk"]
 
     def test_solubility_overlay_uses_uesolds_and_macro_f1(self):
@@ -360,7 +366,7 @@ class TestShippedConfigOverlays:
         assert config.workspace.dataset_config_name == "solubility_prediction"
         assert config.workspace.num_labels == 2
         assert config.steps.tune.hyperparameter_search.metric == "f1"
-        assert config.steps.score.metrics == ["f1"]
+        assert config.steps.score.metrics == ["f1", "accuracy"]
         assert config.steps.score.metric_aggregation == "macro"
 
     @pytest.mark.parametrize(
@@ -383,7 +389,11 @@ class TestShippedConfigOverlays:
                 self._CONFIG_ROOT / "models" / "esm2_35m.yaml",
                 self._CONFIG_ROOT / "tasks" / f"{task_name}.yaml",
                 self._CONFIG_ROOT / "datasets" / f"{dataset_name}.yaml",
-                *([self._CONFIG_ROOT / "predictors/contact_embedding.yaml"] if task_name == "contact_prediction" else []),
+                *(
+                    [self._CONFIG_ROOT / "predictors/contact_embedding.yaml"]
+                    if task_name == "contact_prediction"
+                    else []
+                ),
             ],
             model_cls=EvaluationConfig,
         )
@@ -519,7 +529,11 @@ class TestShippedConfigOverlays:
                 self._CONFIG_ROOT / "models" / "esm2_35m.yaml",
                 self._CONFIG_ROOT / "tasks" / f"{task_type}.yaml",
                 self._CONFIG_ROOT / "datasets" / f"{dataset_name}.yaml",
-                *([self._CONFIG_ROOT / "predictors/contact_embedding.yaml"] if task_type == "contact_prediction" else []),
+                *(
+                    [self._CONFIG_ROOT / "predictors/contact_embedding.yaml"]
+                    if task_type == "contact_prediction"
+                    else []
+                ),
             ],
             model_cls=EvaluationConfig,
         )

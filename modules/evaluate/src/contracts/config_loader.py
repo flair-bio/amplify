@@ -60,7 +60,7 @@ def compose_evaluation_config(
 def load_baseline_config(
     paths: Sequence[str | Path], overrides: Sequence[str] | None = None
 ) -> BaselineRunConfig:
-
+    """Compose the dataset/task config with an explicit baseline-only overlay."""
     raw: Any = OmegaConf.to_container(
         compose_evaluation_config(paths, overrides), resolve=True
     )

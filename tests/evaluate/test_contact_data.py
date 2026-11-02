@@ -399,10 +399,8 @@ def test_steps_share_full_chain_predictions_and_roundtrip_outputs(tmp_path):
     predictor.assert_called_once_with(dataset.splits["test"][0])
     assert predictions.predictions.height == len(rows)
     assert predictions.predictions_path is not None
-    restored = ScoreStep.load_predict_output(workspace)
-    assert isinstance(restored.metadata, ContactEvaluationMetadata)
-    assert restored.metadata == predictions.metadata
-    scored = ScoreStep(ScoreConfig()).run(workspace, predict_result=restored)
+    assert isinstance(predictions.metadata, ContactEvaluationMetadata)
+    scored = ScoreStep(ScoreConfig()).run(workspace, predict_result=predictions)
     assert scored.unit_scores.height == 2 * len(rows)
     statuses = {
         (r["id"], r["minsep"]): r["status"] for r in scored.unit_scores.to_dicts()

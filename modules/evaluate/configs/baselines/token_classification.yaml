@@ -1,0 +1,2 @@
+baselines:
+  names: [majority_class]

@@ -23,10 +23,10 @@ steps.predict.controls → Predict: build each control's predictions
 - Predict writes model controls next to `predictions.parquet`.
   `scrambled_labels` needs no inference and has no file.
 - Sequence `majority_class`, `train_mean`, `composition`, and `mmseqs_knn` run
-  separately with `run_evaluate.py --baselines`. Score loads their shared
-  artifacts; model evaluations never generate them.
+  separately with `run_evaluate.py --baselines`. They publish independent
+  predictions and scores; model evaluations never load or generate them.
 - Token `majority_class` uses the same shared `--baselines` workflow via
-  top-level `baselines.names=[majority_class]`. Its prior counts all labeled
+  `configs/baselines/token_classification.yaml`. Its prior counts all labeled
   residues in the original training split, excluding `-100`, regardless of
   model, training crop, seed, or final refit.
 - Pseudo-perplexity's `amino_acid_frequency` baseline is also generated with
@@ -45,9 +45,9 @@ steps.predict.controls → Predict: build each control's predictions
 
 ### Shared sequence baselines
 
-Baseline defaults live in `configs/tasks/*.yaml` under `baselines.names`, not
-in separate baseline config files. Override that list with `baselines.names=[...]`
-when selecting a subset.
+Baseline selections live in `configs/baselines/*.yaml`, separate from model
+task overlays. Pass the matching baseline overlay to `--baselines`; override
+`baselines.names=[...]` to select a subset.
 
 Generate dataset-level artifacts once, without a model overlay or accelerator
 launch:
@@ -55,16 +55,12 @@ launch:
 ```bash
 uv run python -m modules.evaluate.src.run_evaluate --baselines \
   modules/evaluate/configs/config.yaml \
-  modules/evaluate/configs/datasets/solubility_prediction.yaml
+  modules/evaluate/configs/datasets/solubility_prediction.yaml \
+  modules/evaluate/configs/baselines/sequence_classification.yaml
 ```
 
-Then run the normal model evaluation with the same dataset/split settings and
-`workspace.base_path`. Task presets select
-`baselines.names=[majority_class, composition, mmseqs_knn]` for sequence
-classification and `[train_mean, composition, mmseqs_knn]` for sequence
-regression.
-`baselines.names=[]` disables shared comparisons independently of model controls.
-The baseline route ignores model/tuning settings. Label-based sequence
+Model evaluation can run before or after baseline generation and uses no
+baseline overlay. The baseline route ignores model/tuning settings. Label-based sequence
 baselines use train-only labels and sequences, never validation or final-refit
 data. External test predictions use the same source training fit. The
 pseudo-perplexity frequency baseline is the exception: it estimates its
@@ -78,36 +74,36 @@ Artifacts live under
 `<benchmark-root>/<task_type>/<dataset_name>/baselines/<name>/fit-<hash>/test-<hash>/`.
 Identity includes actual sequence/ID/label content, source split mappings, and
 the task/class contract. Completed artifacts are reused; inconsistent or
-corrupt files fail explicitly. Scoring checks IDs, labels, and observation
-counts, retaining repeated observations. The run manifest records artifact
-references and baseline point scores even without bootstrap comparisons.
-Constant-prediction Spearman is NaN; undefined paired comparisons are omitted.
+corrupt files fail explicitly. Standalone baseline scoring checks IDs, labels,
+and observation counts, retaining repeated observations. The baseline run
+manifest records artifact references and point scores. Constant-prediction
+Spearman is NaN.
 
 ### Shared CASP contact baseline
 
 The sequence-separation prior also follows the shared artifact workflow. Generate
-it once with the contact dataset configuration (no model or predictor overlay):
+it once with the contact dataset and baseline overlays (no model or predictor overlay):
 
 ```bash
 uv run python -m modules.evaluate.src.run_evaluate --baselines \
   modules/evaluate/configs/config.yaml \
   modules/evaluate/configs/datasets/contact_prediction_casp.yaml \
+  modules/evaluate/configs/baselines/contact_prediction.yaml \
   workspace.edition=14
 ```
 
-Ordinary contact evaluations use the task preset's
-`baselines.names=[separation_prior]`; Score loads the stored candidate-pair
-predictions and reports their hierarchical CASP metrics beside the model.
+Contact evaluations do not load or compare this artifact; its standalone
+predictions and hierarchical CASP scores are published by the baseline run.
 Artifact identity includes the contact dataset/schema fingerprint, CASP edition,
 and prior protocol. Generate separately for each edition when the workspace is
 edition-specific.
 
-Missing artifacts are an error with instructions to run `--baselines`, not an
-automatic baseline job. Duplicate requests fail.
+Model evaluation does not depend on baseline artifacts. Duplicate requests fail.
 
 ### Shared token baseline
 
-Run `--baselines` with the token task and dataset configuration before model
+Run `--baselines` with the token task, dataset, and
+`configs/baselines/token_classification.yaml` overlays, independently of model
 evaluation, just as for sequence tasks. The compact artifact stores the
 training prior and original test labels once per source protein; it does not
 repeat class probabilities for every residue. Score broadcasts that prior
@@ -119,7 +115,7 @@ External tests reuse the main training prior.
 
 This intentionally replaces the old per-run prior computed from cropped
 training dataloaders. Token task presets no longer use
-`steps.predict.baselines`; disable shared comparisons with `baselines.names=[]`.
+`steps.predict.baselines`.
 
 ## Catalog
 
@@ -190,22 +186,22 @@ Label and input scrambling belong to task handlers in [`src/tasks/`](../src/task
 
 ## Defaults and compatibility
 
-Each task config ships a preset; override it with `steps.predict.controls`
-(`[]` disables controls):
+Each task config ships a control preset; override it with `steps.predict.controls`
+(`[]` disables controls). Shared-baseline presets are separate overlays:
 
 | Task type | Controls in the shipped task config |
 |---|---|
-| `sequence_classification` | `random_trunk`; shared `majority_class`, `composition`, `mmseqs_knn` |
+| `sequence_classification` | `random_trunk`; `baselines/sequence_classification.yaml`: `majority_class`, `composition`, `mmseqs_knn` |
 | `sequence_multilabel_classification` | `random_trunk` |
-| `sequence_regression` | `random_trunk`; shared `train_mean`, `composition`, `mmseqs_knn` |
-| `token_classification` | `random_trunk`; shared `majority_class` baseline |
-| `contact_prediction` | `random_trunk`; shared `separation_prior` |
-| `pseudo_perplexity` | `random_trunk`; shared `amino_acid_frequency` |
+| `sequence_regression` | `random_trunk`; `baselines/sequence_regression.yaml`: `train_mean`, `composition`, `mmseqs_knn` |
+| `token_classification` | `random_trunk`; `baselines/token_classification.yaml`: `majority_class` |
+| `contact_prediction` | `random_trunk`; `baselines/contact_prediction.yaml`: `separation_prior` |
+| `pseudo_perplexity` | `random_trunk`; `baselines/pseudo_perplexity.yaml`: `amino_acid_frequency` |
 | `calibration` | `random_trunk` |
 
 `random_trunk` is the per-model default. Other controls remain available by
 explicit override where supported. Shared sequence, token and CASP contact
-baselines run once per dataset/split/protocol with `--baselines`.
+baselines run independently per dataset/split/protocol with `--baselines`.
 MMseqs k-NN requires the `mmseqs` executable on `PATH`. Composition is fitted
 with scikit-learn logistic regression (classification) or ridge regression
 (regression). MMseqs uses sensitivity 7.5 and up to 300 prefilter candidates,
@@ -217,7 +213,7 @@ exhaustive nearest-neighbor search.
 Queries without a significant hit use the training mean (regression) or training
 class-frequency probabilities and their majority class (classification).
 Predictions retain every test row and include a boolean `fallback` column.
-Artifact manifests and per-model score baseline references report `coverage`:
+Artifact manifests report `coverage`:
 `matched`, `fallback`, `total`, and `fraction_matched`. Full-test metrics therefore
 measure **MMseqs top-hit transfer with training-prior fallback**, not matched-only
 performance. The versioned MMseqs protocol uses new artifacts; existing constant

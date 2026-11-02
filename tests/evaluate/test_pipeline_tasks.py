@@ -1,4 +1,4 @@
-"""Offline execution and disk-scoring round trips for the shared task pipeline."""
+"""Offline execution round trips for the shared task pipeline."""
 
 import numpy as np
 import pytest
@@ -9,7 +9,6 @@ from transformers import EsmForMaskedLM
 from modules.evaluate.src.contracts.config import EvaluationConfig
 from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.runners.pipeline import run_pipeline
-from modules.evaluate.src.steps.score import ScoreStep
 from modules.evaluate.src.utils.amino_acids import CANONICAL_AMINO_ACIDS
 from modules.pretrain.src.model.modeling_amplify import (
     AMPLIFYForMaskedLM,
@@ -88,9 +87,6 @@ def test_task_pipeline_roundtrip(
                 ),
                 "output_dir": str(tmp_path / "output"),
             },
-            "baselines": {
-                "names": ["majority_class"] if task == "sequence_classification" else []
-            },
             "steps": {
                 "mode": mode,
                 "prepare": {
@@ -125,8 +121,10 @@ def test_task_pipeline_roundtrip(
     assert prediction.predictions.height > 0
     assert set(prediction.controls) == {"random_trunk"}
     assert prediction.metadata.head_type == (None if mode == "evaluate_as_is" else head)
-    restored = ScoreStep(config.steps.score).run(workspace)
-    assert restored.scores == pytest.approx(result.scores[None].scores, nan_ok=True)
-    assert np.isfinite(restored.scores[metric])
+    assert metric in result.scores[None].scores
+    assert np.isfinite(result.scores[None].scores[metric])
     if task == "sequence_classification":
-        assert set(restored.condition_scores) == {"trained", "random_trunk"}
+        assert set(result.scores[None].condition_scores) == {
+            "trained",
+            "random_trunk",
+        }

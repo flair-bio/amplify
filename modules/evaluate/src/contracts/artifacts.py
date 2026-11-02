@@ -163,12 +163,9 @@ class EvaluationMetadata(BaseModel):
     workspace. ``split`` identifies the configured benchmark condition (for
     example a sequence-identity threshold or mutation-distance split).
 
-    A Pydantic model rather than a plain dataclass -- unlike the other
-    contracts in this module, every field here is plain JSON-safe scalar
-    data that crosses a real serialization boundary (``run_manifest.json``),
-    so ``.model_dump()``/``.model_validate()`` replace the
-    ``dataclass_to_dict``/``EvaluationMetadata(**dict)`` round trip with one
-    that's actually validated on reload (see ``ScoreStep.load_predict_output``).
+    A Pydantic model rather than a plain dataclass because its JSON-safe fields
+    cross a real serialization boundary in ``run_manifest.json`` and score
+    reports.
     """
 
     model_config = ConfigDict(extra="forbid")

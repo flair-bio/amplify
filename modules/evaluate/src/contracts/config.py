@@ -726,7 +726,9 @@ class PredictConfig(BaseModel):
         if legacy:
             warnings.warn(
                 "Dataset baselines in predict.controls are deprecated; use "
-                "predict.baselines (or reusable baselines.names for sequence tasks).",
+                "predict.baselines for inline prediction baselines; reusable "
+                "dataset baselines are configured with a baseline overlay and "
+                "run via run_evaluate.py --baselines.",
                 DeprecationWarning,
                 stacklevel=2,
             )
@@ -889,7 +891,6 @@ class EvaluationConfig(BaseModel):
     steps: StepsConfig = Field(default_factory=StepsConfig)
     # Test-only datasets scored with the model fitted on the workspace dataset.
     external_test_sets: list[ExternalTestSetConfig] = Field(default_factory=list)
-    baselines: BaselinesConfig = Field(default_factory=BaselinesConfig)
 
     @model_validator(mode="after")
     def _validate_external_test_sets(self) -> EvaluationConfig:
@@ -921,17 +922,6 @@ class EvaluationConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_cross_step_dependencies(self) -> EvaluationConfig:
-        self.baselines.validate_task(self.workspace.task_type)
-        from modules.evaluate.src.tasks import get_task
-
-        if (
-            set(self.steps.predict.baselines)
-            & get_task(self.workspace.task_type).dataset_baselines
-        ):
-            raise ValueError(
-                "Move shared baselines from steps.predict.controls/predict.baselines "
-                "to baselines.names and run run_evaluate.py --baselines first."
-            )
         from modules.evaluate.src.contracts.validation import (
             validate_cross_step_dependencies,
         )
@@ -958,7 +948,10 @@ class BaselineRunConfig(BaseModel):
 
         self.baselines.validate_task(self.workspace.task_type)
         if not self.baselines.names:
-            raise ValueError("Select at least one baseline in baselines.names.")
+            raise ValueError(
+                "Select at least one baseline in a baseline config overlay "
+                "(baselines.names) or with a baselines.names=... override."
+            )
         names = [external.name for external in self.external_test_sets]
         if len(set(names)) != len(names):
             raise ValueError("external_test_sets names must be unique.")

@@ -31,7 +31,7 @@ from modules.evaluate.src.steps.prepare import PrepareStep
 from modules.evaluate.src.steps.score import ScoreStep
 from modules.evaluate.src.steps.tune import TuneStep
 from modules.evaluate.src.tasks import get_task
-from modules.evaluate.src.utils.io import log_to_file, update_run_manifest
+from modules.evaluate.src.utils.io import update_run_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,6 @@ def _reserve_outputs(
                         overwrite=overwrite,
                         config=config.model_dump(mode="json"),
                     )
-                    stack.enter_context(log_to_file(item.run_root / "log"))
             except Exception as exception:
                 logger.exception("Cannot reserve evaluation outputs")
                 error = exception
@@ -140,9 +139,6 @@ def _execute_steps(
         accelerator=accelerator,
         layerwise_config=config.steps.layerwise,
         dataset=dataset,
-        **(
-            {"baseline_names": config.baselines.names} if config.baselines.names else {}
-        ),
         head_type=config.steps.tune.head.head_type,
     )
 
@@ -264,8 +260,7 @@ def _predict_and_score(
 
     result = PipelineResult(evaluations)
     # ScoreStep is a plain, single-process step, so only rank 0 runs it.
-    # Passing PredictOutput avoids a disk round trip; ScoreStep still supports
-    # manifest-based reloading for standalone or restarted scoring.
+    # Score the predictions produced by this run.
     if accelerator.is_main_process:
         logger.info("Scoring test observations")
         score_step = ScoreStep(config.steps.score)

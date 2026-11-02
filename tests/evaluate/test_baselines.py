@@ -15,7 +15,6 @@ from modules.evaluate.src.contracts.artifacts import EvaluationMetadata, Predict
 from modules.evaluate.src.contracts.config import (
     BaselineRunConfig,
     DatasetWorkspaceConfig,
-    EvaluationWorkspaceConfig,
     ExternalTestSetConfig,
     LayerwiseConfig,
     PredictConfig,
@@ -73,7 +72,7 @@ def test_invalid_condition_types_keep_schema_validation_errors(payload):
         PredictConfig.model_validate(payload)
 
 
-def test_inline_baseline_requests_survive_prediction_manifest_reload(tmp_path):
+def test_inline_baseline_requests_are_persisted_in_prediction_manifest(tmp_path):
     workspace = _make_workspace(tmp_path, "sequence_classification")
     workspace.setup_directories()
     config = PredictConfig(controls=[], baselines=["majority_class"])
@@ -91,9 +90,10 @@ def test_inline_baseline_requests_survive_prediction_manifest_reload(tmp_path):
         config=config.model_dump(mode="json"),
     )
     persist_predictions(workspace, output, workspace.seed)
-    restored = ScoreStep.load_predict_output(workspace)
-    assert restored.requested_controls == ["majority_class"]
-    assert restored.controls["majority_class"].to_dicts() == baseline.to_dicts()
+    manifest = json.loads(workspace.run_manifest_path.read_text())
+    assert manifest["predict"]["config"]["baselines"] == ["majority_class"]
+    control_path = Path(manifest["predict"]["control_paths"]["majority_class"])
+    assert control_path.exists()
 
 
 def _data(regression=False):
@@ -179,9 +179,16 @@ def test_standalone_baseline_reuses_predictions_and_never_fits_validation(
     assert path.is_relative_to(config.workspace.dataset_root / "baselines" / name)
     assert path.parent.name.startswith("test-")
     assert path.parent.parent.name.startswith("fit-")
-    assert (path.parent / "log").read_text()
-    assert (path.parent.parent / "fit_manifest.json").exists()
-    assert (path.parent / "scores.json").exists()
+    assert not (path.parent / "log").exists()
+    run_manifest_path = path.with_name("run_manifest.json")
+    assert run_manifest_path.exists()
+    assert {child.name for child in path.parent.glob("*.json")} == {"run_manifest.json"}
+    assert not (path.parent.parent / "fit_manifest.json").exists()
+    run_manifest = json.loads(run_manifest_path.read_text())
+    assert run_manifest["status"] == "complete"
+    assert run_manifest["artifact"]["rows"] == baseline.height
+    assert run_manifest["run"]["config"]["baselines"]["names"] == [name]
+    assert run_manifest["score"]["scores"]
     assert baseline["id"].to_list() == ["repeat", "repeat", "other"]
     if name == "train_mean":
         assert baseline["prediction"].to_list() == [2.0] * 3
@@ -267,7 +274,7 @@ def test_external_baseline_keeps_source_training_prior(tmp_path, monkeypatch):
     assert frame["id"].to_list() == ["external"]
     manifest = json.loads(
         paths["external/heldout"]["majority_class"]
-        .with_name("manifest.json")
+        .with_name("run_manifest.json")
         .read_text()
     )
     assert manifest["identity"]["test"]["dataset"] == "org/heldout"
@@ -296,11 +303,11 @@ def test_suite_baseline_loads_main_and_external_configurations(tmp_path, monkeyp
     ]
     assert "external/heldout" in outputs
     main_manifest = json.loads(
-        outputs["test"]["majority_class"].with_name("manifest.json").read_text()
+        outputs["test"]["majority_class"].with_name("run_manifest.json").read_text()
     )
     external_manifest = json.loads(
         outputs["external/heldout"]["majority_class"]
-        .with_name("manifest.json")
+        .with_name("run_manifest.json")
         .read_text()
     )
     assert main_manifest["identity"]["test"] != external_manifest["identity"]["test"]
@@ -358,7 +365,7 @@ def test_score_loads_shared_predictions_and_standalone_manifest(
                 n_samples=5,
                 n_permutations=5,
             )
-        ).run(workspace)
+        ).run(workspace, predict_result=output)
         assert result.control_comparisons is None
         assert not (
             workspace.preds_path / f"control_{name}_predictions.parquet"
@@ -418,7 +425,7 @@ def test_concurrent_baseline_jobs_publish_one_complete_artifact(tmp_path, monkey
 def test_manifest_identity_mismatch_fails_explicitly(tmp_path):
     config, data = _config(tmp_path), _data()
     path = run_baselines(config, dataset=data)["test"]["majority_class"]
-    manifest_path = path.with_name("manifest.json")
+    manifest_path = path.with_name("run_manifest.json")
     manifest = json.loads(manifest_path.read_text())
     manifest["identity"]["fit"]["fit_policy"] = "different_policy"
     manifest_path.write_text(json.dumps(manifest))
@@ -545,81 +552,6 @@ def test_token_alignment_uses_original_positions_after_ignored_residues(tmp_path
         align_token_baseline(
             baseline, cropped.with_columns(pl.lit([0, 3]).alias("original_positions"))
         )
-
-
-def test_disk_comparison_discovers_later_baseline_without_rewriting_scores(tmp_path):
-    baseline_config, data = _config(tmp_path), _data()
-    baseline_config.score = ScoreConfig(metrics=["accuracy"])
-    baseline_path = run_baselines(baseline_config, dataset=data)["test"][
-        "majority_class"
-    ]
-    evaluation_config = EvaluationWorkspaceConfig(
-        run_id="saved",
-        model_name="toy-model",
-        dataset_name="toy",
-        task_type="sequence_classification",
-        target_type="categorical",
-        label_format="scalar",
-        num_labels=3,
-        base_path=str(tmp_path),
-    )
-    workspace = get_evaluation_workspace(
-        evaluation_config, variant="mlp-frozen_trunk", seed=710019
-    )
-    workspace.setup_directories()
-    context = _context(baseline_config, data)
-    context["names"] = []
-    prediction = PredictOutput(
-        metadata=EvaluationMetadata(
-            model_name=workspace.model_name,
-            dataset_name=workspace.dataset_name,
-            task_type=workspace.task_type,
-            seed=workspace.seed,
-            variant=workspace.variant,
-        ),
-        predictions=pl.DataFrame(
-            {
-                "id": ["repeat", "repeat", "other"],
-                "prediction": [0, 1, 0],
-                "label": [0, 1, 0],
-            }
-        ),
-        config=PredictConfig(controls=[], persist_to_disk=True).model_dump(mode="json"),
-        baseline_context=context,
-    )
-    persist_predictions(workspace, prediction, seed=710019)
-    score_step = ScoreStep(
-        ScoreConfig(
-            metrics=["accuracy"],
-            bootstrap_enabled=True,
-            n_samples=8,
-            n_permutations=8,
-        )
-    )
-    score_step.run(
-        workspace,
-        seed=710019,
-    )
-    manifest_before = workspace.run_manifest_path.read_bytes()
-    standalone_before = (workspace.run_root / "scores_long.parquet").read_bytes()
-    baseline_scores_before = (baseline_path.parent / "scores.json").read_bytes()
-
-    comparison_path = score_step.compare_saved(
-        workspace,
-        shared_baselines=["majority_class"],
-        controls=[],
-        seed=710019,
-    )
-
-    assert comparison_path.exists()
-    assert json.loads(comparison_path.read_text())["baselines"]["majority_class"][
-        "path"
-    ] == str(baseline_path)
-    assert workspace.run_manifest_path.read_bytes() == manifest_before
-    assert (
-        workspace.run_root / "scores_long.parquet"
-    ).read_bytes() == standalone_before
-    assert (baseline_path.parent / "scores.json").read_bytes() == baseline_scores_before
 
 
 @pytest.mark.parametrize(
@@ -810,8 +742,8 @@ def test_mmseqs_fallback_uses_training_prior_and_records_coverage(
     if not regression:
         for probabilities in fallback["probability"].to_list():
             assert probabilities == pytest.approx([1 / 3, 2 / 3, 0])
-    manifest = json.loads(path.with_name("manifest.json").read_text())
-    assert manifest["coverage"] == {
+    manifest = json.loads(path.with_name("run_manifest.json").read_text())
+    assert manifest["artifact"]["coverage"] == {
         "matched": 0 if all_missing else 2,
         "fallback": 3 if all_missing else 1,
         "total": 3,
@@ -820,6 +752,45 @@ def test_mmseqs_fallback_uses_training_prior_and_records_coverage(
     if not all_missing:
         assert frame["prediction"][0] == data["train"]["targets"][0]
         assert frame["prediction"][2] == data["train"]["targets"][2]
+
+
+def test_legacy_baseline_json_sidecars_are_consolidated(tmp_path, monkeypatch):
+    config, data = _config(tmp_path), _data()
+    path = run_baselines(config, dataset=data)["test"]["majority_class"]
+    directory = path.parent
+    manifest_path = directory / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    write_json = runner.write_json
+    write_json(
+        directory / "manifest.json",
+        {
+            "identity": manifest["identity"],
+            **manifest["artifact"],
+        },
+    )
+    write_json(
+        directory.parent / "fit_manifest.json",
+        {"baseline": "majority_class", "fit": manifest["identity"]["fit"]},
+    )
+    write_json(
+        directory / "scores.json",
+        {
+            "identity": manifest["identity"],
+            "config": manifest["score"]["config"],
+            "scores": manifest["score"]["scores"],
+        },
+    )
+    manifest_path.unlink()
+
+    builder = Mock(side_effect=AssertionError("legacy predictions should be reused"))
+    monkeypatch.setattr(runner, "build_sequence_baseline", builder)
+    run_baselines(config, dataset=data)
+    builder.assert_not_called()
+    consolidated = json.loads(manifest_path.read_text())
+    assert consolidated["status"] == "complete"
+    assert consolidated["score"]["scores"]
+    assert {file.name for file in directory.glob("*.json")} == {"run_manifest.json"}
+    assert not (directory.parent / "fit_manifest.json").exists()
 
 
 def test_mmseqs_protocol_change_preserves_other_baseline_paths(tmp_path):
@@ -913,7 +884,11 @@ def test_invalid_training_targets_rejected(tmp_path, targets):
 def test_baseline_cli_uses_data_subset_without_model_validation(tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
     config = load_baseline_config(
-        [root / "config.yaml", root / "datasets/solubility_prediction.yaml"],
+        [
+            root / "config.yaml",
+            root / "datasets/solubility_prediction.yaml",
+            root / "baselines/sequence_classification.yaml",
+        ],
         ["steps.mode=not_a_model_mode", "workspace.model_name=null"],
     )
     assert config.baselines.names == [
@@ -939,66 +914,6 @@ def test_baseline_cli_uses_data_subset_without_model_validation(tmp_path, monkey
     run.assert_called_once_with(config)
 
 
-@pytest.mark.parametrize("route", ["--score", "--compare"])
-def test_disk_scoring_cli_composes_configs_without_model_inference(
-    tmp_path, monkeypatch, route
-):
-    from modules.evaluate.src import run_evaluate
-
-    root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
-    configs = [
-        root / "config.yaml",
-        root / "models/amplify_120m.yaml",
-        root / "tasks/sequence_classification.yaml",
-        root / "datasets/localization_prediction.yaml",
-        root / "smoke_test.yaml",
-    ]
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            "run_evaluate.py",
-            route,
-            *(str(path) for path in configs),
-            f"workspace.output_dir={tmp_path}",
-            (
-                "baselines.names=[majority_class]"
-                if route == "--compare"
-                else "baselines.names=[]"
-            ),
-            "steps.predict.controls=[]",
-        ],
-    )
-    workspace = Mock()
-    monkeypatch.setattr(
-        run_evaluate, "get_evaluation_workspace", Mock(return_value=workspace)
-    )
-    score_step = Mock()
-    monkeypatch.setattr(run_evaluate, "ScoreStep", Mock(return_value=score_step))
-    monkeypatch.setattr(
-        run_evaluate,
-        "Accelerator",
-        Mock(
-            side_effect=AssertionError("disk-only scoring must not initialize models")
-        ),
-    )
-    monkeypatch.setattr(
-        run_evaluate,
-        "run_pipeline",
-        Mock(side_effect=AssertionError("disk-only scoring must not run inference")),
-    )
-
-    run_evaluate.main()
-
-    if route == "--score":
-        score_step.run.assert_called_once_with(workspace, seed=710019)
-    else:
-        score_step.compare_saved.assert_called_once()
-        assert (
-            score_step.compare_saved.call_args.kwargs["expected_preprocessing"]
-            is not None
-        )
-
-
 @pytest.mark.parametrize(
     "overrides,match",
     [
@@ -1010,7 +925,11 @@ def test_baseline_route_rejects_unsupported_requests(overrides, match):
     root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
     with pytest.raises(ValueError, match=match):
         load_baseline_config(
-            [root / "config.yaml", root / "datasets/solubility_prediction.yaml"],
+            [
+                root / "config.yaml",
+                root / "datasets/solubility_prediction.yaml",
+                root / "baselines/sequence_classification.yaml",
+            ],
             overrides,
         )
 

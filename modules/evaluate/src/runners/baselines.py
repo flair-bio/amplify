@@ -49,7 +49,7 @@ from modules.evaluate.src.model.baselines import (
     build_sequence_baseline,
 )
 from modules.evaluate.src.tasks import get_task
-from modules.evaluate.src.utils.io import log_to_file, write_json
+from modules.evaluate.src.utils.io import write_json
 from modules.evaluate.src.utils.storage import cache_lock
 
 logger = logging.getLogger(__name__)
@@ -169,44 +169,36 @@ def run_baselines(
             directory = artifact_directory(test_context, name)
             directory.mkdir(parents=True, exist_ok=True)
             with cache_lock(directory.parent / ".lock"):
-                fit_path = directory.parent / "fit_manifest.json"
-                fit_identity = {
-                    "baseline": name,
-                    "fit": artifact_identity(test_context, name)["fit"],
-                }
-                if fit_path.exists():
-                    if json.loads(fit_path.read_text()) != fit_identity:
-                        raise ValueError(
-                            f"Incompatible baseline fit manifest: {fit_path}"
-                        )
-                else:
-                    write_json(fit_path, fit_identity)
-                with log_to_file(directory / "log"):
-                    logger.info(
-                        "Resolving baseline %s for %s at %s", name, test_name, directory
-                    )
-                    _publish_baseline(
-                        directory,
-                        test_context,
-                        name,
-                        train_rows,
-                        test_rows,
-                        workspace.num_labels,
-                        task_type=workspace.task_type,
-                        seed=config.seed,
-                        max_residues=prepare.max_length - 2,
-                    )
-                    frame, path = load_baseline_artifact(test_context, name)
-                    _publish_standalone_scores(
-                        directory,
-                        test_context,
-                        name,
-                        frame,
-                        config.score,
-                        workspace,
-                        config.seed,
-                    )
-                    logger.info("Baseline predictions ready: %s", path)
+                _upgrade_legacy_baseline(
+                    directory, test_context, name, config, test_name
+                )
+                logger.info(
+                    "Resolving baseline %s for %s at %s", name, test_name, directory
+                )
+                _publish_baseline(
+                    directory,
+                    test_context,
+                    name,
+                    train_rows,
+                    test_rows,
+                    workspace.num_labels,
+                    task_type=workspace.task_type,
+                    seed=config.seed,
+                    max_residues=prepare.max_length - 2,
+                )
+                frame, path = load_baseline_artifact(test_context, name)
+                _publish_standalone_scores(
+                    directory,
+                    test_context,
+                    name,
+                    frame,
+                    config.score,
+                    workspace,
+                    config.seed,
+                    run_config=config.model_dump(mode="json"),
+                    test_name=test_name,
+                )
+                logger.info("Baseline predictions ready: %s", path)
                 outputs[test_name][name] = path
     return outputs
 
@@ -245,13 +237,7 @@ def _run_contact_baselines(
         directory = artifact_directory(context, name)
         directory.mkdir(parents=True, exist_ok=True)
         with cache_lock(directory.parent / ".lock"):
-            fit_path = directory.parent / "fit_manifest.json"
-            fit_identity = {"baseline": name, "fit": context["fit"]}
-            if fit_path.exists():
-                if json.loads(fit_path.read_text()) != fit_identity:
-                    raise ValueError(f"Incompatible baseline fit manifest: {fit_path}")
-            else:
-                write_json(fit_path, fit_identity)
+            _upgrade_legacy_baseline(directory, context, name, config, "test")
             _publish_contact_baseline(directory, context, name, frame)
             artifact, path = load_baseline_artifact(context, name)
             metadata = ContactEvaluationMetadata(
@@ -276,13 +262,23 @@ def _run_contact_baselines(
                     "Contact baseline scoring must return structured scores."
                 )
             write_json(
-                directory / "scores.json",
+                directory / "run_manifest.json",
                 {
+                    "status": "complete",
                     "identity": artifact_identity(context, name),
-                    "config": config.score.model_dump(mode="json"),
-                    "scores": result.summaries.to_dicts(),
+                    "artifact": _prediction_metadata(directory, artifact),
+                    "run": {
+                        "seed": config.seed,
+                        "test": "test",
+                        "config": config.model_dump(mode="json"),
+                    },
+                    "score": {
+                        "config": config.score.model_dump(mode="json"),
+                        "scores": result.summaries.to_dicts(),
+                    },
                 },
             )
+            _remove_legacy_sidecars(directory)
             outputs["test"][name] = path
     return outputs
 
@@ -293,7 +289,7 @@ def _publish_contact_baseline(
     name: BaselineName,
     frame: pl.DataFrame,
 ) -> None:
-    if (directory / "manifest.json").exists():
+    if (directory / "run_manifest.json").exists():
         return
     temporary = directory / f".{uuid4().hex}.parquet"
     path = directory / "predictions.parquet"
@@ -301,11 +297,11 @@ def _publish_contact_baseline(
         frame.write_parquet(temporary)
         temporary.replace(path)
         write_json(
-            directory / "manifest.json",
+            directory / "run_manifest.json",
             {
+                "status": "predictions_published",
                 "identity": artifact_identity(context, name),
-                "rows": frame.height,
-                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "artifact": _prediction_metadata(directory, frame),
             },
         )
     finally:
@@ -324,7 +320,7 @@ def _publish_baseline(
     seed: int,
     max_residues: int,
 ) -> None:
-    if not (directory / "manifest.json").exists():
+    if not (directory / "run_manifest.json").exists():
         frame = (
             build_amino_acid_frequency_baseline(test_rows, max_residues=max_residues)
             if name == "amino_acid_frequency"
@@ -348,12 +344,11 @@ def _publish_baseline(
             frame.write_parquet(temporary)
             temporary.replace(path)
             write_json(
-                directory / "manifest.json",
+                directory / "run_manifest.json",
                 {
+                    "status": "predictions_published",
                     "identity": artifact_identity(context, name),
-                    "rows": frame.height,
-                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                    **metadata,
+                    "artifact": _prediction_metadata(directory, frame, **metadata),
                 },
             )
         finally:
@@ -368,6 +363,9 @@ def _publish_standalone_scores(
     config: ScoreConfig,
     workspace: Any,
     seed: int,
+    *,
+    run_config: dict[str, Any],
+    test_name: str,
 ) -> None:
     task = get_task(workspace.task_type, workspace.num_labels)
     if workspace.task_type == "token_classification":
@@ -404,11 +402,101 @@ def _publish_standalone_scores(
     scores = (
         result.summaries.to_dicts() if hasattr(result, "summaries") else result.scores
     )
-    write_json(
-        directory / "scores.json",
+    run_manifest_path = directory / "run_manifest.json"
+    manifest = json.loads(run_manifest_path.read_text())
+    manifest.update(
         {
-            "identity": artifact_identity(context, name),
-            "config": config.model_dump(mode="json"),
-            "scores": scores,
+            "status": "complete",
+            "run": {
+                "seed": seed,
+                "test": test_name,
+                "config": run_config,
+            },
+            "score": {
+                "config": config.model_dump(mode="json"),
+                "scores": scores,
+            },
+        }
+    )
+    write_json(run_manifest_path, manifest)
+    _remove_legacy_sidecars(directory)
+
+
+def _upgrade_legacy_baseline(
+    directory: Path,
+    context: dict[str, Any],
+    name: BaselineName,
+    config: BaselineRunConfig,
+    test_name: str,
+) -> None:
+    """Consolidate a verified legacy artifact's JSON sidecars in place."""
+    manifest_path = directory / "run_manifest.json"
+    if manifest_path.exists():
+        return
+    legacy_manifest_path = directory / "manifest.json"
+    if not legacy_manifest_path.exists():
+        return
+
+    identity = artifact_identity(context, name)
+    legacy = json.loads(legacy_manifest_path.read_text())
+    if legacy.get("identity") != identity:
+        raise ValueError(f"Incompatible baseline manifest: {legacy_manifest_path}")
+    fit_path = directory.parent / "fit_manifest.json"
+    if fit_path.exists():
+        fit_manifest = json.loads(fit_path.read_text())
+        expected_fit = {"baseline": name, "fit": identity["fit"]}
+        if fit_manifest != expected_fit:
+            raise ValueError(f"Incompatible baseline fit manifest: {fit_path}")
+
+    prediction_path = directory / "predictions.parquet"
+    if not prediction_path.exists() or hashlib.sha256(
+        prediction_path.read_bytes()
+    ).hexdigest() != legacy.get("sha256"):
+        raise ValueError(f"Corrupt baseline predictions: {prediction_path}")
+
+    artifact: dict[str, Any] = {
+        "path": prediction_path.name,
+        "rows": legacy.get("rows"),
+        "sha256": legacy["sha256"],
+    }
+    if "coverage" in legacy:
+        artifact["coverage"] = legacy["coverage"]
+    score_path = directory / "scores.json"
+    if score_path.exists():
+        score_manifest = json.loads(score_path.read_text())
+        if score_manifest.get("identity") != identity:
+            raise ValueError(f"Incompatible baseline scores: {score_path}")
+    write_json(
+        manifest_path,
+        {
+            "status": "predictions_published",
+            "identity": identity,
+            "artifact": artifact,
+            "run": {
+                "seed": config.seed,
+                "test": test_name,
+                "config": config.model_dump(mode="json"),
+            },
         },
     )
+
+
+def _remove_legacy_sidecars(directory: Path) -> None:
+    for path in (
+        directory / "manifest.json",
+        directory / "scores.json",
+        directory.parent / "fit_manifest.json",
+    ):
+        path.unlink(missing_ok=True)
+
+
+def _prediction_metadata(
+    directory: Path, frame: pl.DataFrame, **extra: Any
+) -> dict[str, Any]:
+    path = directory / "predictions.parquet"
+    return {
+        "path": path.name,
+        "rows": frame.height,
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        **extra,
+    }
