@@ -488,7 +488,7 @@ recomputes embeddings instead of reusing outputs from another precision.
 
 There is no sweep driver: each invocation handles one (model, dataset, head) combination.
 Run combinations against one `workspace.base_path` so every result lands in a
-`scores_long.parquet` that [Reading results](#reading-results) can combine. Locally,
+`scores.parquet` that [Reading results](#reading-results) can combine. Locally,
 loop over overlays:
 
 ```bash
@@ -549,7 +549,7 @@ Append these overrides to any launch command, or put them in an overlay YAML.
 | Classical probe on cached embeddings | Add `modules/evaluate/configs/predictors/random_forest.yaml` after the dataset overlay |
 | Disable control conditions | `steps.predict.controls=[]` |
 | Write results elsewhere | `workspace.base_path=/path/to/eval` |
-| Store embedding caches on HPC scratch | `workspace.tmp_path=/scratch/$USER/evaluate` (task/dataset/model subdirectories are appended) |
+| Store embedding caches separately | Set `workspace.tmp_path` to a shared writable cache directory (task/dataset/model subdirectories are appended) |
 | Group model versions into one benchmark comparison | `workspace.base_path=/path/to/client-benchmark-v1` |
 | Keep another evaluation of the same model/probe | `workspace.run_id=run02` |
 | Label a specific checkpoint version | `workspace.model_name=amplify-350m-muon workspace.model_repo_id=/path/to/checkpoint` |
@@ -900,9 +900,8 @@ custom metrics, and unsupported aggregation modes retain the existing path.
 | `bootstrap_enabled` | `false` | Enable bootstrap confidence intervals + control comparisons |
 | `n_samples` | `1000` | Bootstrap resamples; the code warns when below 1000 because confidence-interval tails are poorly estimated |
 | `n_permutations` | `1000` | Trained-vs-control paired permutations; the smallest p-value is `1 / (n_permutations + 1)` before correction |
-| `output_filename` | `bootstrap_results.parquet` | Per-resample bootstrap metric values (bootstrap mode only) |
 | `confidence_interval` | `0.95` | Confidence level for bootstrap intervals |
-| `long_filename` | `scores_long.parquet` | Tidy/long-format sidecar written on every run, with or without bootstrap — concatenable across (model, dataset) runs for plotting |
+| `long_filename` | `scores.parquet` | Tidy score table written on every run, concatenable across flat-task model and baseline runs. The config field retains its legacy name |
 
 **Input:** `<run>/predictions.parquet`
 **Exact scores:** `<run>/run_manifest.json` records full-test scores under
@@ -912,7 +911,7 @@ other conditions use their control/baseline names. These scores are recorded eve
 without bootstrap, preserve undefined scores as NaN, and are replaced on
 rescoring. Unlike comparison-row bootstrap means, these are exact test scores.
 
-**Output:** `<run>/scores_long.parquet` (always), plus `<run>/bootstrap_results.parquet` when `bootstrap_enabled=true`; scores/confidence intervals are also recorded in `<run>/run_manifest.json` under the `score`/`bootstrap` sections. Concatenate run-local score tables when comparing models or repeated runs.
+**Output:** `<run>/scores.parquet` and `<run>/run_manifest.json`. Flat-task baseline runs also write point estimates to `scores.parquet`; their `baseline` column identifies the baseline. Structured tasks write task-specific score and unit-score tables. Bootstrap confidence intervals and control comparisons are summarized in the model manifest; per-resample bootstrap values are computed in memory but are not written to a separate Parquet file. Flat-task score tables can be concatenated when comparing model and baseline runs.
 `bootstrap.control_comparisons` records each control's bootstrap mean, the
 trained-minus-control mean difference and confidence interval, and raw/adjusted
 permutation p-values (an empty object when there are no comparisons). These
@@ -932,7 +931,8 @@ groups outputs by **benchmark root -> task -> dataset -> baseline/model -> run**
 ├── baselines/<baseline>/fit-<12-char-hash>/
 │   └── test-<12-char-hash>/
 │       ├── run_manifest.json
-│       └── predictions.parquet
+│       ├── predictions.parquet
+│       └── scores.parquet
 └── <model_name>/
     └── <variant>-<run_id>/seed_<seed>/
         ├── model/
@@ -940,8 +940,7 @@ groups outputs by **benchmark root -> task -> dataset -> baseline/model -> run**
         ├── controls/random_trunk/
         │   ├── model/
         │   └── predictions.parquet
-        ├── bootstrap_results.parquet
-        ├── scores_long.parquet
+        ├── scores.parquet
         ├── layerwise_comparison.parquet  ← when layer comparisons apply
         └── run_manifest.json
 ```
@@ -978,16 +977,17 @@ output directories are left unchanged; use a distinct run ID to avoid conflicts.
 
 Embedding caches live separately at
 `<benchmark_root>/tmp/<task_type>/<dataset_name>/<model_name>/embeddings/`,
-shared across variants, run IDs and seeds. Set `workspace.tmp_path=/scratch/$USER/evaluate`
-to replace `<benchmark_root>/tmp` with an HPC scratch directory. Run, workspace
+shared across variants, run IDs and seeds. Set `workspace.tmp_path` to move
+caches to a separate shared writable location. Run, workspace
 and experiment locks live alongside embeddings under `locks/<output-root-hash>/`.
 All jobs writing the same results must use the same shared `workspace.tmp_path`.
 Do not delete this temporary directory while jobs are running; persistent `.lock`
 files are harmless after jobs finish. Baseline publication locks remain transient
 directories beside the shared baseline artifacts.
 Model checkpoint/reload JSON files and run manifests are retained; each baseline
-artifact's identity, full config, checksum, and standalone scores are consolidated
-in its `run_manifest.json`. Separate baseline `fit_manifest.json`, `manifest.json`,
+artifact's identity, full config, prediction checksum, and standalone scores are
+recorded in its `run_manifest.json`, with point scores also written to
+`scores.parquet`. Separate baseline `fit_manifest.json`, `manifest.json`,
 and `scores.json` files are upgraded and removed when that artifact is next used.
 Separate `workspace_manifest.json` and `experiment_*.json` files are no longer
 written. Existing outputs and caches are not automatically moved.
@@ -1042,8 +1042,14 @@ skipped with a warning under `evaluate_as_is` (no fitted probe).
 
 ### Reading results
 
-`<workspace>/scores/scores_long.parquet` is the table for comparing runs.
-Every row carries the run identity (`model_name`, `dataset_name`, `task_type`,
+For flat tasks, `scores.parquet` is the tidy table for comparing model and
+baseline runs. Model rows have a null `baseline`; shared-baseline rows name the
+method in `baseline`. Both use a null `control` for standalone point scores;
+model-control comparison rows set `control` to the control name. Structured
+tasks retain task-specific hierarchical score tables and are not directly
+concatenable with this flat-task schema.
+
+Every flat-task row carries the run identity (`model_name`, `dataset_name`, `task_type`,
 `split`, `model_repo_id`, `dataset_repo_id`, `head_type`, `layer_index`,
 `variant`, `seed`) plus a `metric`:
 
@@ -1070,11 +1076,13 @@ from pathlib import Path
 import polars as pl
 
 scores = pl.concat(
-    [pl.read_parquet(p) for p in Path("eval").glob("*/*/scores/scores_long.parquet")],
+    [pl.read_parquet(p) for p in Path("eval").rglob("scores.parquet")],
     how="diagonal_relaxed",
 )
 scores.filter(pl.col("control").is_null()).pivot(
-    on="metric", index=["model_name", "dataset_name", "variant", "split"], values="value"
+    on="metric",
+    index=["model_name", "dataset_name", "variant", "split", "baseline"],
+    values="value",
 )
 ```
 

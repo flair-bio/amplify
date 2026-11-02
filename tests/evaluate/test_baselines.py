@@ -165,6 +165,7 @@ def test_standalone_baseline_reuses_predictions_and_never_fits_validation(
 ):
     caplog.set_level("INFO")
     config, data = _config(tmp_path, regression), _data(regression)
+    config.score.bootstrap_enabled = True
     if baseline != "constant":
         config.baselines.names = [baseline]
     monkeypatch.setattr(
@@ -185,10 +186,22 @@ def test_standalone_baseline_reuses_predictions_and_never_fits_validation(
     assert {child.name for child in path.parent.glob("*.json")} == {"run_manifest.json"}
     assert not (path.parent.parent / "fit_manifest.json").exists()
     run_manifest = json.loads(run_manifest_path.read_text())
+    scores_path = path.with_name("scores.parquet")
+    score_table = pl.read_parquet(scores_path)
     assert run_manifest["status"] == "complete"
     assert run_manifest["artifact"]["rows"] == baseline.height
     assert run_manifest["run"]["config"]["baselines"]["names"] == [name]
+    assert run_manifest["run"]["config"]["score"]["bootstrap_enabled"] is False
+    assert run_manifest["score"]["config"]["bootstrap_enabled"] is False
+    assert run_manifest["score"]["bootstrap"]["status"] == "not_computed"
     assert run_manifest["score"]["scores"]
+    assert run_manifest["score"]["scores_path"] == str(scores_path)
+    assert set(score_table["baseline"].to_list()) == {name}
+    assert set(score_table["metric"].to_list()) == set(
+        run_manifest["score"]["scores"]
+        if isinstance(run_manifest["score"]["scores"], list)
+        else run_manifest["score"]["scores"].keys()
+    )
     assert baseline["id"].to_list() == ["repeat", "repeat", "other"]
     if name == "train_mean":
         assert baseline["prediction"].to_list() == [2.0] * 3

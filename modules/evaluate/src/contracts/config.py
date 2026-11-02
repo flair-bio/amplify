@@ -762,14 +762,11 @@ class ScoreConfig(BaseModel):
     bootstrap_enabled: bool = False
     n_samples: int = Field(_MIN_RECOMMENDED_BOOTSTRAP_SAMPLES, gt=0)
     n_permutations: int = Field(_DEFAULT_N_PERMUTATIONS, gt=0)
-    output_filename: str = "bootstrap_results.parquet"
     confidence_interval: float = Field(0.95, gt=0.0, lt=1.0)
 
-    # Tidy/long-format sidecar (see ``build_long_df``), written on every run
-    # (with or without bootstrap) so downstream plotting/aggregation code has
-    # a single, concatenable artifact per (model, dataset) run regardless of
-    # which optional outputs above were enabled.
-    long_filename: str = "scores_long.parquet"
+    # Tidy score-table filename (see ``build_long_df``), written on every run.
+    # ``long_filename`` is retained as a config key for compatibility.
+    long_filename: str = "scores.parquet"
 
     @model_validator(mode="after")
     def _warn_if_resamples_too_low_for_significance(self) -> ScoreConfig:

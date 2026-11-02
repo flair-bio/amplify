@@ -49,7 +49,7 @@ steps:
     label_column: targets
     id_column: id # per-example identifier column; falls back to a positional index if absent
     tokenize_num_proc: 4 # leave CPU/RAM headroom on an 8-core, 64-GB client
-    split: # name is recorded in prediction metadata and scores_long.parquet, so runs over different split methods stay separate
+    split: # name is recorded in prediction metadata and scores.parquet, so runs over different split methods stay separate
       name: default # any other name loads train_<name>/validation_<name>/test_<name>, e.g. random, stratified, cluster
       # Set train/validation/test explicitly only for splits that don't follow that convention;
       # validation: null holds out validation_fraction of train instead.
@@ -121,6 +121,5 @@ steps:
     bootstrap_enabled: true
     n_samples: 1000 # bootstrap CI resamples; 1000 is the standard minimum for stable percentile CIs
     n_permutations: 1000 # trained-vs-control p-value permutations; resolution 1/(n+1)
-    output_filename: bootstrap_results.parquet
     confidence_interval: 0.95
-    long_filename: scores_long.parquet # tidy/long-format sidecar written on every run, with or without bootstrap
+    long_filename: scores.parquet # tidy score table; legacy config key name retained

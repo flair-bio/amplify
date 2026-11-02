@@ -181,9 +181,19 @@ def test_separation_prior_is_shared_and_scored_as_a_contact_baseline(tmp_path):
             "baselines": {"names": ["separation_prior"]},
         }
     )
+    config.score.bootstrap_enabled = True
     first = run_baselines(config, dataset=data)["test"]["separation_prior"]
     second = run_baselines(config, dataset=data)["test"]["separation_prior"]
     assert first == second
+    baseline_manifest = json.loads(first.with_name("run_manifest.json").read_text())
+    score_table = pl.read_parquet(first.with_name("scores.parquet"))
+    assert baseline_manifest["run"]["config"]["score"]["bootstrap_enabled"] is False
+    assert baseline_manifest["score"]["config"]["bootstrap_enabled"] is False
+    assert baseline_manifest["score"]["bootstrap"]["status"] == "not_computed"
+    assert baseline_manifest["score"]["scores_path"] == str(
+        first.with_name("scores.parquet")
+    )
+    assert score_table["baseline"].unique().to_list() == ["separation_prior"]
 
     contacts = prepare_contact_dataset(data, source="local-casp", edition=14)
     context = contact_baseline_context(

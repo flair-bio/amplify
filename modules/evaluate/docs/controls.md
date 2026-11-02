@@ -17,14 +17,16 @@ trained model still beats it.
 ```
 steps.predict.controls → Predict: build each control's predictions
                        → Score: paired bootstrap + permutation test vs. trained
-                       → scores_long.parquet rows with control=<name>
+                       → scores.parquet rows with control=<name>
 ```
 
 - Predict writes model controls next to `predictions.parquet`.
   `scrambled_labels` needs no inference and has no file.
 - Sequence `majority_class`, `train_mean`, `composition`, and `mmseqs_knn` run
   separately with `run_evaluate.py --baselines`. They publish independent
-  predictions and scores; model evaluations never load or generate them.
+  `predictions.parquet`, point-score `scores.parquet`, and a `run_manifest.json`;
+  model evaluations never load or generate them. Standalone baseline score
+  tables do not include bootstrap intervals.
 - Token `majority_class` uses the same shared `--baselines` workflow via
   `configs/baselines/token_classification.yaml`. Its prior counts all labeled
   residues in the original training split, excluding `-100`, regardless of
@@ -75,8 +77,8 @@ Artifacts live under
 Identity includes actual sequence/ID/label content, source split mappings, and
 the task/class contract. Completed artifacts are reused; inconsistent or
 corrupt files fail explicitly. Standalone baseline scoring checks IDs, labels,
-and observation counts, retaining repeated observations. The baseline run
-manifest records artifact references and point scores. Constant-prediction
+and observation counts, retaining repeated observations. the baseline run manifest records artifact references and point scores. The
+standalone point scores are also written to `scores.parquet`; constant-prediction
 Spearman is NaN.
 
 ### Shared CASP contact baseline

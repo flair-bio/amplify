@@ -49,7 +49,7 @@ from modules.evaluate.src.model.baselines import (
     build_sequence_baseline,
 )
 from modules.evaluate.src.tasks import get_task
-from modules.evaluate.src.utils.io import write_json
+from modules.evaluate.src.utils.io import write_json, write_parquet
 from modules.evaluate.src.utils.storage import cache_lock
 
 logger = logging.getLogger(__name__)
@@ -233,6 +233,7 @@ def _run_contact_baselines(
         pl.col("scores").cast(pl.List(pl.Float64)),
     )
     outputs: dict[str, dict[str, Path]] = {"test": {}}
+    effective_score_config = _baseline_score_config(config.score)
     for name in config.baselines.names:
         directory = artifact_directory(context, name)
         directory.mkdir(parents=True, exist_ok=True)
@@ -254,13 +255,17 @@ def _run_contact_baselines(
             )
             result = get_task(workspace.task_type).score(
                 PredictOutput(metadata=metadata, predictions=artifact),
-                config.score.model_copy(update={"bootstrap_enabled": False}),
+                effective_score_config,
                 seed=config.seed,
             )
             if not isinstance(result, StructuredScoreOutput):
                 raise TypeError(
                     "Contact baseline scoring must return structured scores."
                 )
+            scores_path = write_parquet(
+                result.summaries.with_columns(pl.lit(name).alias("baseline")),
+                directory / "scores.parquet",
+            )
             write_json(
                 directory / "run_manifest.json",
                 {
@@ -270,11 +275,13 @@ def _run_contact_baselines(
                     "run": {
                         "seed": config.seed,
                         "test": "test",
-                        "config": config.model_dump(mode="json"),
+                        "config": _baseline_run_config(config, effective_score_config),
                     },
                     "score": {
-                        "config": config.score.model_dump(mode="json"),
+                        "config": effective_score_config.model_dump(mode="json"),
+                        "bootstrap": _baseline_bootstrap_status(),
                         "scores": result.summaries.to_dicts(),
+                        "scores_path": str(scores_path),
                     },
                 },
             )
@@ -367,6 +374,7 @@ def _publish_standalone_scores(
     run_config: dict[str, Any],
     test_name: str,
 ) -> None:
+    effective_score_config = _baseline_score_config(config)
     task = get_task(workspace.task_type, workspace.num_labels)
     if workspace.task_type == "token_classification":
         rows = []
@@ -396,12 +404,19 @@ def _publish_standalone_scores(
     )
     result = task.score(
         PredictOutput(metadata=metadata, predictions=artifact),
-        config.model_copy(update={"bootstrap_enabled": False}),
+        effective_score_config,
         seed=seed,
     )
     scores = (
         result.summaries.to_dicts() if hasattr(result, "summaries") else result.scores
     )
+    if hasattr(result, "summaries"):
+        score_frame = result.summaries.with_columns(pl.lit(name).alias("baseline"))
+    else:
+        if result.long_df is None:
+            raise ValueError("Flat baseline scoring did not produce a score table.")
+        score_frame = result.long_df.with_columns(pl.lit(name).alias("baseline"))
+    scores_path = write_parquet(score_frame, directory / "scores.parquet")
     run_manifest_path = directory / "run_manifest.json"
     manifest = json.loads(run_manifest_path.read_text())
     manifest.update(
@@ -410,16 +425,43 @@ def _publish_standalone_scores(
             "run": {
                 "seed": seed,
                 "test": test_name,
-                "config": run_config,
+                "config": _baseline_run_config(run_config, effective_score_config),
             },
             "score": {
-                "config": config.model_dump(mode="json"),
+                "config": effective_score_config.model_dump(mode="json"),
+                "bootstrap": _baseline_bootstrap_status(),
                 "scores": scores,
+                "scores_path": str(scores_path),
             },
         }
     )
     write_json(run_manifest_path, manifest)
     _remove_legacy_sidecars(directory)
+
+
+def _baseline_score_config(config: ScoreConfig) -> ScoreConfig:
+    """Return the settings actually used for standalone baseline scores."""
+    return config.model_copy(update={"bootstrap_enabled": False})
+
+
+def _baseline_run_config(
+    config: BaselineRunConfig | dict[str, Any], score_config: ScoreConfig
+) -> dict[str, Any]:
+    """Persist effective scoring settings instead of the requested settings."""
+    run_config = (
+        config.model_dump(mode="json")
+        if isinstance(config, BaselineRunConfig)
+        else config
+    )
+    run_config["score"] = score_config.model_dump(mode="json")
+    return run_config
+
+
+def _baseline_bootstrap_status() -> dict[str, str]:
+    return {
+        "status": "not_computed",
+        "reason": "Standalone baseline scoring reports point estimates only.",
+    }
 
 
 def _upgrade_legacy_baseline(

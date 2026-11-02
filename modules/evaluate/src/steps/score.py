@@ -90,9 +90,6 @@ class ScoreStep:
             },
         )
         if result.resamples is not None:
-            result.output_path = write_parquet(
-                result.resamples, workspace.stats_path / self.config.output_filename
-            )
             result.summary_path = update_run_manifest(
                 workspace.run_manifest_path,
                 "bootstrap",

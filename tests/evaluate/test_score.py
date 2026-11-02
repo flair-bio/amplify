@@ -304,7 +304,8 @@ def test_token_confusion_bootstrap_preserves_results(
             assert comparison["p_value_adjusted"] == reference["p_value_adjusted"]
     assert score_spy.call_count == 1 + len(output.requested_controls)
     permutation_spy.assert_not_called()
-    assert actual.output_path.exists()
+    assert actual.output_path is None
+    assert not list(tmp_path.rglob("bootstrap_results.parquet"))
     assert actual.long_path.exists()
     for name in ["variant", "split"]:
         assert actual_layers[name].to_list() == expected_layers[name].to_list()
@@ -721,7 +722,7 @@ def test_two_sided_permutation_is_symmetric() -> None:
 
 
 def test_upsert_long_df_replaces_only_matching_variant(tmp_path) -> None:
-    path = tmp_path / "scores_long.parquet"
+    path = tmp_path / "scores.parquet"
 
     def rows(variant: str, value: float) -> pl.DataFrame:
         return pl.DataFrame({"variant": [variant], "metric": ["f1"], "value": [value]})
@@ -739,7 +740,7 @@ def test_upsert_long_df_replaces_only_matching_variant(tmp_path) -> None:
 
 
 def test_upsert_long_df_retains_other_split_for_same_variant(tmp_path) -> None:
-    path = tmp_path / "scores_long.parquet"
+    path = tmp_path / "scores.parquet"
     first = pl.DataFrame(
         {"variant": ["mlp-frozen_trunk"], "split": ["identity_30"], "value": [0.7]}
     )
@@ -1311,8 +1312,10 @@ class TestScoreStepAcrossTaskTypes:
         for name in metrics:
             ci = result.confidence_intervals[name]
             assert ci["lower"] <= ci["mean"] <= ci["upper"]
-        assert result.output_path is not None
-        assert result.output_path.exists()
+        assert result.output_path is None
+        assert not (workspace.stats_path / "bootstrap_results.parquet").exists()
+        manifest = json.loads(workspace.run_manifest_path.read_text())
+        assert manifest["bootstrap"]["confidence_intervals"]
 
     @pytest.mark.parametrize(("task_type", "metrics"), TASK_TYPE_METRICS)
     def test_scrambled_labels_control(self, tmp_path, model_family, task_type, metrics):
