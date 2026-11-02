@@ -236,6 +236,7 @@ def test_online_layerwise_pipeline_scores_each_layer(
         )
         assert layer_scores["layer_index"].unique().to_list() == [layer]
         assert score.long_path is not None
+        assert score.long_path.name == "scores.parquet"
         persisted_scores = pl.read_parquet(score.long_path).filter(
             pl.col("variant") == result.metadata.variant
         )
@@ -243,7 +244,7 @@ def test_online_layerwise_pipeline_scores_each_layer(
     score_paths = [
         get_evaluation_workspace(
             workspace.config, variant=f"layerwise-test-layer_{layer}"
-        ).comparison_path / "scores_long.parquet"
+        ).comparison_path / "scores.parquet"
         for layer in results
     ]
     assert len(set(score_paths)) == 2

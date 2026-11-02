@@ -17,5 +17,5 @@ steps:
     refit_on_train_validation: true
     metric_aggregation: macro
   score:
-    metrics: [f1]
+    metrics: [f1, accuracy]
     metric_aggregation: macro

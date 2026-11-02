@@ -726,7 +726,9 @@ class PredictConfig(BaseModel):
         if legacy:
             warnings.warn(
                 "Dataset baselines in predict.controls are deprecated; use "
-                "predict.baselines (or reusable baselines.names for sequence tasks).",
+                "predict.baselines for inline prediction baselines; reusable "
+                "dataset baselines are configured with a baseline overlay and "
+                "run via run_evaluate.py --baselines.",
                 DeprecationWarning,
                 stacklevel=2,
             )
@@ -760,14 +762,11 @@ class ScoreConfig(BaseModel):
     bootstrap_enabled: bool = False
     n_samples: int = Field(_MIN_RECOMMENDED_BOOTSTRAP_SAMPLES, gt=0)
     n_permutations: int = Field(_DEFAULT_N_PERMUTATIONS, gt=0)
-    output_filename: str = "bootstrap_results.parquet"
     confidence_interval: float = Field(0.95, gt=0.0, lt=1.0)
 
-    # Tidy/long-format sidecar (see ``build_long_df``), written on every run
-    # (with or without bootstrap) so downstream plotting/aggregation code has
-    # a single, concatenable artifact per (model, dataset) run regardless of
-    # which optional outputs above were enabled.
-    long_filename: str = "scores_long.parquet"
+    # Tidy score-table filename (see ``build_long_df``), written on every run.
+    # ``long_filename`` is retained as a config key for compatibility.
+    long_filename: str = "scores.parquet"
 
     @model_validator(mode="after")
     def _warn_if_resamples_too_low_for_significance(self) -> ScoreConfig:
@@ -889,7 +888,6 @@ class EvaluationConfig(BaseModel):
     steps: StepsConfig = Field(default_factory=StepsConfig)
     # Test-only datasets scored with the model fitted on the workspace dataset.
     external_test_sets: list[ExternalTestSetConfig] = Field(default_factory=list)
-    baselines: BaselinesConfig = Field(default_factory=BaselinesConfig)
 
     @model_validator(mode="after")
     def _validate_external_test_sets(self) -> EvaluationConfig:
@@ -921,17 +919,6 @@ class EvaluationConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_cross_step_dependencies(self) -> EvaluationConfig:
-        self.baselines.validate_task(self.workspace.task_type)
-        from modules.evaluate.src.tasks import get_task
-
-        if (
-            set(self.steps.predict.baselines)
-            & get_task(self.workspace.task_type).dataset_baselines
-        ):
-            raise ValueError(
-                "Move shared baselines from steps.predict.controls/predict.baselines "
-                "to baselines.names and run run_evaluate.py --baselines first."
-            )
         from modules.evaluate.src.contracts.validation import (
             validate_cross_step_dependencies,
         )
@@ -947,6 +934,7 @@ class BaselineRunConfig(BaseModel):
     prepare: PrepareConfig = Field(
         default_factory=lambda: PrepareConfig.model_validate({})
     )
+    score: ScoreConfig = Field(default_factory=ScoreConfig)
     baselines: BaselinesConfig = Field(default_factory=BaselinesConfig)
     external_test_sets: list[ExternalTestSetConfig] = Field(default_factory=list)
     seed: int = 710019
@@ -957,7 +945,10 @@ class BaselineRunConfig(BaseModel):
 
         self.baselines.validate_task(self.workspace.task_type)
         if not self.baselines.names:
-            raise ValueError("Select at least one baseline in baselines.names.")
+            raise ValueError(
+                "Select at least one baseline in a baseline config overlay "
+                "(baselines.names) or with a baselines.names=... override."
+            )
         names = [external.name for external in self.external_test_sets]
         if len(set(names)) != len(names):
             raise ValueError("external_test_sets names must be unique.")
