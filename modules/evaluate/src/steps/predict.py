@@ -8,6 +8,7 @@ is :class:`~modules.evaluate.src.steps.score.ScoreStep`'s job.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from time import monotonic
@@ -173,6 +174,9 @@ class PredictStep:
             if sequences is not None:
                 data["sequence"] = sequences
             predictions_df = pl.DataFrame(data)
+            predictions_df = self._add_token_positions(
+                predictions_df, prepared.test_original_positions
+            )
             if sequence_by_id is not None:
                 # Feature batches contain no tokens; recover sequences by
                 # source ID, including repeated IDs in residue-level caches.
@@ -383,6 +387,9 @@ class PredictStep:
         if sequences is not None:
             prediction_data["sequence"] = sequences
         predictions_df = pl.DataFrame(prediction_data)
+        predictions_df = self._add_token_positions(
+            predictions_df, prepared.test_original_positions
+        )
 
         if using_embeddings and self.config.store_sequences:
             assert prepared.embedding is not None
@@ -469,3 +476,58 @@ class PredictStep:
         if not all_ids:
             all_ids = list(range(len(all_sequences)))
         return pl.DataFrame({"id": all_ids, "sequence": all_sequences})
+
+    @staticmethod
+    def _add_token_positions(
+        predictions: pl.DataFrame, positions_by_id: dict[str, list[int]]
+    ) -> pl.DataFrame:
+        if "label" not in predictions.columns or not any(
+            isinstance(value, list) for value in predictions["label"].to_list()
+        ):
+            return predictions
+        if not positions_by_id:
+            return predictions
+        grouped_rows: dict[str, list[tuple[int, Any]]] = {}
+        identifiers: dict[str, Any] = {}
+        for index, (identifier, labels) in enumerate(
+            predictions.select("id", "label").iter_rows()
+        ):
+            key = json.dumps(identifier, allow_nan=False)
+            if key not in positions_by_id:
+                raise ValueError(
+                    "Token predictions contain an ID absent from prepared "
+                    "residue-position provenance."
+                )
+            identifiers[key] = identifier
+            grouped_rows.setdefault(key, []).append((index, labels))
+
+        positions: list[list[int] | None] = [None] * predictions.height
+        for key, rows in grouped_rows.items():
+            row_positions = positions_by_id[key]
+            row_labels = [
+                value
+                for _, labels in rows
+                for value in (labels if isinstance(labels, list) else [labels])
+            ]
+            if len(row_positions) != len(row_labels):
+                raise ValueError(
+                    "Token prediction labels for ID "
+                    f"{identifiers[key]!r} ({len(row_labels)}) differ from "
+                    f"prepared original residue positions ({len(row_positions)})."
+                )
+            cursor = 0
+            for index, labels in rows:
+                count = len(labels) if isinstance(labels, list) else 1
+                positions[index] = row_positions[cursor : cursor + count]
+                cursor += count
+        if set(grouped_rows) != set(positions_by_id):
+            raise ValueError(
+                "Token predictions and prepared original-residue IDs differ."
+            )
+        return predictions.with_columns(
+            pl.Series(
+                "original_positions",
+                [row or [] for row in positions],
+                dtype=pl.List(pl.Int32),
+            )
+        )

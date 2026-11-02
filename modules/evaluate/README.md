@@ -290,13 +290,13 @@ Supported defaults do not implement every planned benchmark: stability still
 uses pooled Spearman, ProtParams evaluates one selected property per run,
 and HMD-ARG is provisional 14-class classification.
 
-Task overlays explicitly select the reported metric and the validation
-selection metric/direction: Macro-F1 for classification, R² for regression
-(ProtParams), pooled Spearman for the current stability dataset, long-range
-contact AUC for contacts, calibration agreement, and pseudo-perplexity.
-Only the selected metric is reported by default; override `steps.score.metrics`
-to request diagnostic metrics. Stability's intended grouped Macro-Spearman
-still requires verified parent-design metadata and scorer support. Calibration
+Task overlays define reported metrics separately from validation/HPO selection:
+classification reports Macro-F1 and accuracy while selecting by Macro-F1;
+regression reports its benchmark metric plus MSE (R² for ProtParams, pooled
+Spearman for Meltome and the current stability dataset) while selecting by the
+benchmark metric. Other primary metrics include long-range contact AUC,
+calibration agreement, and pseudo-perplexity. Stability's intended grouped
+Macro-Spearman still requires verified parent-design metadata and scorer support. Calibration
 agreement reports `100 × mean(exp(-KL))` over per-position KL values; it does
 not exponentiate the mean KL. The target/non-target breakdowns use the same
 scale and aggregation.
@@ -386,24 +386,94 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
     steps.score.n_samples=1000
 ```
 
-Shared baselines are configured directly in `configs/tasks/*.yaml` through
-`baselines.names`; no separate baseline YAML overlay is needed.
-Sequence task presets request shared majority/mean, composition, and MMseqs
-baselines. The pseudo-perplexity preset requests the test-corpus amino-acid
-frequency baseline; token classification requests the all-training-residue
-majority prior and contact prediction requests the separation prior.
-Generate them before model evaluation using the same dataset,
-split settings, and `workspace.base_path` (no model overlay required):
+Shared baselines are selected through a separate overlay in
+`configs/baselines/*.yaml`. Model runs do not load or contain shared baseline
+configuration. Generate standalone baseline predictions and scores independently
+of model evaluation using the same dataset and split settings (no model overlay
+required):
 
 ```bash
 uv run python -m modules.evaluate.src.run_evaluate --baselines \
     modules/evaluate/configs/config.yaml \
-    modules/evaluate/configs/datasets/solubility_prediction.yaml
+    modules/evaluate/configs/datasets/solubility_prediction.yaml \
+    modules/evaluate/configs/baselines/sequence_classification.yaml
 ```
 
-Model scoring loads these artifacts without fitting them. Use
-`baselines.names=[]` to disable shared baselines. See [Shared sequence
-baselines](docs/controls.md#shared-sequence-baselines).
+The overlay selects the standard baseline set for its task. To select a subset,
+append a dotlist override. For example, generate only token-classification
+`majority_class` for SSP-Q3:
+
+```bash
+uv run python -m modules.evaluate.src.run_evaluate --baselines \
+    modules/evaluate/configs/config.yaml \
+    modules/evaluate/configs/tasks/token_classification.yaml \
+    modules/evaluate/configs/datasets/ssp_q3.yaml \
+    modules/evaluate/configs/baselines/token_classification.yaml \
+    baselines.names=[majority_class]
+```
+
+If model evaluation overrides `steps.prepare` (notably split roles,
+`max_length`, or crop policy), pass those same overrides when generating the
+baseline so its evaluated population identity matches.
+
+Model evaluation publishes only model and requested model-control scores.
+Baselines publish their own predictions and standalone scores; they do not need
+model controls. Baseline prediction identity, artifact checksum, full run
+configuration, and standalone scores are stored together in each artifact's
+`run_manifest.json`. The CLI has no baseline-comparison or saved-prediction
+rescoring route; those workflows are deferred to a separate posthoc task. No
+model-baseline comparisons are run automatically.
+
+### Tiny offline sequence-classification workflow
+
+This short smoke flow uses a local `DatasetDict` and a locally cached
+`amplify_120m` checkpoint/tokenizer. It avoids dataset downloads and training;
+model evaluation still performs inference, so run it only with the local model
+available. Create a tiny dataset with the standard `sequence`/`targets` columns:
+
+```bash
+uv run python - <<'PY'
+from datasets import Dataset, DatasetDict
+
+DatasetDict({
+    "train": Dataset.from_dict({"id": ["tr0", "tr1"], "sequence": ["ACDE", "FGHI"], "targets": [0, 1]}),
+    "validation": Dataset.from_dict({"id": ["va0", "va1"], "sequence": ["KLMN", "PQRS"], "targets": [0, 1]}),
+    "test": Dataset.from_dict({"id": ["te0", "te1"], "sequence": ["TVWY", "ACDF"], "targets": [0, 1]}),
+}).save_to_disk("/tmp/amplify-baseline-smoke-data")
+PY
+```
+
+Run model evaluation, then generate just the majority baseline independently.
+Both runs publish standalone scores; no comparison is performed. Use the same
+task/dataset overlays and data overrides; the model and baseline overlays are
+used only by their respective run:
+
+```bash
+MODEL_CONFIGS="modules/evaluate/configs/config.yaml modules/evaluate/configs/models/amplify_120m.yaml modules/evaluate/configs/tasks/sequence_classification.yaml modules/evaluate/configs/datasets/localization_prediction.yaml modules/evaluate/configs/smoke_test.yaml"
+DATA_OVERRIDES="workspace.dataset_repo_id=/tmp/amplify-baseline-smoke-data workspace.dataset_revision=null workspace.dataset_name=local-smoke workspace.output_dir=/tmp/amplify-baseline-smoke"
+
+# 1. Inference and standalone model scores; no shared baseline lookup.
+uv run python -m modules.evaluate.src.run_evaluate $MODEL_CONFIGS \
+    $DATA_OVERRIDES steps.predict.controls=[]
+
+# 2. Generate only majority_class and its standalone scores.
+uv run python -m modules.evaluate.src.run_evaluate --baselines \
+    modules/evaluate/configs/config.yaml \
+    modules/evaluate/configs/tasks/sequence_classification.yaml \
+    modules/evaluate/configs/datasets/localization_prediction.yaml \
+    modules/evaluate/configs/baselines/sequence_classification.yaml \
+    modules/evaluate/configs/smoke_test.yaml \
+    $DATA_OVERRIDES baselines.names=[majority_class]
+```
+
+The local model must already be cached; if it is not, replace the model overlay
+with a local model configuration/path rather than allowing an implicit model
+download. The exact overlay composition can be checked without running
+inference by loading these same config files with
+`load_evaluation_config(...)`.
+
+See [Shared sequence baselines](docs/controls.md#shared-sequence-baselines)
+for baseline protocols and output layout.
 
 CUDA evaluation enables TensorFloat-32 by default with top-level `tf32: true`,
 matching pretraining's `trainer.tf32` convention. Append `tf32=false` to any
@@ -418,7 +488,7 @@ recomputes embeddings instead of reusing outputs from another precision.
 
 There is no sweep driver: each invocation handles one (model, dataset, head) combination.
 Run combinations against one `workspace.base_path` so every result lands in a
-`scores_long.parquet` that [Reading results](#reading-results) can combine. Locally,
+`scores.parquet` that [Reading results](#reading-results) can combine. Locally,
 loop over overlays:
 
 ```bash
@@ -478,9 +548,8 @@ Append these overrides to any launch command, or put them in an overlay YAML.
 | Use a generated split instead of the default | `steps.prepare.split.name=stratified` (see [Named benchmark splits](#named-benchmark-splits)) |
 | Classical probe on cached embeddings | Add `modules/evaluate/configs/predictors/random_forest.yaml` after the dataset overlay |
 | Disable control conditions | `steps.predict.controls=[]` |
-| Disable shared sequence baselines | `baselines.names=[]` |
 | Write results elsewhere | `workspace.base_path=/path/to/eval` |
-| Store embedding caches on HPC scratch | `workspace.tmp_path=/scratch/$USER/evaluate` (task/dataset/model subdirectories are appended) |
+| Store embedding caches separately | Set `workspace.tmp_path` to a shared writable cache directory (task/dataset/model subdirectories are appended) |
 | Group model versions into one benchmark comparison | `workspace.base_path=/path/to/client-benchmark-v1` |
 | Keep another evaluation of the same model/probe | `workspace.run_id=run02` |
 | Label a specific checkpoint version | `workspace.model_name=amplify-350m-muon workspace.model_repo_id=/path/to/checkpoint` |
@@ -488,10 +557,12 @@ Append these overrides to any launch command, or put them in an overlay YAML.
 
 ### New dataset, task, or model overlay
 
-Copy an existing file under `configs/datasets/`, `configs/tasks/`, or
-`configs/models/`. Dataset overlays set the source, target type, label format,
-class count, and `workspace.default_task_type`. Task overlays set the effective
-`task_type` and task behavior. Task-specific
+Copy an existing file under `configs/datasets/`, `configs/tasks/`,
+`configs/models/`, or `configs/baselines/`. Dataset overlays set the source,
+target type, label format, class count, and `workspace.default_task_type`.
+Task overlays set the effective `task_type` and model evaluation behavior;
+baseline overlays independently select reusable baselines for `--baselines`.
+Task-specific
 builder parameters belong in `workspace.model_kwargs`.
 
 ### Config schema
@@ -771,7 +842,7 @@ Per-task presets, invalid combinations, and how to read the results are in
 | `predictions_filename` | `predictions.parquet` | Output filename directly under the run directory |
 | `persist_to_disk` | `true` | Write predictions and the prediction manifest; disable for fast in-process evaluation |
 | `store_sequences` | `false` | Decode and include source sequences in the main predictions table |
-| `controls` | `[random_trunk]` | Per-model controls. Shared baselines use top-level `baselines.names` and the separate `--baselines` route |
+| `controls` | `[random_trunk]` | Per-model controls. Shared baselines use a `configs/baselines/*.yaml` overlay with the separate `--baselines` route |
 | `embedding_batch_size` | `null` | Cached-feature rows per prediction batch, including model-based controls; `null` inherits the prepared loader size. Does not change live trunk batches. |
 
 Cached token probes batch **residues**, not proteins. The token-classification
@@ -802,8 +873,9 @@ null. Embedding extraction has its own `steps.prepare.embedding_batch_size` sett
 All tasks implement `score(predictions, config, seed=...)` without filesystem
 access. Tasks select metrics, aggregation and supported uncertainty methods;
 `metrics/scoring.py` supplies flat-task scoring and paired statistical analysis.
-`ScoreStep` loads baseline artifacts, invokes that common contract, then publishes
-the returned flat or structured results. It has no contact-specific dispatch.
+`ScoreStep` loads saved model predictions, invokes the task scoring contract,
+then publishes standalone model scores. It does not load or compare shared
+baselines; their independent score reports are published by `--baselines`.
 
 **Purpose:** Compute task-specific metrics from the Predict step's output and, optionally, bootstrap confidence intervals for those metrics plus a statistical comparison between the trained model and each configured control condition, to quantify how much of its performance is attributable to learning from the data rather than model/data artifacts.
 
@@ -828,9 +900,8 @@ custom metrics, and unsupported aggregation modes retain the existing path.
 | `bootstrap_enabled` | `false` | Enable bootstrap confidence intervals + control comparisons |
 | `n_samples` | `1000` | Bootstrap resamples; the code warns when below 1000 because confidence-interval tails are poorly estimated |
 | `n_permutations` | `1000` | Trained-vs-control paired permutations; the smallest p-value is `1 / (n_permutations + 1)` before correction |
-| `output_filename` | `bootstrap_results.parquet` | Per-resample bootstrap metric values (bootstrap mode only) |
 | `confidence_interval` | `0.95` | Confidence level for bootstrap intervals |
-| `long_filename` | `scores_long.parquet` | Tidy/long-format sidecar written on every run, with or without bootstrap — concatenable across (model, dataset) runs for plotting |
+| `long_filename` | `scores.parquet` | Tidy score table written on every run, concatenable across flat-task model and baseline runs. The config field retains its legacy name |
 
 **Input:** `<run>/predictions.parquet`
 **Exact scores:** `<run>/run_manifest.json` records full-test scores under
@@ -840,7 +911,7 @@ other conditions use their control/baseline names. These scores are recorded eve
 without bootstrap, preserve undefined scores as NaN, and are replaced on
 rescoring. Unlike comparison-row bootstrap means, these are exact test scores.
 
-**Output:** `<run>/scores_long.parquet` (always), plus `<run>/bootstrap_results.parquet` when `bootstrap_enabled=true`; scores/confidence intervals are also recorded in `<run>/run_manifest.json` under the `score`/`bootstrap` sections. Concatenate run-local score tables when comparing models or repeated runs.
+**Output:** `<run>/scores.parquet` and `<run>/run_manifest.json`. Flat-task baseline runs also write point estimates to `scores.parquet`; their `baseline` column identifies the baseline. Structured tasks write task-specific score and unit-score tables. Bootstrap confidence intervals and control comparisons are summarized in the model manifest; per-resample bootstrap values are computed in memory but are not written to a separate Parquet file. Flat-task score tables can be concatenated when comparing model and baseline runs.
 `bootstrap.control_comparisons` records each control's bootstrap mean, the
 trained-minus-control mean difference and confidence interval, and raw/adjusted
 permutation p-values (an empty object when there are no comparisons). These
@@ -858,11 +929,10 @@ groups outputs by **benchmark root -> task -> dataset -> baseline/model -> run**
 ```
 <base_path>/<task_type>/<dataset_name>/
 ├── baselines/<baseline>/fit-<12-char-hash>/
-│   ├── fit_manifest.json
 │   └── test-<12-char-hash>/
-│       ├── manifest.json
+│       ├── run_manifest.json
 │       ├── predictions.parquet
-│       └── log
+│       └── scores.parquet
 └── <model_name>/
     └── <variant>-<run_id>/seed_<seed>/
         ├── model/
@@ -870,11 +940,9 @@ groups outputs by **benchmark root -> task -> dataset -> baseline/model -> run**
         ├── controls/random_trunk/
         │   ├── model/
         │   └── predictions.parquet
-        ├── bootstrap_results.parquet
-        ├── scores_long.parquet
+        ├── scores.parquet
         ├── layerwise_comparison.parquet  ← when layer comparisons apply
-        ├── run_manifest.json
-        └── log
+        └── run_manifest.json
 ```
 
 `workspace.base_path` names the benchmark root, for example
@@ -909,17 +977,20 @@ output directories are left unchanged; use a distinct run ID to avoid conflicts.
 
 Embedding caches live separately at
 `<benchmark_root>/tmp/<task_type>/<dataset_name>/<model_name>/embeddings/`,
-shared across variants, run IDs and seeds. Set `workspace.tmp_path=/scratch/$USER/evaluate`
-to replace `<benchmark_root>/tmp` with an HPC scratch directory. Run, workspace
+shared across variants, run IDs and seeds. Set `workspace.tmp_path` to move
+caches to a separate shared writable location. Run, workspace
 and experiment locks live alongside embeddings under `locks/<output-root-hash>/`.
 All jobs writing the same results must use the same shared `workspace.tmp_path`.
 Do not delete this temporary directory while jobs are running; persistent `.lock`
 files are harmless after jobs finish. Baseline publication locks remain transient
 directories beside the shared baseline artifacts.
-Model and baseline
-checkpoint/validation JSON files are retained; separate `workspace_manifest.json`
-and `experiment_*.json` files are no longer written. Existing outputs and caches
-are not automatically moved.
+Model checkpoint/reload JSON files and run manifests are retained; each baseline
+artifact's identity, full config, prediction checksum, and standalone scores are
+recorded in its `run_manifest.json`, with point scores also written to
+`scores.parquet`. Separate baseline `fit_manifest.json`, `manifest.json`,
+and `scores.json` files are upgraded and removed when that artifact is next used.
+Separate `workspace_manifest.json` and `experiment_*.json` files are no longer
+written. Existing outputs and caches are not automatically moved.
 
 Even with `--overwrite`, a model/dataset label already associated with a
 different input source cannot be reused in the same workspace: choose a new
@@ -934,10 +1005,8 @@ for navigation; full identities are verified in manifests, and collisions
 raise an error rather than reusing incompatible results. Separate fit/test
 identities allow one fit to serve internal and external tests.
 
-Application logs are written directly to `log` inside each ordinary model run
-and baseline test directory; compatible baseline reruns append to their log.
-Model logs start after output reservation; baseline logs start after data
-resolution. Shell timing output and progress bars remain in the terminal.
+Application logs and progress remain in the terminal; no per-run log file is
+written.
 Directories are created only when needed. Fitted random-trunk probes are not
 separate sibling runs: their models and predictions live together in
 `controls/random_trunk/`. Layerwise outputs remain separately named layer runs.
@@ -973,8 +1042,14 @@ skipped with a warning under `evaluate_as_is` (no fitted probe).
 
 ### Reading results
 
-`<workspace>/scores/scores_long.parquet` is the table for comparing runs.
-Every row carries the run identity (`model_name`, `dataset_name`, `task_type`,
+For flat tasks, `scores.parquet` is the tidy table for comparing model and
+baseline runs. Model rows have a null `baseline`; shared-baseline rows name the
+method in `baseline`. Both use a null `control` for standalone point scores;
+model-control comparison rows set `control` to the control name. Structured
+tasks retain task-specific hierarchical score tables and are not directly
+concatenable with this flat-task schema.
+
+Every flat-task row carries the run identity (`model_name`, `dataset_name`, `task_type`,
 `split`, `model_repo_id`, `dataset_repo_id`, `head_type`, `layer_index`,
 `variant`, `seed`) plus a `metric`:
 
@@ -1001,11 +1076,13 @@ from pathlib import Path
 import polars as pl
 
 scores = pl.concat(
-    [pl.read_parquet(p) for p in Path("eval").glob("*/*/scores/scores_long.parquet")],
+    [pl.read_parquet(p) for p in Path("eval").rglob("scores.parquet")],
     how="diagonal_relaxed",
 )
 scores.filter(pl.col("control").is_null()).pivot(
-    on="metric", index=["model_name", "dataset_name", "variant", "split"], values="value"
+    on="metric",
+    index=["model_name", "dataset_name", "variant", "split", "baseline"],
+    values="value",
 )
 ```
 

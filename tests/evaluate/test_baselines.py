@@ -7,37 +7,38 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock
 
-import numpy as np
 import polars as pl
 import pytest
 from datasets import Dataset, DatasetDict
 
-from modules.evaluate.src.contracts.config import LayerwiseConfig
-from modules.evaluate.src.dataset import dataloader
-from modules.evaluate.src.contracts.config import ExternalTestSetConfig
-from modules.evaluate.src.contracts.config import DatasetWorkspaceConfig
-from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
-from modules.evaluate.src.runners import baselines as runner
-from modules.evaluate.src.contracts.config_loader import load_baseline_config
-from modules.evaluate.src.contracts.config import BaselineRunConfig
-from modules.evaluate.src.runners.baselines import run_baselines
 from modules.evaluate.src.contracts.artifacts import EvaluationMetadata, PredictOutput
-from modules.evaluate.src.contracts.config import PredictConfig
-from modules.evaluate.src.steps.predict import PredictStep, persist_predictions
-from modules.evaluate.src.contracts.config import ScoreConfig
-from modules.evaluate.src.steps.score import ScoreStep
+from modules.evaluate.src.contracts.config import (
+    BaselineRunConfig,
+    DatasetWorkspaceConfig,
+    ExternalTestSetConfig,
+    LayerwiseConfig,
+    PredictConfig,
+    ScoreConfig,
+)
+from modules.evaluate.src.contracts.config_loader import load_baseline_config
+from modules.evaluate.src.dataset import dataloader
 from modules.evaluate.src.dataset.baseline_data import (
     align_baseline,
     align_token_baseline,
     artifact_directory,
     baseline_context,
     load_baseline_artifact,
-    artifact_directory,
+    preprocessing_identity,
 )
+from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.model.baselines import (
-    build_sequence_baseline,
     _mmseqs_nearest_neighbors,
+    build_sequence_baseline,
 )
+from modules.evaluate.src.runners import baselines as runner
+from modules.evaluate.src.runners.baselines import run_baselines
+from modules.evaluate.src.steps.predict import PredictStep, persist_predictions
+from modules.evaluate.src.steps.score import ScoreStep
 
 from .conftest import build_raw_dataset_dict
 from .test_prepare import _make_workspace, _run_prepare
@@ -71,7 +72,7 @@ def test_invalid_condition_types_keep_schema_validation_errors(payload):
         PredictConfig.model_validate(payload)
 
 
-def test_inline_baseline_requests_survive_prediction_manifest_reload(tmp_path):
+def test_inline_baseline_requests_are_persisted_in_prediction_manifest(tmp_path):
     workspace = _make_workspace(tmp_path, "sequence_classification")
     workspace.setup_directories()
     config = PredictConfig(controls=[], baselines=["majority_class"])
@@ -89,9 +90,10 @@ def test_inline_baseline_requests_survive_prediction_manifest_reload(tmp_path):
         config=config.model_dump(mode="json"),
     )
     persist_predictions(workspace, output, workspace.seed)
-    restored = ScoreStep.load_predict_output(workspace)
-    assert restored.requested_controls == ["majority_class"]
-    assert restored.controls["majority_class"].to_dicts() == baseline.to_dicts()
+    manifest = json.loads(workspace.run_manifest_path.read_text())
+    assert manifest["predict"]["config"]["baselines"] == ["majority_class"]
+    control_path = Path(manifest["predict"]["control_paths"]["majority_class"])
+    assert control_path.exists()
 
 
 def _data(regression=False):
@@ -144,6 +146,15 @@ def _context(config, data):
         id_column=config.prepare.id_column,
         split_roles=config.prepare.split.model_dump(),
         max_length=config.prepare.max_length,
+        preprocessing=preprocessing_identity(
+            sequence_column=config.prepare.sequence_column,
+            label_column=config.prepare.label_column,
+            id_column=config.prepare.id_column,
+            split_roles=config.prepare.split.model_dump(),
+            max_length=config.prepare.max_length,
+            random_truncate_by_split=config.prepare.random_truncate_by_split,
+            seed=config.seed,
+        ),
     )
 
 
@@ -154,6 +165,7 @@ def test_standalone_baseline_reuses_predictions_and_never_fits_validation(
 ):
     caplog.set_level("INFO")
     config, data = _config(tmp_path, regression), _data(regression)
+    config.score.bootstrap_enabled = True
     if baseline != "constant":
         config.baselines.names = [baseline]
     monkeypatch.setattr(
@@ -168,8 +180,28 @@ def test_standalone_baseline_reuses_predictions_and_never_fits_validation(
     assert path.is_relative_to(config.workspace.dataset_root / "baselines" / name)
     assert path.parent.name.startswith("test-")
     assert path.parent.parent.name.startswith("fit-")
-    assert (path.parent / "log").read_text()
-    assert (path.parent.parent / "fit_manifest.json").exists()
+    assert not (path.parent / "log").exists()
+    run_manifest_path = path.with_name("run_manifest.json")
+    assert run_manifest_path.exists()
+    assert {child.name for child in path.parent.glob("*.json")} == {"run_manifest.json"}
+    assert not (path.parent.parent / "fit_manifest.json").exists()
+    run_manifest = json.loads(run_manifest_path.read_text())
+    scores_path = path.with_name("scores.parquet")
+    score_table = pl.read_parquet(scores_path)
+    assert run_manifest["status"] == "complete"
+    assert run_manifest["artifact"]["rows"] == baseline.height
+    assert run_manifest["run"]["config"]["baselines"]["names"] == [name]
+    assert run_manifest["run"]["config"]["score"]["bootstrap_enabled"] is False
+    assert run_manifest["score"]["config"]["bootstrap_enabled"] is False
+    assert run_manifest["score"]["bootstrap"]["status"] == "not_computed"
+    assert run_manifest["score"]["scores"]
+    assert run_manifest["score"]["scores_path"] == str(scores_path)
+    assert set(score_table["baseline"].to_list()) == {name}
+    assert set(score_table["metric"].to_list()) == set(
+        run_manifest["score"]["scores"]
+        if isinstance(run_manifest["score"]["scores"], list)
+        else run_manifest["score"]["scores"].keys()
+    )
     assert baseline["id"].to_list() == ["repeat", "repeat", "other"]
     if name == "train_mean":
         assert baseline["prediction"].to_list() == [2.0] * 3
@@ -255,7 +287,7 @@ def test_external_baseline_keeps_source_training_prior(tmp_path, monkeypatch):
     assert frame["id"].to_list() == ["external"]
     manifest = json.loads(
         paths["external/heldout"]["majority_class"]
-        .with_name("manifest.json")
+        .with_name("run_manifest.json")
         .read_text()
     )
     assert manifest["identity"]["test"]["dataset"] == "org/heldout"
@@ -284,11 +316,11 @@ def test_suite_baseline_loads_main_and_external_configurations(tmp_path, monkeyp
     ]
     assert "external/heldout" in outputs
     main_manifest = json.loads(
-        outputs["test"]["majority_class"].with_name("manifest.json").read_text()
+        outputs["test"]["majority_class"].with_name("run_manifest.json").read_text()
     )
     external_manifest = json.loads(
         outputs["external/heldout"]["majority_class"]
-        .with_name("manifest.json")
+        .with_name("run_manifest.json")
         .read_text()
     )
     assert main_manifest["identity"]["test"] != external_manifest["identity"]["test"]
@@ -346,30 +378,17 @@ def test_score_loads_shared_predictions_and_standalone_manifest(
                 n_samples=5,
                 n_permutations=5,
             )
-        ).run(workspace)
-        assert name in result.control_comparisons
+        ).run(workspace, predict_result=output)
+        assert result.control_comparisons is None
         assert not (
             workspace.preds_path / f"control_{name}_predictions.parquet"
         ).exists()
         score_manifest = json.loads(workspace.run_manifest_path.read_text())["score"]
         assert not (workspace.run_root / "condition_scores.parquet").exists()
         conditions = score_manifest["condition_scores"]
-        assert set(conditions) == {"trained", name}
+        assert set(conditions) == {"trained"}
         assert conditions["trained"] == result.scores
-        assert score_manifest["baselines"][name]["identity"]["fit"]["fit_policy"] == (
-            "train_only"
-        )
-        if name == "mmseqs_knn":
-            assert score_manifest["baselines"][name]["coverage"] == {
-                "matched": 2,
-                "fallback": 1,
-                "total": 3,
-                "fraction_matched": 2 / 3,
-            }
-        if name == "train_mean":
-            assert np.isnan(score_manifest["baselines"][name]["scores"]["spearmanr"])
-            assert np.isnan(conditions[name]["spearmanr"])
-            assert "spearmanr" not in result.control_comparisons[name]
+        assert score_manifest["baselines"] == {}
 
 
 @pytest.mark.parametrize("name", ["majority_class", "composition", "mmseqs_knn"])
@@ -419,7 +438,7 @@ def test_concurrent_baseline_jobs_publish_one_complete_artifact(tmp_path, monkey
 def test_manifest_identity_mismatch_fails_explicitly(tmp_path):
     config, data = _config(tmp_path), _data()
     path = run_baselines(config, dataset=data)["test"]["majority_class"]
-    manifest_path = path.with_name("manifest.json")
+    manifest_path = path.with_name("run_manifest.json")
     manifest = json.loads(manifest_path.read_text())
     manifest["identity"]["fit"]["fit_policy"] = "different_policy"
     manifest_path.write_text(json.dumps(manifest))
@@ -478,7 +497,7 @@ def test_shared_token_prior_uses_all_training_residues_and_is_reused(
             "baselines": {"names": ["majority_class"]},
         }
     )
-    paths = run_baselines(config, dataset=data)
+    run_baselines(config, dataset=data)
     context = _context(config, data)
     baseline, path = load_baseline_artifact(context, "majority_class")
     assert baseline["prediction"].to_list() == [1]
@@ -487,17 +506,17 @@ def test_shared_token_prior_uses_all_training_residues_and_is_reused(
     changed = config.model_copy(deep=True)
     changed.prepare.max_length = 6
     changed.seed = 123
-    assert _context(changed, data) == context
-    monkeypatch.setattr(
-        runner,
-        "build_sequence_baseline",
-        Mock(side_effect=AssertionError("shared token prior must not be refitted")),
-    )
-    assert run_baselines(changed, dataset=data) == paths
-    assert paths["test"]["majority_class"] == path
+    assert _context(changed, data) != context
+    changed_paths = run_baselines(changed, dataset=data)
+    assert changed_paths["test"]["majority_class"] != path
 
     ragged = pl.DataFrame(
-        {"id": ["protein"], "label": [[1, 1, 0]], "prediction": [[0, 0, 0]]}
+        {
+            "id": ["protein"],
+            "label": [[0, 1, 1]],
+            "prediction": [[0, 0, 0]],
+            "original_positions": [[0, 2, 3]],
+        }
     )
     aligned = align_token_baseline(baseline, ragged)
     assert aligned["prediction"].to_list() == [[1, 1, 1]]
@@ -511,15 +530,41 @@ def test_shared_token_prior_uses_all_training_residues_and_is_reused(
     cached = pl.DataFrame(
         {
             "id": ["protein"] * 3,
-            "label": [1, 1, 0],
+            "label": [0, 1, 1],
             "prediction": [0, 0, 0],
+            "original_positions": [0, 2, 3],
         }
     )
     assert align_token_baseline(baseline, cached)["prediction"].to_list() == [1] * 3
     with pytest.raises(ValueError, match="IDs"):
         align_token_baseline(baseline, cached.with_columns(pl.lit("other").alias("id")))
-    with pytest.raises(ValueError, match="residue window"):
+    with pytest.raises(ValueError, match="recorded original residue positions"):
         align_token_baseline(baseline, cached.with_columns(pl.lit(0).alias("label")))
+
+
+def test_token_alignment_uses_original_positions_after_ignored_residues(tmp_path):
+    baseline = pl.DataFrame(
+        {
+            "id": ["protein"],
+            "label": [[1, -100, 0, 1]],
+            "prediction": [1],
+            "probability": [[0.25, 0.75]],
+        }
+    )
+    cropped = pl.DataFrame(
+        {
+            "id": ["protein"],
+            "label": [[0, 1]],
+            "prediction": [[1, 0]],
+            "original_positions": [[2, 3]],
+        }
+    )
+    aligned = align_token_baseline(baseline, cropped)
+    assert aligned["prediction"].to_list() == [[1, 1]]
+    with pytest.raises(ValueError, match="recorded original residue positions"):
+        align_token_baseline(
+            baseline, cropped.with_columns(pl.lit([0, 3]).alias("original_positions"))
+        )
 
 
 @pytest.mark.parametrize(
@@ -704,14 +749,14 @@ def test_mmseqs_fallback_uses_training_prior_and_records_coverage(
     frame, _ = load_baseline_artifact(_context(config, data), "mmseqs_knn")
     assert frame["fallback"].to_list() == [index is None for index in neighbors]
     fallback = frame.filter(pl.col("fallback"))
-    assert fallback["prediction"].to_list() == [
-        2.0 if regression else 1
-    ] * fallback.height
+    assert (
+        fallback["prediction"].to_list() == [2.0 if regression else 1] * fallback.height
+    )
     if not regression:
         for probabilities in fallback["probability"].to_list():
             assert probabilities == pytest.approx([1 / 3, 2 / 3, 0])
-    manifest = json.loads(path.with_name("manifest.json").read_text())
-    assert manifest["coverage"] == {
+    manifest = json.loads(path.with_name("run_manifest.json").read_text())
+    assert manifest["artifact"]["coverage"] == {
         "matched": 0 if all_missing else 2,
         "fallback": 3 if all_missing else 1,
         "total": 3,
@@ -722,8 +767,50 @@ def test_mmseqs_fallback_uses_training_prior_and_records_coverage(
         assert frame["prediction"][2] == data["train"]["targets"][2]
 
 
+def test_legacy_baseline_json_sidecars_are_consolidated(tmp_path, monkeypatch):
+    config, data = _config(tmp_path), _data()
+    path = run_baselines(config, dataset=data)["test"]["majority_class"]
+    directory = path.parent
+    manifest_path = directory / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    write_json = runner.write_json
+    write_json(
+        directory / "manifest.json",
+        {
+            "identity": manifest["identity"],
+            **manifest["artifact"],
+        },
+    )
+    write_json(
+        directory.parent / "fit_manifest.json",
+        {"baseline": "majority_class", "fit": manifest["identity"]["fit"]},
+    )
+    write_json(
+        directory / "scores.json",
+        {
+            "identity": manifest["identity"],
+            "config": manifest["score"]["config"],
+            "scores": manifest["score"]["scores"],
+        },
+    )
+    manifest_path.unlink()
+
+    builder = Mock(side_effect=AssertionError("legacy predictions should be reused"))
+    monkeypatch.setattr(runner, "build_sequence_baseline", builder)
+    run_baselines(config, dataset=data)
+    builder.assert_not_called()
+    consolidated = json.loads(manifest_path.read_text())
+    assert consolidated["status"] == "complete"
+    assert consolidated["score"]["scores"]
+    assert {file.name for file in directory.glob("*.json")} == {"run_manifest.json"}
+    assert not (directory.parent / "fit_manifest.json").exists()
+
+
 def test_mmseqs_protocol_change_preserves_other_baseline_paths(tmp_path):
-    from modules.evaluate.src.dataset.baseline_data import artifact_identity, identity_hash
+    from modules.evaluate.src.dataset.baseline_data import (
+        artifact_identity,
+        identity_hash,
+    )
 
     config, data = _config(tmp_path), _data()
     context = _context(config, data)
@@ -731,7 +818,9 @@ def test_mmseqs_protocol_change_preserves_other_baseline_paths(tmp_path):
     for name in ("majority_class", "composition", "train_mean", "amino_acid_frequency"):
         assert artifact_identity(context, name)["fit"] == context["fit"]
         assert artifact_directory(context, name).parent.name == f"fit-{original_hash}"
-    assert artifact_directory(context, "mmseqs_knn").parent.name != f"fit-{original_hash}"
+    assert (
+        artifact_directory(context, "mmseqs_knn").parent.name != f"fit-{original_hash}"
+    )
 
 
 def test_amino_acid_frequency_baseline_runs_on_test_only_data(tmp_path):
@@ -808,7 +897,11 @@ def test_invalid_training_targets_rejected(tmp_path, targets):
 def test_baseline_cli_uses_data_subset_without_model_validation(tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
     config = load_baseline_config(
-        [root / "config.yaml", root / "datasets/solubility_prediction.yaml"],
+        [
+            root / "config.yaml",
+            root / "datasets/solubility_prediction.yaml",
+            root / "baselines/sequence_classification.yaml",
+        ],
         ["steps.mode=not_a_model_mode", "workspace.model_name=null"],
     )
     assert config.baselines.names == [
@@ -845,7 +938,11 @@ def test_baseline_route_rejects_unsupported_requests(overrides, match):
     root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
     with pytest.raises(ValueError, match=match):
         load_baseline_config(
-            [root / "config.yaml", root / "datasets/solubility_prediction.yaml"],
+            [
+                root / "config.yaml",
+                root / "datasets/solubility_prediction.yaml",
+                root / "baselines/sequence_classification.yaml",
+            ],
             overrides,
         )
 
@@ -898,6 +995,14 @@ def test_prepare_predict_carries_context_without_building_baselines(
                 for key in DatasetWorkspaceConfig.model_fields
             }
         ),
+        prepare={
+            "max_length": 64,
+            "random_truncate_by_split": {
+                "train": False,
+                "validation": False,
+                "test": False,
+            },
+        },
         baselines={"names": [name]},
     )
     run_baselines(baseline_config, dataset=raw)
@@ -910,7 +1015,7 @@ def test_prepare_predict_carries_context_without_building_baselines(
                 n_permutations=5,
             )
         ).run(workspace, predict_result=output)
-        assert name in score.control_comparisons
+        assert set(score.condition_scores) == {"trained"}
 
 
 def test_external_prepare_and_score_use_source_fit_identity(
@@ -937,6 +1042,14 @@ def test_external_prepare_and_score_use_source_fit_identity(
                 for key in DatasetWorkspaceConfig.model_fields
             }
         ),
+        prepare={
+            "max_length": 64,
+            "random_truncate_by_split": {
+                "train": False,
+                "validation": False,
+                "test": False,
+            },
+        },
         baselines={"names": ["majority_class"]},
         external_test_sets=[external],
     )
@@ -955,6 +1068,5 @@ def test_external_prepare_and_score_use_source_fit_identity(
     )
     ScoreStep(ScoreConfig(metrics=["f1"])).run(workspace, predict_result=output)
     manifest = json.loads(workspace.run_manifest_path.read_text())
-    assert manifest["score"]["baselines"]["majority_class"]["path"] == str(
-        paths["external/separate"]["majority_class"]
-    )
+    assert manifest["score"]["baselines"] == {}
+    assert paths["external/separate"]["majority_class"].exists()

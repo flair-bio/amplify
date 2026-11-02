@@ -15,4 +15,4 @@ steps:
       metric: spearmanr
       direction: maximize
   score:
-    metrics: [spearmanr]
+    metrics: [spearmanr, mse]

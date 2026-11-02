@@ -516,6 +516,7 @@ def tokenize_dataset(
         input_ids_batch: list[list[int]] = []
         attention_mask_batch: list[list[int]] = []
         labels_batch: list[Any] = []
+        original_positions_batch: list[list[int]] = []
         ids_batch: list[Any] = []
         emit_ids = False
 
@@ -536,6 +537,11 @@ def tokenize_dataset(
 
             input_ids = leading_special_ids + residue_ids + trailing_special_ids
             attention_mask = [1] * len(input_ids)
+            original_positions = (
+                [-1] * offset
+                + list(range(start, start + len(residue_ids)))
+                + [-1] * len(trailing_special_ids)
+            )
             label = examples[label_column][i] if label_column in examples else None
             if task.pairwise and "valid_positions" in examples:
                 label = {
@@ -569,6 +575,8 @@ def tokenize_dataset(
                 input_ids_batch.append(row["input_ids"])
                 attention_mask_batch.append(row["attention_mask"])
                 labels_batch.append(row["label"])
+                if task.aligns_labels:
+                    original_positions_batch.append(original_positions)
                 row_id = row.get("id", original_id)
                 if row_id is not None:
                     emit_ids = True
@@ -581,6 +589,8 @@ def tokenize_dataset(
             "attention_mask": attention_mask_batch,
             label_column: labels_batch,
         }
+        if task.aligns_labels:
+            output["original_positions"] = original_positions_batch
         if emit_ids:
             output[id_column] = ids_batch
 

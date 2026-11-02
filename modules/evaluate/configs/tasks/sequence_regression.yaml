@@ -1,15 +1,12 @@
 workspace:
   task_type: sequence_regression
 
-baselines:
-  names: [train_mean, composition, mmseqs_knn]
-
 steps:
   tune:
     hyperparameter_search:
       metric: r2
       direction: maximize
   score:
-    metrics: [r2] # property-level ProtParams default; stability overrides this
+    metrics: [r2, mse] # property-level ProtParams default; stability overrides the primary metric
   predict:
     controls: [random_trunk]

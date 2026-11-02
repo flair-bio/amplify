@@ -286,7 +286,7 @@ def test_existing_variant_requires_explicit_replacement(tmp_path, output):
 
 
 @pytest.mark.parametrize(
-    "comparison_name", ["scores_long.parquet", "layerwise_comparison.parquet"]
+    "comparison_name", ["scores.parquet", "layerwise_comparison.parquet"]
 )
 def test_overwrite_cleans_only_target_and_derived_results(tmp_path, comparison_name):
     config = workspace_config(tmp_path)

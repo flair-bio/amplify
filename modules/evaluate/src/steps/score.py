@@ -10,13 +10,9 @@ learning from the data.
 
 from __future__ import annotations
 
-import json
 import logging
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
-
-import polars as pl
 
 from modules.evaluate.src.contracts.artifacts import (
     PredictOutput,
@@ -24,13 +20,6 @@ from modules.evaluate.src.contracts.artifacts import (
     StructuredScoreOutput,
 )
 from modules.evaluate.src.contracts.config import ScoreConfig
-from modules.evaluate.src.dataset.baseline_data import (
-    align_baseline,
-    align_token_baseline,
-    artifact_identity,
-    load_baseline_artifact,
-    mmseqs_coverage,
-)
 from modules.evaluate.src.dataset.workspace import EvaluationWorkspace
 from modules.evaluate.src.metrics.scoring import compare_layer_scores
 from modules.evaluate.src.metrics.tables import upsert_long_df
@@ -55,65 +44,21 @@ class ScoreStep:
     def run(
         self,
         workspace: EvaluationWorkspace,
+        predict_result: PredictOutput,
         seed: int = 710019,
-        predict_result: PredictOutput | None = None,
     ) -> ScoreOutput | StructuredScoreOutput:
-        """Load predictions, invoke the task's scoring protocol, and publish."""
+        """Score the predictions produced by the current evaluation run."""
         logger.info("Running Score step...")
-        if predict_result is None:
-            predict_result = self.load_predict_output(workspace)
         task = get_task(predict_result.metadata.task_type, workspace.num_labels)
-        predictions_df = predict_result.predictions
-        baseline_references: dict[str, dict[str, Any]] = {}
-        if predict_result.baseline_context:
-            controls = dict(predict_result.controls)
-            requested_controls = list(predict_result.requested_controls)
-            for name in predict_result.baseline_context["names"]:
-                if name in controls:
-                    raise ValueError(f"Baseline '{name}' is also a model control.")
-                frame, path = load_baseline_artifact(
-                    predict_result.baseline_context, name
-                )
-                if task.name == "contact_prediction":
-                    if name != "separation_prior":
-                        raise ValueError(
-                            f"Unsupported shared contact baseline: {name}."
-                        )
-                    controls[name] = _align_contact_baseline(
-                        frame, predictions_df, name
-                    )
-                elif task.name == "token_classification":
-                    controls[name] = align_token_baseline(frame, predictions_df)
-                else:
-                    controls[name] = align_baseline(
-                        frame,
-                        predictions_df,
-                        regression="continuous" in task.accepted_target_types,
-                        match_labels=task.name != "pseudo_perplexity",
-                    )
-                requested_controls.append(name)
-                baseline_references[name] = {
-                    "path": str(path),
-                    "identity": artifact_identity(
-                        predict_result.baseline_context, name
-                    ),
-                }
-                if name == "mmseqs_knn":
-                    baseline_references[name]["coverage"] = mmseqs_coverage(frame)
-            predict_result = replace(
-                predict_result, controls=controls, requested_controls=requested_controls
-            )
         result = task.score(predict_result, self.config, seed=seed)
         if isinstance(result, StructuredScoreOutput):
             return self._publish_structured_scores(
                 result=result,
                 output_dir=workspace.scores_path,
                 manifest_path=workspace.run_manifest_path,
-                baseline_references=baseline_references,
+                baseline_references={},
             )
-        return self._publish_flat_scores(
-            workspace, result, baseline_references, seed=seed
-        )
+        return self._publish_flat_scores(workspace, result, {}, seed=seed)
 
     def _publish_flat_scores(
         self,
@@ -145,9 +90,6 @@ class ScoreStep:
             },
         )
         if result.resamples is not None:
-            result.output_path = write_parquet(
-                result.resamples, workspace.stats_path / self.config.output_filename
-            )
             result.summary_path = update_run_manifest(
                 workspace.run_manifest_path,
                 "bootstrap",
@@ -193,56 +135,6 @@ class ScoreStep:
                 layer_predictions[max(layer_predictions)].metadata.split,
             ),
             path,
-        )
-
-    @staticmethod
-    def load_predict_output(workspace: EvaluationWorkspace) -> PredictOutput:
-        """Reconstruct a :class:`PredictOutput` purely from disk: the run
-        manifest's "predict" section (metadata/config/control cache paths)
-        plus the predictions/controls parquet files it points to. This is
-        what lets :meth:`run` above be a plain, disk-only step with no
-        in-memory ``PredictOutput``/``Accelerator`` dependency."""
-        if not workspace.run_manifest_path.exists():
-            raise FileNotFoundError(
-                f"No run_manifest.json found at {workspace.run_manifest_path}; "
-                "run the Predict step before scoring."
-            )
-        manifest = json.loads(workspace.run_manifest_path.read_text())
-        predict_section = manifest.get("predict")
-        if predict_section is None:
-            raise ValueError(
-                f"{workspace.run_manifest_path} has no 'predict' section; "
-                "run the Predict step before scoring."
-            )
-
-        config_dict = predict_section["config"]
-        predictions_path = workspace.preds_path / config_dict["predictions_filename"]
-        if not predictions_path.exists():
-            raise FileNotFoundError(
-                f"Predictions file not found at {predictions_path}; run the "
-                "Predict step before scoring."
-            )
-
-        metadata_dict = predict_section.get("metadata")
-        control_paths = {
-            control: Path(path)
-            for control, path in predict_section.get("control_paths", {}).items()
-        }
-        return PredictOutput(
-            metadata=get_task(workspace.task_type).prediction_metadata(metadata_dict),
-            predictions=pl.read_parquet(predictions_path),
-            predictions_path=predictions_path,
-            controls={
-                control: pl.read_parquet(path)
-                for control, path in control_paths.items()
-            },
-            control_paths=control_paths,
-            requested_controls=[
-                *config_dict.get("controls", []),
-                *config_dict.get("baselines", []),
-            ],
-            config=config_dict,
-            baseline_context=predict_section.get("baseline_context"),
         )
 
     def _publish_structured_scores(
@@ -306,49 +198,3 @@ class ScoreStep:
             },
         )
         return result
-
-
-def _align_contact_baseline(
-    baseline: pl.DataFrame, predictions: pl.DataFrame, name: str
-) -> pl.DataFrame:
-    """Require exact candidate/label correspondence before scoring a shared prior."""
-    required = {
-        "id",
-        "record_id",
-        "unit_id",
-        "split",
-        "source",
-        "edition",
-        "complex_id",
-        "target",
-        "kind",
-        "labels_available",
-        "original_i",
-        "original_j",
-        "labels",
-        "length",
-        "status",
-    }
-    if not required.issubset(baseline.columns) or "scores" not in baseline.columns:
-        raise ValueError(f"{name} artifact is missing contact prediction columns.")
-    if not required.issubset(predictions.columns):
-        raise ValueError("Primary contact predictions are missing candidate columns.")
-
-    def keyed_rows(frame: pl.DataFrame) -> dict[str, dict[str, Any]]:
-        rows = frame.to_dicts()
-        keyed = {row["id"]: row for row in rows}
-        if len(keyed) != len(rows):
-            raise ValueError(f"{name} artifact contains duplicate contact IDs.")
-        return keyed
-
-    baseline_rows = keyed_rows(baseline)
-    prediction_rows = keyed_rows(predictions)
-    if set(baseline_rows) != set(prediction_rows):
-        raise ValueError(f"{name} contact rows do not match primary prediction IDs.")
-    for identifier, row in baseline_rows.items():
-        primary = prediction_rows[identifier]
-        if any(row[key] != primary[key] for key in required - {"id"}):
-            raise ValueError(
-                f"{name} contact candidates differ from primary predictions."
-            )
-    return baseline
