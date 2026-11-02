@@ -190,10 +190,21 @@ archives. Synthetic split labels are not a substitute for official folds.
 
 ## Outputs
 
-Both runners retain `<dms_id>_scored.parquet` (each variant's `model_score`).
-Workspace runs publish aggregate and per-assay metrics in the seed's
-`run_manifest.json`, not separate `summary.json` or `assay_scores.parquet`
-files. The flattened hierarchy matches the regular evaluator:
+Both workspace runners produce three files per seed, matching the regular
+evaluator's artifact names:
+
+- `predictions.parquet`: variants from all assays and requested conditions,
+  with source columns retained, `dms_id`, `control`, `prediction`, and `label`.
+  Existing IDs are preserved; absent IDs use `<dms_id>:<row_index>`.
+  Clinical binary labels are normalized so higher values mean benign.
+- `scores.parquet`: long-form `metric`/`value` rows with `control` and
+  `scope` (`assay`, `function`, or `overall`). Assay rows carry their assay,
+  protein, function, and variant count. Overall rows use the official
+  hierarchical aggregation, not a pooled variant correlation.
+- `run_manifest.json`: configuration, resolved inputs, run status, aggregate
+  summaries (including bootstrap errors when enabled), and artifact paths.
+
+The flattened hierarchy matches the regular evaluator:
 
 ```text
 <workspace.output_dir>/proteingym/<dataset_name>/<model_name>/
@@ -201,9 +212,8 @@ files. The flattened hierarchy matches the regular evaluator:
 ```
 
 Zero-shot uses variant `zero_shot`; supervised uses
-`<probe_type>-frozen_trunk-<split>`. Runs also write a log and
-`run_manifest.json` containing the configuration, resolved inputs, and
-running/complete/failed status. A run lock prevents concurrent writes.
+`<probe_type>-frozen_trunk-<split>`. Logs go to the console, not a separate
+run file. A run lock prevents concurrent writes.
 Existing run outputs are rejected before model loading; pass `--overwrite`
 to replace that run while preserving sibling seeds and variants, or choose
 a new `workspace.run_id`. Sibling seeds must use the same configuration and
@@ -213,10 +223,12 @@ Workspace identity and sibling-seed experiment metadata live inside each
 seed manifest; no workspace/experiment JSON sidecars are created.
 `score.scores` contains the primary aggregate, including per-function means.
 `score.condition_scores` contains `primary` and each requested zero-shot
-baseline/control, with `scores`, per-assay `assays`, and `predictions_dir`.
-Their variant predictions remain under `baselines/<name>/` within the owning
-run; these existing ProteinGym scorers are not the ordinary pipeline's shared
-dataset baselines. No shared baseline artifacts are changed.
+baseline/control, with `scores`, `predictions_path`, and `scores_path`.
+All conditions share the two Parquet files, distinguished by `control`
+(`primary`, `random`, `blosum62`, or `random_init_trunk`); there are no per-assay
+files or baseline subdirectories in workspace runs. These existing ProteinGym
+scorers are not the ordinary pipeline's shared dataset baselines. No shared
+baseline artifacts are changed.
 
 `workspace.tmp_path` is a scratch **root**, with coordination locks under
 `<tmp_path>/proteingym/<dataset_name>/<model_name>/locks/<output-root-hash>/`.
@@ -232,15 +244,18 @@ Inspect a workspace run's primary result:
 ```python
 import json
 from pathlib import Path
+import polars as pl
 
 manifest = json.loads(Path("/results/path/to/seed_710019/run_manifest.json").read_text())
 print(manifest["score"]["scores"])
-print(manifest["score"]["condition_scores"]["primary"]["assays"])
+scores = pl.read_parquet(manifest["score"]["scores_path"])
+print(scores.filter((pl.col("scope") == "assay") & (pl.col("control") == "primary")))
 ```
 
 Existing flat configs containing `model_id`, `data_dir`, `output_dir`, and
 optional `data_repo_id` remain supported with their original direct paths
-and overwrite behavior, including `summary.json` and `assay_scores.parquet`,
+and overwrite behavior, including per-assay `<dms_id>_scored.parquet`,
+`summary.json`, and `assay_scores.parquet`,
 without workspace manifests or locking. Do not mix
 flat input/output overrides with workspace settings. To use the shipped
 preset in legacy mode, explicitly set `workspace=null` and provide all three
@@ -260,7 +275,7 @@ See the official [DMS evaluation code](https://github.com/OATML-Markslab/Protein
 and [clinical evaluation code](https://github.com/OATML-Markslab/ProteinGym/blob/main/proteingym/performance_clinical_benchmarks.py).
 Clinical substitutions report `aggregation: per_gene` and the number of genes
 with a finite metric in `num_genes`; clinical indels report `aggregation: pooled`.
-Undefined metrics remain in the manifest's per-assay rows (or legacy
+Undefined metrics remain in `scores.parquet` assay rows (or legacy
 `assay_scores.parquet`) for inspection but do not
 contribute to averages. If no metric is defined, the aggregate is NaN.
 

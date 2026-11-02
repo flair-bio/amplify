@@ -12,7 +12,7 @@ from huggingface_hub import snapshot_download
 
 from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.proteingym.config import ProteinGymRunConfig
-from modules.evaluate.src.utils.io import log_to_file, update_run_manifest
+from modules.evaluate.src.utils.io import update_run_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -71,19 +71,18 @@ def protein_gym_run[RunConfig: ProteinGymRunConfig](
         workspace.initialize_run(targets, overwrite=overwrite, config=settings)
         update_run_manifest(workspace.run_manifest_path, "inputs", inputs)
         logger.info("ProteinGym workspace: %s", workspace.run_root)
-        with log_to_file(workspace.run_root / "log"):
-            try:
-                yield resolved
-            except BaseException as error:
-                update_run_manifest(
-                    workspace.run_manifest_path,
-                    "evaluation",
-                    {"status": "failed", "config": settings, "error": str(error)},
-                )
-                raise
-            else:
-                update_run_manifest(
-                    workspace.run_manifest_path,
-                    "evaluation",
-                    {"status": "complete", "config": settings},
-                )
+        try:
+            yield resolved
+        except BaseException as error:
+            update_run_manifest(
+                workspace.run_manifest_path,
+                "evaluation",
+                {"status": "failed", "config": settings, "error": str(error)},
+            )
+            raise
+        else:
+            update_run_manifest(
+                workspace.run_manifest_path,
+                "evaluation",
+                {"status": "complete", "config": settings},
+            )

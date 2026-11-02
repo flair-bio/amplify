@@ -108,7 +108,21 @@ def test_cli_resolves_shared_paths_and_protects_outputs(run_case, monkeypatch):
     assert case.config.output_dir == case.expected
     assert not (case.expected / "summary.json").exists()
     assert not (case.expected / "assay_scores.parquet").exists()
-    assert (case.expected / "assay_scored.parquet").is_file()
+    assert {p.name for p in case.expected.iterdir()} == {
+        "predictions.parquet", "scores.parquet", "run_manifest.json"
+    }
+    predictions = pl.read_parquet(case.expected / "predictions.parquet")
+    assert predictions.height == 10
+    assert predictions["dms_id"].unique().to_list() == ["assay"]
+    assert np.isfinite(predictions["prediction"].to_numpy()).all()
+    if case.config_type is ProteinGymZeroShotConfig:
+        np.testing.assert_array_equal(predictions["prediction"], np.arange(10))
+    np.testing.assert_array_equal(predictions["label"], np.arange(10))
+    assert predictions["id"].n_unique() == 10
+    scores = pl.read_parquet(case.expected / "scores.parquet")
+    assert scores.filter(
+        (pl.col("scope") == "overall") & (pl.col("metric") == "spearman")
+    )["value"].item() == pytest.approx(1.0)
     manifest = json.loads((case.expected / "run_manifest.json").read_text())
     assert manifest["evaluation"]["status"] == "complete"
     assert manifest["evaluation"]["config"]["workspace"]["model_name"] == (
@@ -118,7 +132,8 @@ def test_cli_resolves_shared_paths_and_protects_outputs(run_case, monkeypatch):
     assert manifest["workspace"]["model_name"] == "amplify_checkpoint_100"
     assert manifest["experiment"]["inputs"]["data_dir"] == str(case.data)
     assert manifest["score"]["scores"]["overall"] == pytest.approx(1.0)
-    assert manifest["score"]["condition_scores"]["primary"]["assays"][0]["dms_id"] == "assay"
+    assert manifest["score"]["scores_path"] == str(case.expected / "scores.parquet")
+    assert "assays" not in manifest["score"]["condition_scores"]["primary"]
     assert not list(case.expected.parent.glob("experiment_*.json"))
     assert not (case.expected.parent.parent / "workspace_manifest.json").exists()
     case.load_model.assert_called_once()
@@ -255,15 +270,71 @@ def test_zero_shot_conditions_publish_in_owning_seed_manifest(run_case):
     case.entrypoint.run(config)
     manifest = json.loads((config.output_dir / "run_manifest.json").read_text())
     assert set(manifest["score"]["condition_scores"]) == {"primary", "random", "blosum62"}
-    for name in ("random", "blosum62"):
-        folder = config.output_dir / "baselines" / name
-        assert (folder / "assay_scored.parquet").is_file()
-        assert not (folder / "summary.json").exists()
-        assert not (folder / "assay_scores.parquet").exists()
-        assert len(manifest["score"]["condition_scores"][name]["assays"]) == 1
+    assert {p.name for p in config.output_dir.iterdir()} == {
+        "predictions.parquet", "scores.parquet", "run_manifest.json"
+    }
+    predictions = pl.read_parquet(config.output_dir / "predictions.parquet")
+    scores = pl.read_parquet(config.output_dir / "scores.parquet")
+    assert predictions.height == 30
+    for name in ("primary", "random", "blosum62"):
+        assert predictions.filter(pl.col("control") == name).height == 10
+        assert scores.filter(
+            (pl.col("control") == name) & (pl.col("scope") == "assay")
+            & (pl.col("metric") == "spearman")
+        ).height == 1
     case.entrypoint.run(config, overwrite=True)
     manifest = json.loads((config.output_dir / "run_manifest.json").read_text())
     assert set(manifest["score"]["condition_scores"]) == {"primary", "random", "blosum62"}
+    assert pl.read_parquet(config.output_dir / "predictions.parquet").height == 30
+
+
+def test_combined_predictions_preserve_assay_identity_and_optional_columns(run_case):
+    case = run_case
+    reference = pl.read_parquet(case.data / "reference.parquet")
+    second = reference.with_columns(
+        pl.lit("other").alias("dms_id"), pl.lit("P2").alias("uniprot_id")
+    )
+    pl.concat([reference, second]).write_parquet(case.data / "reference.parquet")
+    assay = pl.read_parquet(case.data / "data/assay.parquet").with_columns(
+        pl.Series("id", [f"source-{i}" for i in range(10)]),
+        pl.lit("retained").alias("extra"),
+    )
+    assay.write_parquet(case.data / "data/other.parquet")
+    case.entrypoint.run(case.config)
+    predictions = pl.read_parquet(case.expected / "predictions.parquet")
+    assert predictions.height == 20
+    assert predictions.filter(pl.col("dms_id") == "other")["id"].to_list() == assay["id"].to_list()
+    assert predictions.filter(pl.col("dms_id") == "assay")["extra"].null_count() == 10
+    scores = pl.read_parquet(case.expected / "scores.parquet")
+    spearman = scores.filter(pl.col("metric") == "spearman")
+    assert spearman.filter(pl.col("scope") == "assay").height == 2
+    assert spearman.filter(pl.col("scope") == "function")["value"].item() == pytest.approx(1.0)
+    manifest = json.loads((case.expected / "run_manifest.json").read_text())
+    assert spearman.filter(pl.col("scope") == "overall")["value"].item() == pytest.approx(
+        manifest["score"]["scores"]["overall"]
+    )
+
+
+def test_supervised_scores_preserve_official_scheme_metric_override(run_case, monkeypatch):
+    case = run_case
+    if case.config_type is not ProteinGymSupervisedConfig:
+        return
+    assay_path = case.data / "data/assay.parquet"
+    assay = pl.read_parquet(assay_path).with_columns(
+        pl.col("fold_random_5").alias("fold_modulo_5"),
+        pl.col("fold_random_5").alias("fold_contiguous_5"),
+    )
+    assay.write_parquet(assay_path)
+    monkeypatch.setattr(case.entrypoint, "run_cv", lambda *a, **k: np.arange(10, dtype=float))
+    monkeypatch.setattr(case.entrypoint, "compute_assay_metric", lambda *a, **k: ("spearman", 0.25))
+    config = load_runtime_config_from_argv(
+        [*case.args, "split=official_average"], case.config_type
+    )
+    case.entrypoint.run(config)
+    scores = pl.read_parquet(config.output_dir / "scores.parquet")
+    assert scores["value"].to_list() == pytest.approx([0.25, 0.25, 0.25])
+    predictions = pl.read_parquet(config.output_dir / "predictions.parquet")
+    np.testing.assert_array_equal(predictions["prediction"], np.arange(10))
 
 
 def test_multiple_processes_are_rejected_before_model_work(run_case, monkeypatch):

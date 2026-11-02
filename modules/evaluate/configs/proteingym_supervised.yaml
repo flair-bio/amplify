@@ -32,6 +32,6 @@ dtype: float32
 tf32: true # allow TensorFloat-32 for CUDA FP32 operations; false restores full FP32
 device: null # null selects CUDA when available, otherwise CPU
 seed: 1957723
-# Add a bootstrap standard error to summary.json when enabled.
+# Add a bootstrap standard error to the manifest summary when enabled.
 compute_uncertainty: false
 n_bootstrap: 10000

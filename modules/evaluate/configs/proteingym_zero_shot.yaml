@@ -22,10 +22,10 @@ tf32: true # allow TensorFloat-32 for CUDA FP32 operations; false restores full 
 device: null # null auto-selects cuda if available, else cpu
 seed: 1957723
 
-# Add bootstrap uncertainty to summary.json when enabled; resampling adds runtime.
+# Add bootstrap uncertainty to the manifest summary; resampling adds runtime.
 compute_uncertainty: false
 n_bootstrap: 10000
 
-# Optional reference scorers, written below output_dir/baselines/<name>/.
+# Optional reference scorers, stored with a control key in the run's Parquet files.
 # Choices: random | blosum62 | random_init_trunk
 baselines: []
