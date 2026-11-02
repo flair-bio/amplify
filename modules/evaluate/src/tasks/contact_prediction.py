@@ -429,7 +429,7 @@ class ContactPredictionTask(StructuredTask):
                 model=model,
                 seed=seed,
                 checkpoint_settings={"fitting": "zero_shot"},
-                statistics={"contact_training.json": {"fitting": "zero_shot"}},
+                statistics={"contact_training": {"fitting": "zero_shot"}},
                 serialization="local",
             )
         if isinstance(model, ContactAttentionModel):
@@ -463,7 +463,7 @@ class ContactPredictionTask(StructuredTask):
             model=model,
             seed=seed,
             input_identity=prepared.input_identity,
-            statistics={"contact_training.json": settings},
+            statistics={"contact_training": settings},
             checkpoint_settings=settings,
             serialization="local",
         )

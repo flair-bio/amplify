@@ -196,11 +196,15 @@ def test_contact_predictor_pipeline_roundtrip(
         assert scored.summaries["edition"].unique().to_list() == [edition]
         assert subset_workspace.scores_path.joinpath("scores.parquet").is_file()
         assert subset_workspace.scores_path.joinpath("unit_scores.parquet").is_file()
-        subset_manifest = json.loads(subset_workspace.run_manifest_path.read_text())
+        subset_manifest_path = subset_workspace.run_root / "run_manifest.json"
+        assert not subset_manifest_path.exists()
+        manifest = json.loads(workspace.run_manifest_path.read_text())
+        subset_manifest = manifest["tests"][name]
         assert subset_manifest["evaluation"]["status"] == "complete"
         assert subset_manifest["evaluation"]["filters"] == {"edition": edition}
         assert subset_manifest["evaluation"]["model_path"] == str(workspace.model_path)
         assert subset_manifest["score"]["scores"] == scored.summaries.to_dicts()
+        assert not (subset_workspace.run_root / "contact_score.json").exists()
         assert not (subset_workspace.run_root / "model").exists()
     from modules.evaluate.src.contracts.artifacts import PredictOutput
     pooled = get_task("contact_prediction").score_units(
@@ -217,12 +221,9 @@ def test_contact_predictor_pipeline_roundtrip(
     assert "predict" not in manifest and "score" not in manifest
     if predictor == "categorical_jacobian":
         assert not (workspace.stats_path / "contact_training.json").exists()
+        assert "fit" not in manifest
     for name in controls:
-        settings = json.loads(
-            (
-                workspace.control_workspace(name).stats_path / "contact_training.json"
-            ).read_text()
-        )
+        settings = manifest["controls"][name]["fit"]
         assert settings["trunk_seed"] is not None
         if predictor == "categorical_jacobian":
             assert settings["fit"] == {"fitting": "zero_shot"}
@@ -588,7 +589,8 @@ def test_contact_tuning_requires_prepared_features_and_never_extracts(
     if materialize:
         fitted = step.run(workspace, prepared, seed=config.seed, accelerator=Accelerator(cpu=True))
         assert fitted.model is model
-        assert (workspace.stats_path / "contact_training.json").is_file()
+        manifest = json.loads(workspace.run_manifest_path.read_text())
+        assert manifest["fit"]["contact_training"]
     else:
         with pytest.raises(ValueError, match="prepared before fitting"):
             step.run(workspace, prepared, seed=config.seed, accelerator=Accelerator(cpu=True))
@@ -648,9 +650,9 @@ def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
     assert result.predictions[None].predictions.height == 3
     assert set(result.predictions[None].controls) == {"random_trunk"}
     assert result.scores[None].control_summaries["random_trunk"].height == 4
-    assert (
+    assert not (
         workspace.control_workspace("random_trunk").stats_path / "contact_training.json"
-    ).is_file()
+    ).exists()
     assert (
         workspace.control_workspace("random_trunk").model_path / "contact_head.pt"
     ).is_file()
@@ -666,7 +668,10 @@ def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
         json.loads(workspace.run_manifest_path.read_text())["evaluation"]["status"]
         == "complete"
     )
-    assert (workspace.stats_path / "contact_training.json").is_file()
+    assert not (workspace.stats_path / "contact_training.json").exists()
+    assert json.loads(workspace.run_manifest_path.read_text())["fit"][
+        "contact_training"
+    ]
     restored = ContactPredictionModel.from_pretrained(workspace.model_path)
     chain = prepare_contact_dataset(hf).splits["test"][0]
     predicted = restored.predict(chain, tokenizer).numpy()

@@ -316,8 +316,6 @@ class ScoreOutput:
 class StructuredScoreOutput:
     """Unit and aggregate scientific tables, with publication metadata."""
 
-    settings_filename: str = field(init=False, default="score.json")
-
     metadata: EvaluationMetadata
     unit_scores: pl.DataFrame
     summaries: pl.DataFrame
@@ -332,8 +330,6 @@ class StructuredScoreOutput:
 @dataclass
 class ContactScoreOutput(StructuredScoreOutput):
     """CASP unit and hierarchical scores with the established disk contract."""
-
-    settings_filename: str = field(init=False, default="contact_score.json")
 
 
 @dataclass

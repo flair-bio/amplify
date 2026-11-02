@@ -88,6 +88,7 @@ def persist_predictions(
             "control_paths": {k: str(v) for k, v in output.control_paths.items()},
             "baseline_context": output.baseline_context,
         },
+        namespace=workspace.manifest_namespace,
     )
     logger.info(
         "Persisting predictions finished in %.1fs (%d rows, %d controls)",

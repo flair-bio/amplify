@@ -73,11 +73,13 @@ class TuneStep:
         accelerator: Accelerator,
     ) -> None:
         """Publish selected fitting artifacts while preserving collective policy."""
-        from modules.evaluate.src.utils.io import write_json
+        from modules.evaluate.src.utils.io import update_run_manifest, write_json
 
         if accelerator.is_main_process:
-            for filename, settings in result.statistics.items():
-                write_json(workspace.stats_path / filename, settings)
+            if result.statistics:
+                update_run_manifest(
+                    workspace.run_manifest_path, "fit", result.statistics
+                )
         if result.serialization == "local":
             if self.config.save_best_model and accelerator.is_main_process:
                 result.model.save_pretrained(workspace.model_path)

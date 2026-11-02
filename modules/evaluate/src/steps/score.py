@@ -28,7 +28,6 @@ from modules.evaluate.src.tasks.registry import get_flat_task
 from modules.evaluate.src.utils.io import (
     update_run_manifest,
     write_parquet,
-    write_settings_json,
 )
 from modules.evaluate.src.utils.tracking import log_wandb
 
@@ -88,6 +87,7 @@ class ScoreStep:
                 "baselines": baseline_references,
                 "condition_scores": result.condition_scores,
             },
+            namespace=workspace.manifest_namespace,
         )
         if result.resamples is not None:
             result.summary_path = update_run_manifest(
@@ -100,6 +100,7 @@ class ScoreStep:
                     "confidence_intervals": result.confidence_intervals,
                     "control_comparisons": result.control_comparisons or {},
                 },
+                namespace=workspace.manifest_namespace,
             )
             logger.info("Bootstrap summary written to %s", result.summary_path)
         long_path = workspace.comparison_path / self.config.long_filename
@@ -171,16 +172,11 @@ class ScoreStep:
                 reference["unit_scores_path"] = str(
                     result.control_unit_scores_paths[name]
                 )
-        write_settings_json(
-            output_dir / result.settings_filename,
-            seed,
-            self.config.model_dump(),
-            metadata=result.metadata.model_dump(mode="json"),
-        )
         update_run_manifest(
             manifest_path,
             "score",
             {
+                "seed": seed,
                 "metadata": result.metadata.model_dump(mode="json"),
                 "config": self.config.model_dump(mode="json"),
                 "scores": result.summaries.to_dicts(),
@@ -196,5 +192,10 @@ class ScoreStep:
                 },
                 "baselines": baseline_references,
             },
+            namespace=(
+                ("tests", result.metadata.test_subset)
+                if result.metadata.test_subset
+                else ()
+            ),
         )
         return result

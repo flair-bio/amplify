@@ -209,7 +209,10 @@ def _execute_steps(
             }
             if accelerator.is_main_process:
                 update_run_manifest(
-                    subset_workspace.run_manifest_path, "evaluation", evaluation
+                    workspace.run_manifest_path,
+                    "evaluation",
+                    evaluation,
+                    namespace=subset_workspace.manifest_namespace,
                 )
             subset_prepared = (
                 prepared
@@ -229,19 +232,11 @@ def _execute_steps(
             )
             if accelerator.is_main_process:
                 update_run_manifest(
-                    subset_workspace.run_manifest_path,
+                    workspace.run_manifest_path,
                     "evaluation",
                     {**evaluation, "status": "complete"},
+                    namespace=subset_workspace.manifest_namespace,
                 )
-        if accelerator.is_main_process:
-            update_run_manifest(
-                workspace.run_manifest_path,
-                "tests",
-                {
-                    name: str(workspace.test_workspace(name).run_manifest_path)
-                    for name in subsets
-                },
-            )
     else:
         result = _predict_and_score(
             config, workspace, prepared, accelerator, tuned=tuned

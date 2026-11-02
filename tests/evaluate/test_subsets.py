@@ -292,6 +292,8 @@ def test_pipeline_fits_once_and_predicts_only_selected_subsets(
     for name in names:
         workspace = root.test_workspace(name)
         manifest = json.loads(workspace.run_manifest_path.read_text())
-        assert manifest["evaluation"]["filters"] == {"cohort": name}
-        assert manifest["evaluation"]["status"] == "complete"
+        assert manifest["tests"][name]["evaluation"]["filters"] == {
+            "cohort": name
+        }
+        assert manifest["tests"][name]["evaluation"]["status"] == "complete"
     assert not (root.run_root / "tests" / "c").exists()

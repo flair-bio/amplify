@@ -43,7 +43,7 @@ from modules.evaluate.src.steps.prepare import PrepareStep
 from modules.evaluate.src.steps.tune import TuneStep
 from modules.evaluate.src.tasks import get_task
 from modules.evaluate.src.trainers.layerwise import LayerwiseProbeTrainer
-from modules.evaluate.src.utils.io import write_json
+from modules.evaluate.src.utils.io import update_run_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -120,8 +120,13 @@ class ControlsStep:
                 inputs.serialization_model.save_pretrained(target.model_path)
                 if prepared.tokenizer is not None:
                     prepared.tokenizer.save_pretrained(target.model_path)
-                for filename in result.statistics:
-                    write_json(target.stats_path / filename, settings)
+                if result.statistics:
+                    update_run_manifest(
+                        workspace.run_manifest_path,
+                        "fit",
+                        settings,
+                        namespace=("controls", name),
+                    )
             accelerator.wait_for_everyone()
             prepared.controls.independent_models[name] = result.model
         return prepared
