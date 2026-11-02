@@ -118,6 +118,10 @@ def _run_baseline(
         data_repo_id=config.data_repo_id,
         force_download=config.force_download,
         compute_extra_zero_shot_metrics=True,
+        run_manifest_path=config.output_dir / "run_manifest.json"
+        if config.workspace is not None
+        else None,
+        condition=name,
     )
 
 
@@ -174,6 +178,9 @@ def _run(config: ProteinGymZeroShotConfig) -> dict[str, object]:
         compute_uncertainty=config.compute_uncertainty,
         n_bootstrap=config.n_bootstrap,
         compute_extra_zero_shot_metrics=True,
+        run_manifest_path=config.output_dir / "run_manifest.json"
+        if config.workspace is not None
+        else None,
     )
 
     for baseline in config.baselines:

@@ -8,9 +8,10 @@ differing only in how ``model_scores`` is produced for a given assay.
 
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import polars as pl
@@ -24,7 +25,7 @@ from modules.evaluate.src.proteingym.aggregate import (
     compute_assay_auc,
     compute_assay_metric,
 )
-from modules.evaluate.src.utils.io import write_json, write_parquet
+from modules.evaluate.src.utils.io import update_run_manifest, write_json, write_parquet
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,8 @@ def run_assay_loop(
     n_bootstrap: int = 10000,
     bootstrap_seed: int = 0,
     compute_extra_zero_shot_metrics: bool = False,
+    run_manifest_path: Path | None = None,
+    condition: str = "primary",
 ) -> dict[str, object]:
     """Score every assay in ``data_dir``'s reference table and aggregate the results.
 
@@ -109,6 +112,10 @@ def run_assay_loop(
     assays are excluded (the official clinical benchmark reports AUC only)
     and the supervised entry point leaves this off (its official metrics are
     Spearman/MSE only).
+
+    Workspace runs pass ``run_manifest_path`` to consolidate primary and
+    condition summaries and assay metrics under ``score``. Without it, retain
+    the legacy summary.json and assay_scores.parquet output contract.
     """
     data_dir = _resolve_data_dir(data_dir, data_repo_id, force_download)
 
@@ -189,7 +196,8 @@ def run_assay_loop(
             )
 
     assay_results = pl.DataFrame(assay_rows)
-    write_parquet(assay_results, output_dir / "assay_scores.parquet")
+    if run_manifest_path is None:
+        write_parquet(assay_results, output_dir / "assay_scores.parquet")
 
     if pooled_scores:
         overall = compute_assay_auc(
@@ -219,6 +227,20 @@ def run_assay_loop(
                 n_bootstrap=n_bootstrap,
                 bootstrap_seed=bootstrap_seed,
             )
-    write_json(output_dir / "summary.json", summary)
+    if run_manifest_path is None:
+        write_json(output_dir / "summary.json", summary)
+    else:
+        manifest = json.loads(run_manifest_path.read_text())
+        score_section = manifest.get("score", {})
+        conditions = score_section.get("condition_scores", {})
+        conditions[condition] = {
+            "scores": summary,
+            "assays": assay_results.to_dicts(),
+            "predictions_dir": str(output_dir),
+        }
+        if condition == "primary":
+            score_section["scores"] = summary
+        score_section["condition_scores"] = conditions
+        update_run_manifest(run_manifest_path, "score", score_section)
     logger.info("Overall (ProteinGym aggregation): %.4f", summary["overall"])
     return summary

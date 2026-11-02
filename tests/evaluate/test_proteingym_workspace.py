@@ -86,7 +86,7 @@ def run_case(request, monkeypatch, tmp_path):
     )
     expected = (
         tmp_path
-        / "out/proteingym/proteingym-dms_substitutions/models"
+        / "out/proteingym/proteingym-dms_substitutions"
         / "amplify_checkpoint_100"
         / f"{variant}-test/seed_42"
     )
@@ -106,8 +106,8 @@ def test_cli_resolves_shared_paths_and_protects_outputs(run_case, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["proteingym", *case.args])
     case.entrypoint.main()
     assert case.config.output_dir == case.expected
-    assert (case.expected / "summary.json").is_file()
-    assert (case.expected / "assay_scores.parquet").is_file()
+    assert not (case.expected / "summary.json").exists()
+    assert not (case.expected / "assay_scores.parquet").exists()
     assert (case.expected / "assay_scored.parquet").is_file()
     manifest = json.loads((case.expected / "run_manifest.json").read_text())
     assert manifest["evaluation"]["status"] == "complete"
@@ -115,6 +115,12 @@ def test_cli_resolves_shared_paths_and_protects_outputs(run_case, monkeypatch):
         "amplify_checkpoint_100"
     )
     assert manifest["inputs"]["data_dir"] == str(case.data)
+    assert manifest["workspace"]["model_name"] == "amplify_checkpoint_100"
+    assert manifest["experiment"]["inputs"]["data_dir"] == str(case.data)
+    assert manifest["score"]["scores"]["overall"] == pytest.approx(1.0)
+    assert manifest["score"]["condition_scores"]["primary"]["assays"][0]["dms_id"] == "assay"
+    assert not list(case.expected.parent.glob("experiment_*.json"))
+    assert not (case.expected.parent.parent / "workspace_manifest.json").exists()
     case.load_model.assert_called_once()
 
     with pytest.raises(FileExistsError, match="already exist"):
@@ -135,8 +141,8 @@ def test_sibling_seeds_share_experiment_but_not_outputs(run_case):
     case.entrypoint.run(other)
     assert other.output_dir != case.config.output_dir
     assert other.output_dir.name == "seed_43"
-    assert (case.expected / "summary.json").is_file()
-    assert (other.output_dir / "summary.json").is_file()
+    assert (case.expected / "run_manifest.json").is_file()
+    assert (other.output_dir / "run_manifest.json").is_file()
 
 
 def test_workspace_records_failure_and_releases_run_lock(run_case):
@@ -183,7 +189,7 @@ def test_hub_suite_download_is_scoped_and_revision_pinned(run_case, monkeypatch)
         allow_patterns=["proteingym-dms_substitutions/**"],
         force_download=True,
     )
-    assert (case.expected / "summary.json").is_file()
+    assert (case.expected / "run_manifest.json").is_file()
 
 
 def test_missing_suite_is_rejected_before_model_work(run_case):
@@ -211,7 +217,53 @@ def test_suite_subfolder_can_differ_from_output_label(run_case):
     )
     case.entrypoint.run(config)
     assert "custom_label" in config.output_dir.parts
-    assert (config.output_dir / "summary.json").is_file()
+    assert (config.output_dir / "run_manifest.json").is_file()
+
+
+def test_scratch_root_locks_and_overwrite_preserve_siblings(run_case, tmp_path):
+    case = run_case
+    config = load_runtime_config_from_argv(
+        [*case.args, f"workspace.tmp_path={tmp_path / 'scratch'}"],
+        case.config_type,
+    )
+    case.entrypoint.run(config)
+    sibling = load_runtime_config_from_argv(
+        [*case.args, f"workspace.tmp_path={tmp_path / 'scratch'}", "seed=43"],
+        case.config_type,
+    )
+    case.entrypoint.run(sibling)
+    sibling_manifest = (sibling.output_dir / "run_manifest.json").read_bytes()
+    case.entrypoint.run(config, overwrite=True)
+    assert (sibling.output_dir / "run_manifest.json").read_bytes() == sibling_manifest
+    workspace = workspace_module.get_evaluation_workspace(
+        config.workspace, variant=config.run_variant(config.model_dump()), seed=config.seed
+    )
+    expected = tmp_path / "scratch/proteingym/proteingym-dms_substitutions/amplify_checkpoint_100"
+    assert workspace.embeddings_path == expected / "embeddings"
+    assert workspace.locks_path.parent == expected / "locks"
+    assert list(workspace.locks_path.glob("*.lock"))
+    assert not list(config.output_dir.parent.parent.glob("*.lock"))
+
+
+def test_zero_shot_conditions_publish_in_owning_seed_manifest(run_case):
+    case = run_case
+    if case.config_type is not ProteinGymZeroShotConfig:
+        return
+    config = load_runtime_config_from_argv(
+        [*case.args, "baselines=[random,blosum62]"], case.config_type
+    )
+    case.entrypoint.run(config)
+    manifest = json.loads((config.output_dir / "run_manifest.json").read_text())
+    assert set(manifest["score"]["condition_scores"]) == {"primary", "random", "blosum62"}
+    for name in ("random", "blosum62"):
+        folder = config.output_dir / "baselines" / name
+        assert (folder / "assay_scored.parquet").is_file()
+        assert not (folder / "summary.json").exists()
+        assert not (folder / "assay_scores.parquet").exists()
+        assert len(manifest["score"]["condition_scores"][name]["assays"]) == 1
+    case.entrypoint.run(config, overwrite=True)
+    manifest = json.loads((config.output_dir / "run_manifest.json").read_text())
+    assert set(manifest["score"]["condition_scores"]) == {"primary", "random", "blosum62"}
 
 
 def test_multiple_processes_are_rejected_before_model_work(run_case, monkeypatch):

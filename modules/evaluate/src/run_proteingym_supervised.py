@@ -197,6 +197,9 @@ def _run(config: ProteinGymSupervisedConfig) -> dict[str, object]:
         force_download=config.force_download,
         compute_uncertainty=config.compute_uncertainty,
         n_bootstrap=config.n_bootstrap,
+        run_manifest_path=config.output_dir / "run_manifest.json"
+        if config.workspace is not None
+        else None,
     )
 
 
