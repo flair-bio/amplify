@@ -11,27 +11,34 @@ import polars as pl
 import pytest
 from datasets import Dataset, DatasetDict, Features, List, Value
 
-from modules.evaluate.src.dataset import contact, dataloader
-from modules.evaluate.src.dataset.contact import load_contact_dataset
-from modules.evaluate.src.contracts.config import EvaluationWorkspaceConfig
-from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.contracts.artifacts import (
     ContactArtifacts,
     ContactEvaluationMetadata,
     PredictOutput,
     PreparedArtifacts,
 )
-from modules.evaluate.src.contracts.config import PredictConfig
-from modules.evaluate.src.contracts.config import BaselineRunConfig, ScoreConfig
+from modules.evaluate.src.contracts.config import (
+    BaselineRunConfig,
+    EvaluationWorkspaceConfig,
+    PredictConfig,
+    ScoreConfig,
+)
+from modules.evaluate.src.dataset import contact, dataloader
 from modules.evaluate.src.dataset.baseline_data import (
     artifact_directory,
     contact_baseline_context,
     load_baseline_artifact,
 )
+from modules.evaluate.src.dataset.contact import (
+    candidate_pairs,
+    load_contact_dataset,
+    prepare_contact_dataset,
+    tokenize_contact_chain,
+)
+from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
+from modules.evaluate.src.runners.baselines import run_baselines
 from modules.evaluate.src.steps.predict import PredictStep
 from modules.evaluate.src.steps.score import ScoreStep
-from modules.evaluate.src.runners.baselines import run_baselines
-from modules.evaluate.src.dataset.contact import candidate_pairs, prepare_contact_dataset, tokenize_contact_chain
 
 FEATURES = Features(
     {
@@ -173,13 +180,21 @@ def test_separation_prior_is_shared_and_scored_as_a_contact_baseline(tmp_path):
             "baselines": {"names": ["separation_prior"]},
         }
     )
+    config.score.bootstrap_enabled = True
     first = run_baselines(config, dataset=data)["test"]["separation_prior"]
     second = run_baselines(config, dataset=data)["test"]["separation_prior"]
     assert first == second
-
-    contacts = prepare_contact_dataset(
-        data, source="local-casp", edition=14
+    baseline_manifest = json.loads(first.with_name("run_manifest.json").read_text())
+    score_table = pl.read_parquet(first.with_name("scores.parquet"))
+    assert baseline_manifest["run"]["config"]["score"]["bootstrap_enabled"] is False
+    assert baseline_manifest["score"]["config"]["bootstrap_enabled"] is False
+    assert baseline_manifest["score"]["bootstrap"]["status"] == "not_computed"
+    assert baseline_manifest["score"]["scores_path"] == str(
+        first.with_name("scores.parquet")
     )
+    assert score_table["baseline"].unique().to_list() == ["separation_prior"]
+
+    contacts = prepare_contact_dataset(data, source="local-casp", edition=14)
     context = contact_baseline_context(
         config.workspace, contacts, config.baselines.names
     )
@@ -228,9 +243,10 @@ def test_separation_prior_is_shared_and_scored_as_a_contact_baseline(tmp_path):
             baseline_context=context,
         ),
     )
-    assert "separation_prior" in scored.control_summaries
+    assert scored.control_summaries == {}
     manifest = json.loads(workspace.run_manifest_path.read_text())
-    assert manifest["score"]["baselines"]["separation_prior"]["path"] == str(first)
+    assert manifest["score"]["baselines"] == {}
+    assert first.exists()
 
 
 @pytest.mark.parametrize(
@@ -392,10 +408,8 @@ def test_steps_share_full_chain_predictions_and_roundtrip_outputs(tmp_path):
     predictor.assert_called_once_with(dataset.splits["test"][0])
     assert predictions.predictions.height == len(rows)
     assert predictions.predictions_path is not None
-    restored = ScoreStep.load_predict_output(workspace)
-    assert isinstance(restored.metadata, ContactEvaluationMetadata)
-    assert restored.metadata == predictions.metadata
-    scored = ScoreStep(ScoreConfig()).run(workspace, predict_result=restored)
+    assert isinstance(predictions.metadata, ContactEvaluationMetadata)
+    scored = ScoreStep(ScoreConfig()).run(workspace, predict_result=predictions)
     assert scored.unit_scores.height == 2 * len(rows)
     statuses = {
         (r["id"], r["minsep"]): r["status"] for r in scored.unit_scores.to_dicts()

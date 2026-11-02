@@ -2,9 +2,6 @@ workspace:
   task_type: contact_prediction
   model_kwargs: {}
 
-baselines:
-  names: [separation_prior]
-
 steps:
   predict:
     controls: [random_trunk]

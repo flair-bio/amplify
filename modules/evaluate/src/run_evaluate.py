@@ -41,6 +41,8 @@ def main() -> None:
     treated as OmegaConf dotlist overrides applied after YAML merging.
     Without an explicit task overlay, workspace.default_task_type in the
     dataset selects its task overlay; workspace.task_type can override it.
+    Baseline-only runs require an explicit overlay under configs/baselines/
+    or a baselines.names=... override.
 
     Examples::
 
@@ -57,7 +59,7 @@ def main() -> None:
     if baseline_only and overwrite:
         raise SystemExit(
             "--overwrite applies to model runs only; baseline artifacts are validated "
-            "and reused by --baselines."
+            "and reused."
         )
     if not args:
         print(
@@ -81,9 +83,12 @@ def main() -> None:
                 logger.info("Baseline %s / %s: %s", test, name, path)
         return
 
-    logger.info("=== Starting Evaluation Pipeline ===")
-
     config = load_evaluation_config(path=config_paths, overrides=overrides or None)
+    workspace = get_evaluation_workspace(
+        config.workspace, variant=config.variant, seed=config.seed
+    )
+
+    logger.info("=== Starting Evaluation Pipeline ===")
     torch.set_float32_matmul_precision("high" if config.tf32 else "highest")
     torch.backends.cuda.matmul.allow_tf32 = config.tf32
     torch.backends.cudnn.allow_tf32 = config.tf32
@@ -131,9 +136,6 @@ def main() -> None:
     # Nest outputs under this run's variant (head type + mode + non-default
     # split) so sweeping probes for the same model+dataset doesn't
     # overwrite a previous variant's checkpoint/predictions/scores.
-    workspace = get_evaluation_workspace(
-        config.workspace, variant=config.variant, seed=config.seed
-    )
     logger.info(
         "Initialized workspace: model %s dataset %s variant %s",
         workspace.model_name,

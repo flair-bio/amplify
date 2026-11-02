@@ -9,10 +9,14 @@ import polars as pl
 import pytest
 import torch
 
+from modules.evaluate.src.contracts.artifacts import (
+    EvaluationMetadata,
+    PredictOutput,
+    ScoreOutput,
+)
 from modules.evaluate.src.contracts.config import EvaluationConfig
 from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.runners import pipeline
-from modules.evaluate.src.contracts.artifacts import EvaluationMetadata, PredictOutput, ScoreOutput
 
 
 def _config(mode: str) -> EvaluationConfig:
@@ -38,8 +42,11 @@ def _config(mode: str) -> EvaluationConfig:
 
 def _stub_steps(monkeypatch, calls):
     prepared = SimpleNamespace(
-        contact=None, embedding=None, layerwise=None,
-        model=object(), test_dataloader="main",
+        contact=None,
+        embedding=None,
+        layerwise=None,
+        model=object(),
+        test_dataloader="main",
     )
 
     class Prepare:
@@ -50,7 +57,9 @@ def _stub_steps(monkeypatch, calls):
             return prepared
 
         def prepare_external_test(self, workspace, base, external, **kwargs):
-            return SimpleNamespace(contact=None, model=base.model, test_dataloader=external.name)
+            return SimpleNamespace(
+                contact=None, model=base.model, test_dataloader=external.name
+            )
 
     class Tune:
         def __init__(self, *args, **kwargs):
@@ -130,7 +139,7 @@ def test_external_set_reuses_fitted_model_without_retuning(
     assert set(result.external) == {"sethard"}
     assert result.evaluations[0].prediction is result.predictions[None]
     assert result.evaluations[0].score is result.scores[None]
-    assert "Preparing evaluation inputs" in (workspace.run_root / "log").read_text()
+    assert not (workspace.run_root / "log").exists()
     assert not list(tmp_path.rglob("logs"))
 
 
@@ -157,7 +166,8 @@ def test_controls_step_runs_once_before_prediction(monkeypatch, tmp_path, mode):
     stages = [call[0] for call in calls]
     assert stages == (
         ["tune", "controls", "org/loc", "org/sethard"]
-        if mode == "tune_probe" else ["controls", "org/loc"]
+        if mode == "tune_probe"
+        else ["controls", "org/loc"]
     )
     assert len({call[1] for call in calls if call[0] in {"tune", "controls"}}) == 1
 

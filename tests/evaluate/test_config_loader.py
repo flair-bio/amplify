@@ -27,7 +27,9 @@ def test_suite_source_is_shared_with_external_tests_and_baselines(source, revisi
         "workspace.dataset_name=custom_output",
     ]
     model = load_evaluation_config(paths, overrides)
-    baseline = load_baseline_config(paths, overrides)
+    baseline = load_baseline_config(
+        [*paths, CONFIGS / "baselines/sequence_classification.yaml"], overrides
+    )
     for config in (model, baseline):
         assert config.workspace.dataset_config_name == "localization_prediction"
         external = config.external_test_sets[0]
@@ -167,7 +169,16 @@ def test_contact_jacobian_preset_selects_zero_shot_predictor():
     assert not config.steps.prepare.embedding_cache.enabled
     assert not config.steps.tune.hyperparameter_search.enabled
     assert config.steps.predict.controls == ["random_trunk"]
-    assert config.baselines.names == ["separation_prior"]
+    baseline = load_baseline_config(
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "tasks/contact_prediction.yaml",
+            CONFIGS / "datasets/contact_prediction_casp.yaml",
+            CONFIGS / "baselines/contact_prediction.yaml",
+        ]
+    )
+    assert baseline.baselines.names == ["separation_prior"]
+    assert not hasattr(config, "baselines")
 
 
 def test_contact_jacobian_predictor_cannot_be_used_for_other_tasks():
@@ -205,6 +216,21 @@ def test_default_protocol_needs_only_base_model_and_dataset():
     assert search.search_space.hidden_depth == [1, 2]
     assert search.search_space.batch_size == [8, 16, 32, 64, 128, 256]
     assert search.metric == "f1"
+    assert not hasattr(config, "baselines")
+
+
+def test_shared_baselines_require_a_baseline_overlay_for_model_runs():
+    dataset_paths = [
+        CONFIGS / "config.yaml",
+        CONFIGS / "datasets/localization_prediction.yaml",
+    ]
+    with pytest.raises(ValueError, match="baseline config overlay"):
+        load_baseline_config(dataset_paths)
+
+    with pytest.raises(ValueError, match="baselines"):
+        load_evaluation_config(
+            [*dataset_paths, CONFIGS / "baselines/sequence_classification.yaml"]
+        )
 
 
 def test_token_classification_uses_residue_scale_hpo():
@@ -306,18 +332,17 @@ def test_dataset_default_matches_explicit_task_config(dataset):
     ],
 )
 def test_task_control_defaults(task, dataset, controls):
-    config = load_evaluation_config(
-        [
-            CONFIGS / "config.yaml",
-            CONFIGS / "tasks" / f"{task}.yaml",
-            CONFIGS / "datasets" / f"{dataset}.yaml",
-            *(
-                [CONFIGS / "predictors/contact_embedding.yaml"]
-                if task == "contact_prediction"
-                else []
-            ),
-        ]
-    )
+    paths = [
+        CONFIGS / "config.yaml",
+        CONFIGS / "tasks" / f"{task}.yaml",
+        CONFIGS / "datasets" / f"{dataset}.yaml",
+        *(
+            [CONFIGS / "predictors/contact_embedding.yaml"]
+            if task == "contact_prediction"
+            else []
+        ),
+    ]
+    config = load_evaluation_config(paths)
     assert config.steps.predict.controls == controls
     expected_baselines = {
         "sequence_classification": ["majority_class", "composition", "mmseqs_knn"],
@@ -326,8 +351,13 @@ def test_task_control_defaults(task, dataset, controls):
         "contact_prediction": ["separation_prior"],
         "token_classification": ["majority_class"],
     }.get(task, [])
-    assert config.baselines.names == expected_baselines
     assert config.steps.predict.baselines == []
+    assert not hasattr(config, "baselines")
+    if expected_baselines:
+        baseline = load_baseline_config(
+            [*paths, CONFIGS / "baselines" / f"{task}.yaml"]
+        )
+        assert baseline.baselines.names == expected_baselines
 
 
 def test_protparams_uses_sequence_regression_r2_defaults():
@@ -343,7 +373,7 @@ def test_protparams_uses_sequence_regression_r2_defaults():
     assert config.steps.prepare.label_column == "gravy"
     assert config.steps.tune.hyperparameter_search.metric == "r2"
     assert config.steps.tune.hyperparameter_search.direction == "maximize"
-    assert config.steps.score.metrics == ["r2"]
+    assert config.steps.score.metrics == ["r2", "mse"]
 
 
 @pytest.mark.parametrize("task_first", [True, False])

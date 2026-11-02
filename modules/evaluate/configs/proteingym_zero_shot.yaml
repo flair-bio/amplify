@@ -1,13 +1,17 @@
 # ProteinGym zero-shot scoring configuration.
-# Data resolution tries a local HF snapshot, then the configured repo, then data_dir.
+# Uses the regular workspace disk layout with a dedicated assay runner.
 
-model_id: flair-bio/amplify-120m
-data_dir: eval_datasets/proteingym_sourcing/outputs # local fallback dataset
-# Prefer this HF dataset repo before data_dir; null uses data_dir directly.
-data_repo_id: null
-# Force a fresh download before falling back to data_dir.
+workspace:
+  model_name: amplify-120m
+  model_repo_id: flair-bio/amplify-120m
+  dataset_name: proteingym-dms_substitutions
+  dataset_config_name: proteingym-dms_substitutions # subfolder in the suite
+  dataset_repo_id: flair-bio/evaluation-suite # or a local suite directory
+  dataset_revision: null # pin a Hub commit; must be null for local data
+  output_dir: eval # benchmark root, not the final run directory
+  run_id: run01
+
 force_download: false
-output_dir: eval/proteingym_zero_shot/flair-bio_amplify-120m
 
 batch_size: 16
 max_length: 1024
@@ -18,10 +22,10 @@ tf32: true # allow TensorFloat-32 for CUDA FP32 operations; false restores full 
 device: null # null auto-selects cuda if available, else cpu
 seed: 1957723
 
-# Add bootstrap uncertainty to summary.json when enabled; resampling adds runtime.
+# Add bootstrap uncertainty to the manifest summary; resampling adds runtime.
 compute_uncertainty: false
 n_bootstrap: 10000
 
-# Optional reference scorers, written below output_dir/baselines/<name>/.
+# Optional reference scorers, stored with a control key in the run's Parquet files.
 # Choices: random | blosum62 | random_init_trunk
 baselines: []

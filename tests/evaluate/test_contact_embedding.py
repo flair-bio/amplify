@@ -103,7 +103,6 @@ def config_for(tmp_path, model_path, seed=13):
             "steps.tune.max_epochs=12",
             "steps.predict.controls=[random_trunk]",
             "steps.predict.test_subsets=null",
-            "baselines.names=[]",
         ],
     )
 
@@ -162,7 +161,12 @@ def test_contact_predictor_pipeline_roundtrip(
             "steps.tune.max_epochs=12",
     ]
     config = load_evaluation_config(paths, overrides=overrides)
-    baselines = run_baselines(load_baseline_config(paths, overrides), dataset=hf)
+    baselines = run_baselines(
+        load_baseline_config(
+            [*paths, CONFIGS / "baselines/contact_prediction.yaml"], overrides
+        ),
+        dataset=hf,
+    )
     assert set(baselines) == {"tests/casp14", "tests/casp15", "tests/casp16"}
     fit_name = "fit_contact_attention_head" if predictor == "attention_l1" else "fit_contact_head"
     fit = Mock(wraps=getattr(contact_prediction, fit_name))
@@ -178,22 +182,25 @@ def test_contact_predictor_pipeline_roundtrip(
     for edition in (14, 15, 16):
         name = f"casp{edition}"
         subset_workspace = workspace.test_workspace(name)
-        prediction = result.test_subsets[name].predictions[None]
+        subset_result = result.test_subsets[name]
+        prediction = subset_result.predictions[None]
+        scored = subset_result.scores[None]
         predictions.append(prediction.predictions)
         assert prediction.metadata.test_subset == name
         assert prediction.metadata.head_type == predictor
         assert prediction.predictions["edition"].unique().to_list() == [edition]
         assert set(prediction.controls) == set(controls)
         assert all(frame["edition"].unique().to_list() == [edition] for frame in prediction.controls.values())
-        restored = ScoreStep.load_predict_output(subset_workspace)
-        scored = ScoreStep(ScoreConfig()).run(subset_workspace, predict_result=restored)
-        assert scored.summaries.equals(result.test_subsets[name].scores[None].summaries)
-        assert set(scored.control_summaries) == {*controls, "separation_prior"}
+        assert scored.summaries.height > 0
+        assert set(scored.control_summaries) == set(controls)
         assert scored.summaries["edition"].unique().to_list() == [edition]
+        assert subset_workspace.scores_path.joinpath("scores.parquet").is_file()
+        assert subset_workspace.scores_path.joinpath("unit_scores.parquet").is_file()
         subset_manifest = json.loads(subset_workspace.run_manifest_path.read_text())
         assert subset_manifest["evaluation"]["status"] == "complete"
         assert subset_manifest["evaluation"]["filters"] == {"edition": edition}
         assert subset_manifest["evaluation"]["model_path"] == str(workspace.model_path)
+        assert subset_manifest["score"]["scores"] == scored.summaries.to_dicts()
         assert not (subset_workspace.run_root / "model").exists()
     from modules.evaluate.src.contracts.artifacts import PredictOutput
     pooled = get_task("contact_prediction").score_units(
@@ -654,11 +661,7 @@ def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
     assert workspace.variant == "bilinear512-frozen_trunk"
     manifest = json.loads(workspace.run_manifest_path.read_text())
     assert manifest["predict"]["metadata"]["head_type"] == "bilinear512"
-    from modules.evaluate.src.steps.score import ScoreStep
-
-    restored_predictions = ScoreStep.load_predict_output(workspace)
-    assert restored_predictions.metadata.head_type == "bilinear512"
-    assert set(restored_predictions.controls) == {"random_trunk"}
+    assert manifest["predict"]["control_paths"].keys() == {"random_trunk"}
     assert (
         json.loads(workspace.run_manifest_path.read_text())["evaluation"]["status"]
         == "complete"

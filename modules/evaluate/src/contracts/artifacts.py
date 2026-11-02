@@ -112,6 +112,7 @@ class PreparedArtifacts:
     split: str = "default"
 
     baseline_context: dict[str, Any] | None = None
+    test_original_positions: dict[str, list[int]] = field(default_factory=dict)
     features: dict[str, PreparedFeatures] = field(default_factory=dict)
     input_identity: dict[str, Any] = field(default_factory=dict)
 
@@ -162,12 +163,9 @@ class EvaluationMetadata(BaseModel):
     workspace. ``split`` identifies the configured benchmark condition (for
     example a sequence-identity threshold or mutation-distance split).
 
-    A Pydantic model rather than a plain dataclass -- unlike the other
-    contracts in this module, every field here is plain JSON-safe scalar
-    data that crosses a real serialization boundary (``run_manifest.json``),
-    so ``.model_dump()``/``.model_validate()`` replace the
-    ``dataclass_to_dict``/``EvaluationMetadata(**dict)`` round trip with one
-    that's actually validated on reload (see ``ScoreStep.load_predict_output``).
+    A Pydantic model rather than a plain dataclass because its JSON-safe fields
+    cross a real serialization boundary in ``run_manifest.json`` and score
+    reports.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -200,7 +198,7 @@ class EvaluationMetadata(BaseModel):
     # "mlp-tuned_trunk", "sklearn_linear-frozen_trunk". Matches the
     # EvaluationWorkspace subdirectory these results were written under, so
     # any saved artifact can be traced back to exactly which condition
-    # produced it -- and downstream comparison tables (scores_long.parquet)
+    # produced it -- and downstream comparison tables (scores.parquet)
     # can group/filter by it directly.
     variant: str | None = None
 
@@ -279,9 +277,10 @@ class ScoreOutput:
     # Metric name -> bootstrap confidence interval, only populated when
     # ``ScoreConfig.bootstrap_enabled=True``.
     confidence_intervals: dict[str, ConfidenceInterval] | None = None
+    # Kept for API compatibility; per-resample parquet output is not persisted.
     output_path: Path | None = None
 
-    # Raw per-resample metric values, kept for downstream inspection/plots.
+    # Raw per-resample values retained in memory while computing summaries.
     resamples: pl.DataFrame | None = None
 
     # Path to the persisted {"metadata", "confidence_intervals"} summary JSON.
@@ -291,9 +290,8 @@ class ScoreOutput:
     # better the trained model performs than each control condition (e.g. an
     # untrained model, a model with a randomly re-initialized trunk/head, or
     # scrambled labels/sequences), with bootstrap confidence intervals and a
-    # permutation-style p-value for the paired difference. Not persisted as
-    # its own JSON file: it's only ever written to disk in tidy form, via
-    # ``long_df``/``long_path`` below.
+    # permutation-style p-value for the paired difference. Persisted in the
+    # run manifest and tidy ``long_df``/``long_path`` output.
     control_comparisons: dict[str, dict[str, ControlComparison]] | None = None
 
     # Tidy/long-format view of everything above (one row per metric, or per

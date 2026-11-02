@@ -38,6 +38,7 @@ def test_subset_config_selects_only_one_edition_for_models_and_baselines():
         "modules/evaluate/configs/datasets/contact_prediction_casp.yaml",
         "modules/evaluate/configs/predictors/contact_jacobian.yaml",
     ]
+    baseline_paths = [*paths, "modules/evaluate/configs/baselines/contact_prediction.yaml"]
     overrides = [
         "steps.predict.test_subsets.casp14=null",
         "steps.predict.test_subsets.casp16=null",
@@ -45,7 +46,7 @@ def test_subset_config_selects_only_one_edition_for_models_and_baselines():
     assert load_evaluation_config(paths, overrides).steps.predict.test_subsets == {
         "casp15": {"edition": 15}
     }
-    assert load_baseline_config(paths, overrides).test_subsets == {
+    assert load_baseline_config(baseline_paths, overrides).test_subsets == {
         "casp15": {"edition": 15}
     }
     assert (
@@ -106,7 +107,7 @@ def test_selection_preserves_development_and_all_chain_units():
 def test_generic_baselines_use_matching_subset_artifacts(tmp_path):
     from modules.evaluate.src.contracts.config import BaselineRunConfig
     from modules.evaluate.src.runners.baselines import run_baselines
-    from modules.evaluate.src.dataset.baseline_data import load_baseline_artifact, baseline_context
+    import polars as pl
 
     data = DatasetDict({
         "train": Dataset.from_dict({"id": ["train"], "sequence": ["ACDE"], "targets": [1]}),
@@ -126,18 +127,13 @@ def test_generic_baselines_use_matching_subset_artifacts(tmp_path):
         "test_subsets": {"a": {"cohort": "a"}, "b": {"cohort": "b"}},
     })
     outputs = run_baselines(config, dataset=data)
-    fits = []
+    fit_directories = []
     for name, subset in select_test_subsets(data, config.test_subsets).items():
-        context = baseline_context(
-            config.workspace, subset, config.baselines.names, sequence_column="sequence",
-            label_column="targets", id_column="id", split_roles=config.prepare.split.model_dump(),
-            max_length=config.prepare.max_length,
-        )
-        frame, path = load_baseline_artifact(context, "majority_class")
+        path = outputs[f"tests/{name}"]["majority_class"]
+        frame = pl.read_parquet(path)
         assert frame["id"].to_list() == [name]
-        assert outputs[f"tests/{name}"]["majority_class"] == path
-        fits.append(context["fit"])
-    assert fits[0] == fits[1]
+        fit_directories.append(path.parents[1])
+    assert fit_directories[0] == fit_directories[1]
 
 
 def test_fitting_identity_changes_with_development_labels_not_test_selection(
