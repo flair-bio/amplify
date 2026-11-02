@@ -8,9 +8,10 @@ differing only in how ``model_scores`` is produced for a given assay.
 
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import polars as pl
@@ -24,7 +25,7 @@ from modules.evaluate.src.proteingym.aggregate import (
     compute_assay_auc,
     compute_assay_metric,
 )
-from modules.evaluate.src.utils.io import write_json, write_parquet
+from modules.evaluate.src.utils.io import update_run_manifest, write_json, write_parquet
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,62 @@ DMS_SCORE_BIN_COLUMN = "dms_score_bin"
 ScoreAssayFn = Callable[
     [dict[str, object], pl.DataFrame], "np.ndarray | tuple[np.ndarray, float]"
 ]
+
+
+def _workspace_scores(
+    assays: pl.DataFrame, summary: dict, condition: str
+) -> pl.DataFrame:
+    """Keep assay metrics distinct from the hierarchy's function/overall means."""
+    rows = []
+    for assay in assays.iter_rows(named=True):
+        metrics = {
+            name: assay[name]
+            for name in ("spearman", "auc", "mcc", "ndcg", "top_recall")
+            if name in assay
+        }
+        metrics[assay["metric"]] = assay["score"]
+        for metric, value in metrics.items():
+            rows.append(
+                {
+                    "scope": "assay",
+                    "dms_id": assay["dms_id"],
+                    "uniprot_id": assay["uniprot_id"],
+                    "coarse_selection_type": assay["coarse_selection_type"],
+                    "num_variants": assay["num_variants"],
+                    "metric": metric,
+                    "control": condition,
+                    "value": value,
+                }
+            )
+    primary_metric = summary.get("metric", assays["metric"][0])
+    aggregates = {**summary.get("metrics", {}), primary_metric: summary}
+    for metric, aggregate in aggregates.items():
+        rows.append(
+            {
+                "scope": "overall",
+                "metric": metric,
+                "control": condition,
+                "value": aggregate["overall"],
+            }
+        )
+        for function, value in aggregate.get("per_category", {}).items():
+            rows.append(
+                {
+                    "scope": "function",
+                    "coarse_selection_type": function,
+                    "metric": metric,
+                    "control": condition,
+                    "value": value,
+                }
+            )
+    return pl.from_dicts(rows, infer_schema_length=None)
+
+
+def _append_condition(frame: pl.DataFrame, path: Path, condition: str) -> Path:
+    if path.exists():
+        previous = pl.read_parquet(path).filter(pl.col("control") != condition)
+        frame = pl.concat([previous, frame], how="diagonal_relaxed")
+    return write_parquet(frame, path)
 
 
 def _resolve_data_dir(
@@ -95,6 +152,8 @@ def run_assay_loop(
     n_bootstrap: int = 10000,
     bootstrap_seed: int = 0,
     compute_extra_zero_shot_metrics: bool = False,
+    run_manifest_path: Path | None = None,
+    condition: str = "primary",
 ) -> dict[str, object]:
     """Score every assay in ``data_dir``'s reference table and aggregate the results.
 
@@ -109,6 +168,10 @@ def run_assay_loop(
     assays are excluded (the official clinical benchmark reports AUC only)
     and the supervised entry point leaves this off (its official metrics are
     Spearman/MSE only).
+
+    Workspace runs consolidate all assays/conditions into predictions.parquet
+    and scores.parquet beside ``run_manifest_path``. Without it, retain the
+    legacy per-assay, summary.json and assay_scores.parquet output contract.
     """
     data_dir = _resolve_data_dir(data_dir, data_repo_id, force_download)
 
@@ -117,6 +180,7 @@ def run_assay_loop(
         reference = reference.head(max_assays)
 
     assay_rows: list[dict[str, object]] = []
+    prediction_frames: list[pl.DataFrame] = []
     # Only clinical indels pool variants across genes. Clinical substitutions
     # average per-gene AUCs (one gene per uniprot_id, one Clinical category in
     # the sourced reference), per performance_clinical_benchmarks.py.
@@ -135,9 +199,28 @@ def run_assay_loop(
             result if isinstance(result, tuple) else (result, None)
         )
         assay = assay.with_columns(pl.Series("model_score", model_scores))
-        write_parquet(assay, output_dir / f"{dms_id}_scored.parquet")
-
         has_score = DMS_SCORE_COLUMN in assay.columns
+        if run_manifest_path is None:
+            write_parquet(assay, output_dir / f"{dms_id}_scored.parquet")
+        else:
+            labels = (
+                assay[DMS_SCORE_COLUMN].to_numpy()
+                if has_score
+                else binarize_labels(assay[DMS_SCORE_BIN_COLUMN].to_numpy())
+            )
+            if not has_score and row.get("is_clinical"):
+                labels = 1 - labels
+            predictions = assay.rename({"model_score": "prediction"}).with_columns(
+                pl.lit(str(dms_id)).alias("dms_id"),
+                pl.lit(condition).alias("control"),
+                pl.Series("label", labels, dtype=pl.Float64),
+            )
+            if "id" not in predictions.columns:
+                predictions = predictions.with_columns(
+                    pl.Series("id", [f"{dms_id}:{i}" for i in range(assay.height)])
+                )
+            prediction_frames.append(predictions)
+
         if metric_override is None:
             metric_name, metric_value = compute_assay_metric(
                 model_scores,
@@ -189,7 +272,8 @@ def run_assay_loop(
             )
 
     assay_results = pl.DataFrame(assay_rows)
-    write_parquet(assay_results, output_dir / "assay_scores.parquet")
+    if run_manifest_path is None:
+        write_parquet(assay_results, output_dir / "assay_scores.parquet")
 
     if pooled_scores:
         overall = compute_assay_auc(
@@ -219,6 +303,33 @@ def run_assay_loop(
                 n_bootstrap=n_bootstrap,
                 bootstrap_seed=bootstrap_seed,
             )
-    write_json(output_dir / "summary.json", summary)
+    if run_manifest_path is None:
+        write_json(output_dir / "summary.json", summary)
+    else:
+        root = run_manifest_path.parent
+        predictions_path = _append_condition(
+            pl.concat(prediction_frames, how="diagonal_relaxed"),
+            root / "predictions.parquet",
+            condition,
+        )
+        scores_path = _append_condition(
+            _workspace_scores(assay_results, summary, condition),
+            root / "scores.parquet",
+            condition,
+        )
+        manifest = json.loads(run_manifest_path.read_text())
+        score_section = manifest.get("score", {})
+        conditions = score_section.get("condition_scores", {})
+        conditions[condition] = {
+            "scores": summary,
+            "predictions_path": str(predictions_path),
+            "scores_path": str(scores_path),
+        }
+        if condition == "primary":
+            score_section["scores"] = summary
+        score_section["condition_scores"] = conditions
+        score_section["predictions_path"] = str(predictions_path)
+        score_section["scores_path"] = str(scores_path)
+        update_run_manifest(run_manifest_path, "score", score_section)
     logger.info("Overall (ProteinGym aggregation): %.4f", summary["overall"])
     return summary
