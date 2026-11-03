@@ -926,6 +926,37 @@ def test_packed_token_inference_keeps_example_rows():
     assert labels == [[0], [1, 0]]
 
 
+def test_token_positions_allow_missing_ids_without_valid_residues():
+    predictions = pl.DataFrame(
+        {
+            "id": ["scored"],
+            "label": [[1, 0]],
+        }
+    )
+
+    result = PredictStep._add_token_positions(
+        predictions,
+        {"\"scored\"": [0, 2], "\"masked\"": []},
+    )
+
+    assert result["original_positions"].to_list() == [[0, 2]]
+
+
+def test_token_positions_still_reject_missing_ids_with_valid_residues():
+    predictions = pl.DataFrame(
+        {
+            "id": ["scored"],
+            "label": [[1, 0]],
+        }
+    )
+
+    with pytest.raises(ValueError, match="missing IDs with valid"):
+        PredictStep._add_token_positions(
+            predictions,
+            {"\"scored\"": [0, 2], "\"missing\"": [1]},
+        )
+
+
 def _build_prepared_artifacts(
     model_family: ModelFamily,
     task_type: str,
