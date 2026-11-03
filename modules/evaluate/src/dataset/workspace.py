@@ -46,6 +46,8 @@ class EvaluationWorkspace:
         self.config = config
         self.variant = variant
         self.seed = seed
+        self.test_subset: str | None = None
+        self.manifest_namespace: tuple[str, ...] = ()
 
         self.dataset_name = config.dataset_name
         self.dataset_repo_id = config.dataset_repo_id
@@ -120,6 +122,21 @@ class EvaluationWorkspace:
         """Create all required directories on disk."""
         for path in self._all_paths:
             path.mkdir(parents=True, exist_ok=True)
+
+    def test_workspace(self, name: str) -> EvaluationWorkspace:
+        """Isolate test artifacts while retaining the owning fitted checkpoint."""
+        workspace = EvaluationWorkspace(self.config, self.variant, self.seed)
+        workspace.test_subset = name
+        workspace.run_root = self.run_root / "tests" / validate_directory_label(name)
+        workspace.model_path = self.model_path
+        workspace.preds_path = workspace.run_root
+        workspace.stats_path = workspace.run_root
+        workspace.scores_path = workspace.run_root
+        workspace.comparison_path = workspace.run_root
+        workspace.run_manifest_path = self.run_manifest_path
+        workspace.manifest_namespace = ("tests", name)
+        workspace._all_paths = [workspace.run_root]
+        return workspace
 
     @contextmanager
     def reserve_run(self, *, overwrite: bool = False) -> Iterator[list[Path]]:

@@ -126,6 +126,39 @@ uv run python modules/evaluate/src/run_evaluate.py \
 For the attention readout, replace `contact_embedding.yaml` with
 `contact_attention.yaml` and use a distinct `workspace.run_id`.
 
+The dataset preset defines three test subsets:
+
+```yaml
+steps:
+  predict:
+    test_subsets:
+      casp14: {edition: 14}
+      casp15: {edition: 15}
+      casp16: {edition: 16}
+```
+
+Each predictor and its requested random-trunk control are fitted once on the
+fixed trRosetta development data, then reused for all three evaluations
+(the Jacobian predictor remains zero-shot). Test chains are selected before
+inference. Each edition's predictions, scores and manifest live under
+`<run>/seed_<seed>/tests/casp14/`, `tests/casp15/`, or `tests/casp16/`.
+The shared checkpoint remains at `<run>/seed_<seed>/model/`; the root manifest
+links the subset manifests. In Python, results are in
+`result.test_subsets["casp14"]`, each with the usual `predictions` and `scores`.
+
+`test_subsets` is task-agnostic: names are output labels and filters are scalar
+column equalities combined with AND. Missing columns, empty subsets and partial
+contact-chain selections fail before fitting. Omit it for an ordinary test
+evaluation, or set `steps.predict.test_subsets=null` to disable a preset.
+To evaluate only CASP15, disable the other preset entries with
+`steps.predict.test_subsets.casp14=null steps.predict.test_subsets.casp16=null`.
+This also works in a later YAML overlay; named mappings merge when composing
+configs, and null entries disable inherited subsets.
+Generate shared baselines first using `--baselines` and the same selection.
+Fitting identity covers development inputs and labels independently of test
+selection; each evaluation records its own dataset fingerprint. Existing
+combined result files are not changed.
+
 The final residue embeddings are frozen, unpooled and unnormalized. Two
 independent bias-free 512-dimensional projections produce averaged directional
 logits plus a zero-initialized scalar bias. Fitting uses all known unordered

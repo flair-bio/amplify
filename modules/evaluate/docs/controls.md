@@ -90,17 +90,19 @@ it once with the contact dataset and baseline overlays (no model or predictor ov
 uv run python -m modules.evaluate.src.run_evaluate --baselines \
   modules/evaluate/configs/config.yaml \
   modules/evaluate/configs/datasets/contact_prediction_casp.yaml \
-  modules/evaluate/configs/baselines/contact_prediction.yaml \
-  workspace.edition=14
+  modules/evaluate/configs/baselines/contact_prediction.yaml
 ```
 
-Contact evaluations do not load or compare this artifact; its standalone
-predictions and hierarchical CASP scores are published by the baseline run.
-Artifact identity includes the contact dataset/schema fingerprint, CASP edition,
-and prior protocol. Generate separately for each edition when the workspace is
-edition-specific.
+Contact baselines are generated independently of model runs. The dataset preset
+generates separate artifacts for CASP14, CASP15 and CASP16; artifact identity
+includes the selected contact dataset/schema fingerprint and prior protocol.
+Use the same `steps.predict.test_subsets` selection for baseline generation and
+model evaluation. To generate only CASP15, disable `casp14` and `casp16` in
+`steps.predict.test_subsets`. `workspace.edition` is no longer used.
 
-Model evaluation does not depend on baseline artifacts. Duplicate requests fail.
+To compare a model against the prior, include the baseline overlay in the model
+evaluation config stack as well. Model-only evaluation does not require the
+baseline artifacts. Duplicate requests fail.
 
 ### Shared token baseline
 

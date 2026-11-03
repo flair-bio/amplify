@@ -105,15 +105,28 @@ def write_settings_json(
     return write_json(path, {"seed": seed, "config": config, **extra})
 
 
-def update_run_manifest(path: Path, section: str, payload: dict[str, Any]) -> Path:
+def update_run_manifest(
+    path: Path,
+    section: str,
+    payload: dict[str, Any],
+    *,
+    namespace: tuple[str, ...] = (),
+) -> Path:
     """Merge ``{section: payload}`` into the run-level manifest at *path*.
 
     Consolidates what would otherwise be separate JSON sidecars (one per
     step, sprayed across ``preds_path``/``scores_path``/``stats_path``) into
     a single ``run_manifest.json`` at the run root, while preserving
-    whichever other steps' sections are already there -- so Predict/Score
-    (which write this file at different times) don't clobber each other.
+    whichever other steps' sections are already there. *namespace* nests
+    step sections, e.g. ``("tests", "casp14")``, without creating another
+    manifest for each test subset.
     """
     manifest: dict[str, Any] = json.loads(path.read_text()) if path.exists() else {}
-    manifest[section] = payload
+    target = manifest
+    for key in namespace:
+        nested = target.setdefault(key, {})
+        if not isinstance(nested, dict):
+            raise ValueError(f"Run manifest namespace {key!r} is not an object")
+        target = nested
+    target[section] = payload
     return write_json(path, manifest)

@@ -109,6 +109,20 @@ class ContactDataset:
     revision: str | None
     schema_version: str = SCHEMA_VERSION
 
+    @property
+    def development_fingerprint(self) -> str:
+        """Bind fitting to development sequences, units and labels, never tests."""
+        from dataclasses import asdict
+
+        payload = {
+            "schema_version": self.schema_version,
+            "splits": {
+                split: [asdict(chain) for chain in self.splits[split]]
+                for split in ("train", "validation")
+            },
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
 
 @dataclass(frozen=True)
 class ContactTokens:
