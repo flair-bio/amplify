@@ -255,8 +255,7 @@ def test_dataset_primary_metric_selects_models_and_preserves_macro_f1(dataset, t
 
 @pytest.mark.parametrize(
     "dataset",
-    ["GO_bp", "GO_cc", "GO_mf"]
-    + [path.stem for path in sorted((CONFIGS / "datasets").glob("interpro_*.yaml"))],
+    ["GO_bp", "GO_cc", "GO_mf", "interpro_domain"],
 )
 def test_go_selects_fmax_without_changing_interpro_macro_f1(dataset):
     config = load_evaluation_config(

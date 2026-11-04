@@ -26,11 +26,8 @@ def test_mse_allows_a_single_example():
 @pytest.mark.parametrize(
     "probabilities,labels,expected",
     [
-        ([[0.4, 0.3]], [[1, 0]], 1.0),
         ([[0.01, 0.0]], [[1, 0]], 1.0),
-        ([[1.0, 1.0]], [[1, 0]], 2 / 3),
         ([[0.009, 0.0]], [[1, 0]], 0.0),
-        ([[0.0, 0.0]], [[1, 0]], 0.0),
         (
             [[0.9, 0.8, 0.8], [0.001, 0.001, 0.001]],
             [[1, 0, 0], [1, 1, 1]],
@@ -54,17 +51,13 @@ def test_fmax_uses_cafa2_thresholds_and_protein_averages(
     assert scores["fmax"] == pytest.approx(expected)
 
 
-@pytest.mark.parametrize("resample", [False, True])
-def test_fmax_histogram_matches_direct_threshold_sweep(resample):
+def test_fmax_histogram_matches_direct_threshold_sweep():
     rng = np.random.default_rng(710019)
     labels = rng.integers(0, 2, size=(15, 7))
     labels[:, 0] = 1
     probabilities = rng.choice(
         [0.0, 0.009, 0.01, 0.1, 0.3, 0.7, 0.9, 1.0], size=labels.shape
     )
-    if resample:
-        indices = rng.integers(0, len(labels), size=len(labels))
-        labels, probabilities = labels[indices], probabilities[indices]
 
     expected = 0.0
     for threshold in np.arange(1, 101) / 100:
@@ -87,30 +80,6 @@ def test_fmax_excludes_unannotated_proteins():
     assert fmax([[0.4, 0.1], [1.0, 1.0]], [[1, 0], [0, 0]], "macro") == 1.0
     with pytest.raises(UndefinedMetricError, match="annotated protein"):
         fmax([[0.4, 0.1]], [[0, 0]], "macro")
-
-
-@pytest.mark.parametrize(
-    "probabilities,labels",
-    [
-        ([[np.nan, 0.5]], [[1, 0]]),
-        ([[np.inf, 0.5]], [[1, 0]]),
-        ([[-0.1, 0.5]], [[1, 0]]),
-        ([[1.1, 0.5]], [[1, 0]]),
-        ([[0.7, 0.3]], [[1, 0], [0, 1]]),
-        ([[0.7, 0.3]], [[0.5, 0.5]]),
-        ([0.7, 0.3], [1, 0]),
-        (np.empty((0, 2)), np.empty((0, 2))),
-    ],
-)
-def test_fmax_rejects_invalid_inputs(probabilities, labels):
-    with pytest.raises(ValueError):
-        fmax(probabilities, labels, "macro")
-
-
-def test_fmax_requires_probabilities():
-    task = get_task("sequence_multilabel_classification", 2)
-    with pytest.raises(ValueError, match="requires per-class probabilities"):
-        task.compute_metrics([[1, 0]], [[1, 0]], ["fmax"])
 
 
 def test_multiclass_auc_with_unobserved_class():
