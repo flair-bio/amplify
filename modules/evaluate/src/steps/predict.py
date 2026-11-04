@@ -526,9 +526,11 @@ class PredictStep:
                 count = len(labels) if isinstance(labels, list) else 1
                 positions[index] = row_positions[cursor : cursor + count]
                 cursor += count
-        if set(grouped_rows) != set(positions_by_id):
+        missing_ids = set(positions_by_id) - set(grouped_rows)
+        if any(positions_by_id[key] for key in missing_ids):
             raise ValueError(
-                "Token predictions and prepared original-residue IDs differ."
+                "Token predictions are missing IDs with valid prepared "
+                "residue positions."
             )
         return predictions.with_columns(
             pl.Series(

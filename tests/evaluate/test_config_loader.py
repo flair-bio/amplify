@@ -311,6 +311,14 @@ def test_dataset_default_matches_explicit_task_config(dataset):
     assert actual.model_dump() == expected.model_dump()
 
 
+def test_uniprot_regions_uses_2048_token_context():
+    config = load_evaluation_config(
+        [CONFIGS / "config.yaml", CONFIGS / "datasets" / "uniprot_regions.yaml"]
+    )
+
+    assert config.steps.prepare.max_length == 2048
+
+
 @pytest.mark.parametrize(
     "task,dataset,controls",
     [

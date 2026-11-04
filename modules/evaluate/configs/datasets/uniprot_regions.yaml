@@ -6,3 +6,7 @@ workspace:
   target_type: categorical
   label_format: per_token
   num_labels: 2
+
+steps:
+  prepare:
+    max_length: 2048
