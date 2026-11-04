@@ -652,8 +652,8 @@ hydrophobicity, be read back from the embedding?
 
 - **Readout:** one number per protein: one of 31 properties, such as
   amino-acid composition, molecular mass, isoelectric point, or GRAVY
-  (average hydrophobicity). Pick it with `steps.prepare.label_column`; the
-  overlay defaults to `gravy`. Each property is a separate regression run,
+  (average   hydrophobicity). The overlay evaluates all 31 properties automatically.
+  Each property is a separate regression run,
   selected and reported with R². The full list is in the
   [sourcing guide](dataset-sourcing.md#uniprot-protparam).
 - **Used for:** these properties guide purification and formulation (for
@@ -668,10 +668,33 @@ hydrophobicity, be read back from the embedding?
   with `sequence_regression` ·
   [Hub](https://huggingface.co/datasets/flair-bio/uniprot_protparams)
 
-Run each property separately, changing `steps.prepare.label_column` and using
-a distinct output directory for each property. Report the per-property R²
-values; if a single summary is needed, use their unweighted arithmetic mean,
-not one R² pooled across differently scaled targets.
+Selecting the ProtParams overlay with the ordinary evaluation entry point
+trains all 31 probes sequentially and automatically publishes their
+equal-weight mean test R². No separate aggregation command is needed:
+
+```bash
+python -m modules.evaluate.src.run_evaluate \
+    modules/evaluate/configs/config.yaml \
+    modules/evaluate/configs/models/amplify_120m.yaml \
+    modules/evaluate/configs/datasets/uniprot_protparams.yaml
+```
+
+The Mila launcher uses one job (array index 33) for the complete suite.
+Property runs use IDs `<run_id>-<property>` while retaining the dataset
+identity and compatible embedding caches. A restart skips completed properties
+only when their saved configuration matches. Matching incomplete runs are
+restarted from scratch; incompatible runs fail rather than being silently reused.
+`--overwrite` reruns all properties under the existing output-protection rules.
+
+The runner writes `property_scores.parquet` and `summary.json` under
+`<model_root>/<variant>-<run_id>-summary/seed_<seed>/` only after all properties
+complete. Negative R² values are retained; targets are never pooled.
+Missing, nonfinite, or incompatible results prevent publication of a partial mean.
+All-property mode requires ordinary regression probes, without layerwise or
+additional test sets. For a single property, pass
+`protparams_all_properties=false steps.prepare.label_column=gravy` and use a
+distinct `workspace.run_id`. Baseline-only and non-regression evaluations
+continue to use their existing paths.
 
 ### Pseudo-perplexity: UniProt UR100P test set
 

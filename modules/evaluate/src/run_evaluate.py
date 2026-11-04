@@ -12,6 +12,7 @@ from modules.evaluate.src.contracts.config_loader import (
 from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.runners.baselines import run_baselines
 from modules.evaluate.src.runners.pipeline import run_pipeline
+from modules.evaluate.src.runners.protparams import run_protparams
 from modules.evaluate.src.utils.seed import seed_everything
 
 logging.basicConfig(
@@ -142,7 +143,13 @@ def main() -> None:
         workspace.dataset_name,
         config.variant,
     )
-    run_pipeline(config, workspace, accelerator, overwrite=overwrite)
+    if (
+        config.protparams_all_properties
+        and config.workspace.task_type == "sequence_regression"
+    ):
+        run_protparams(config, accelerator, overwrite=overwrite)
+    else:
+        run_pipeline(config, workspace, accelerator, overwrite=overwrite)
 
     logger.info("=== Evaluation Pipeline Completed Successfully ===")
 

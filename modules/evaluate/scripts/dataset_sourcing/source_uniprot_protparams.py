@@ -40,24 +40,11 @@ from modules.evaluate.scripts.dataset_sourcing.shared.preprocess import (
     create_full_dataset_splits,
     create_split_subsets,
 )
+from modules.evaluate.src.utils.protparams import PROTPARAM_COLUMNS
 
 logger = logging.getLogger(__name__)
 
 DATASET_NAME = "uniprot_protparams"
-PROTPARAM_COLUMNS = (
-    "length",
-    "mass",
-    *(f"percent_{amino_acid}" for amino_acid in "acdefghiklmnpqrstvwy"),
-    "fraction_helix_aas",
-    "fraction_turn_aas",
-    "fraction_sheet_aas",
-    "instability_index",
-    "gravy",
-    "isoelectric_point",
-    "charge_at_ph4_7",
-    "charge_at_ph7_2",
-    "charge_at_ph8",
-)
 
 
 class SourceUniprotProtParamsConfig(UniProtDatasetSourcingConfig):

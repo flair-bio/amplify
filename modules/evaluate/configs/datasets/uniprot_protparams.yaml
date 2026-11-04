@@ -1,3 +1,5 @@
+protparams_all_properties: true
+
 workspace:
   default_task_type: sequence_regression
   dataset_name: uniprot_protparams
@@ -9,4 +11,4 @@ workspace:
 
 steps:
   prepare:
-    label_column: gravy # one property per run; no combined property score
+    label_column: gravy # single-property mode: set protparams_all_properties=false
