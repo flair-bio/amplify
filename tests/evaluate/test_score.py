@@ -86,6 +86,53 @@ def test_task_scoring_reuses_controls_without_publishing(monkeypatch):
     np.testing.assert_equal(result.resamples["accuracy"].to_numpy(), expected)
 
 
+def test_go_fmax_scoring_resamples_probabilities_and_controls():
+    task = get_task("sequence_multilabel_classification", 3)
+    labels = [[1, 0, 0], [0, 1, 1]]
+    probabilities = [[0.4, 0.1, 0.1], [0.1, 0.4, 0.4]]
+    predictions = [[0, 0, 0], [0, 0, 0]]
+    output = PredictOutput(
+        metadata=EvaluationMetadata(
+            model_name="toy", dataset_name="GO_mf", task_type=task.name,
+        ),
+        predictions=pl.DataFrame(
+            {
+                "id": [0, 1],
+                "prediction": predictions,
+                "label": labels,
+                "probability": probabilities,
+            }
+        ),
+        controls={
+            "random_trunk": pl.DataFrame(
+                {
+                    "id": [0, 1],
+                    "prediction": predictions,
+                    "probability": [[0.0, 0.0, 0.0]] * 2,
+                }
+            )
+        },
+    )
+    result = task.score(
+        output,
+        ScoreConfig(
+            metrics=["fmax", "f1"],
+            metric_aggregation="macro",
+            bootstrap_enabled=True,
+            n_samples=8,
+            n_permutations=8,
+        ),
+        seed=123,
+    )
+    assert result.scores == pytest.approx({"fmax": 1.0, "f1": 0.0})
+    assert result.condition_scores["random_trunk"]["fmax"] == 0.0
+    assert result.resamples["fmax"].to_list() == pytest.approx([1.0] * 8)
+    assert result.confidence_intervals["fmax"] == pytest.approx(
+        {"mean": 1.0, "lower": 1.0, "upper": 1.0}
+    )
+    assert "fmax" in result.control_comparisons["random_trunk"]
+
+
 def test_score_step_publishes_structured_results_without_task_specific_columns(
     tmp_path, monkeypatch,
 ):

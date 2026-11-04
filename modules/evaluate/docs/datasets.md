@@ -365,6 +365,17 @@ describing what a protein does, in three independent aspects.
 | [`GO_cc`](../configs/datasets/GO_cc.yaml) | Where does it act: which compartment or complex? | nucleus, plasma membrane, ribosome | 440 | [uniprot-GO_cc](https://huggingface.co/datasets/flair-bio/uniprot-GO_cc) |
 
 Run every GO overlay with `sequence_multilabel_classification`.
+Model selection and primary reporting use unweighted protein-centric
+`fmax`, separately for each aspect, following
+[CAFA2](https://doi.org/10.1186/s13059-016-1037-6). Thresholds run from 0.01
+to 1.00 in steps of 0.01, with scores equal to the threshold included.
+Precision averages proteins with at least one predicted term; recall averages
+all annotated benchmark proteins, including those with no predictions.
+The score is the maximum harmonic mean of these two averages. Proteins with
+no ground-truth terms in the retained vocabulary are excluded; if none are
+annotated, the score is undefined. Macro-F1 at the fixed 0.5 cutoff remains
+a secondary metric.
+
 `GO_bp` is usually the hardest: a process depends on the protein's partners
 and pathway, not only on its own chemistry. `GO_cc` overlaps with
 `localization_prediction` but is multi-label and also covers complexes.

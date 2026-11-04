@@ -34,6 +34,7 @@ class SequenceMultilabelClassificationTask(FlatMetricsTask):
 
     metrics: ClassVar[dict[str, MetricFn]] = {
         "f1": metrics.f1,
+        "fmax": metrics.fmax,
         "precision": metrics.precision,
         "recall": metrics.recall,
         "multilabel_mcc": metrics.multilabel_mcc,
@@ -41,7 +42,7 @@ class SequenceMultilabelClassificationTask(FlatMetricsTask):
         "multilabel_roc_auc": metrics.multilabel_roc_auc,
     }
     metrics_requiring_probabilities = frozenset(
-        {"average_precision", "multilabel_roc_auc"}
+        {"fmax", "average_precision", "multilabel_roc_auc"}
     )
     default_metric_names = ("f1", "multilabel_mcc", "average_precision")
 

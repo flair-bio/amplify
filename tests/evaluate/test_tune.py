@@ -118,6 +118,50 @@ def test_validation_f1_keeps_configured_classes_and_token_masks(
     assert score == pytest.approx(1 / num_labels)
 
 
+@pytest.mark.parametrize("cached", [False, True])
+def test_validation_fmax_collects_sigmoid_probabilities(monkeypatch, tmp_path, cached):
+    task_type = "sequence_multilabel_classification"
+    probabilities = torch.tensor([[0.4, 0.1, 0.1], [0.1, 0.4, 0.4]])
+    labels = torch.tensor([[1, 0, 0], [0, 1, 1]])
+    model = EmbeddingProbeHead(3, 3, task_type)
+    with torch.no_grad():
+        model.classifier.weight.copy_(torch.eye(3))
+        model.classifier.bias.zero_()
+    loader = DataLoader(
+        EmbeddingDataset(torch.logit(probabilities), [0, 1], labels)
+        if cached
+        else [{"input_ids": torch.tensor([0]), "labels": 0}],
+        batch_size=1,
+    )
+    prepared = PreparedArtifacts(
+        model=model,
+        tokenizer=None,
+        train_dataloader=None,
+        val_dataloader=loader,
+        test_dataloader=None,
+    )
+
+    def run_inference(*args, **kwargs):
+        assert kwargs["collect_probabilities"]
+        return (
+            [],
+            torch.zeros_like(labels).tolist(),
+            labels.tolist(),
+            probabilities.tolist(),
+            None,
+        )
+
+    monkeypatch.setattr("modules.evaluate.src.trainers.torch.run_inference", run_inference)
+    step = PredictorSelection(TuneConfig(metric_aggregation="macro"))
+    score = step._torch_trainer.evaluate_validation(
+        _make_workspace(tmp_path, task_type, num_labels=3),
+        prepared,
+        Accelerator(cpu=True),
+        "fmax",
+    )
+    assert score == pytest.approx(1.0)
+
+
 def test_classical_selection_uses_fixed_class_macro_f1(monkeypatch):
     from modules.evaluate.src.model.heads import sweep_classical_head
 

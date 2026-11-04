@@ -253,6 +253,27 @@ def test_dataset_primary_metric_selects_models_and_preserves_macro_f1(dataset, t
     assert config.steps.tune.metric_aggregation == "macro"
 
 
+@pytest.mark.parametrize(
+    "dataset",
+    ["GO_bp", "GO_cc", "GO_mf"]
+    + [path.stem for path in sorted((CONFIGS / "datasets").glob("interpro_*.yaml"))],
+)
+def test_go_selects_fmax_without_changing_interpro_macro_f1(dataset):
+    config = load_evaluation_config(
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "tasks/sequence_multilabel_classification.yaml",
+            CONFIGS / "datasets" / f"{dataset}.yaml",
+        ]
+    )
+    is_go = dataset.startswith("GO_")
+    assert config.steps.tune.hyperparameter_search.metric == ("fmax" if is_go else "f1")
+    assert config.steps.tune.hyperparameter_search.direction == "maximize"
+    assert config.steps.score.metrics == (["fmax", "f1"] if is_go else ["f1"])
+    assert config.steps.score.metric_aggregation == "macro"
+    assert config.steps.predict.collect_probabilities is is_go
+
+
 def test_shared_baselines_require_a_baseline_overlay_for_model_runs():
     dataset_paths = [
         CONFIGS / "config.yaml",

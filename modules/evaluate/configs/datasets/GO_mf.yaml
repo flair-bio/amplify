@@ -7,3 +7,10 @@ workspace:
   target_type: categorical
   label_format: multilabel
   num_labels: 441
+
+steps:
+  tune:
+    hyperparameter_search:
+      metric: fmax
+  score:
+    metrics: [fmax, f1]
