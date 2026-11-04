@@ -215,8 +215,42 @@ def test_default_protocol_needs_only_base_model_and_dataset():
     assert search.search_space.hidden_size == [128, 256, 512]
     assert search.search_space.hidden_depth == [1, 2]
     assert search.search_space.batch_size == [8, 16, 32, 64, 128, 256]
-    assert search.metric == "f1"
+    assert search.metric == "accuracy"
     assert not hasattr(config, "baselines")
+
+
+@pytest.mark.parametrize(
+    "dataset,task",
+    [
+        ("fold_prediction", "sequence_classification"),
+        ("localization_prediction", "sequence_classification"),
+        ("solubility_prediction", "sequence_classification"),
+        ("ssp_q3", "token_classification"),
+        ("ssp_q8", "token_classification"),
+        ("antibiotic_resistance", "sequence_classification"),
+        ("uniprot_secondary_structure", "token_classification"),
+    ],
+)
+def test_dataset_primary_metric_selects_models_and_preserves_macro_f1(dataset, task):
+    config = load_evaluation_config(
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "tasks" / f"{task}.yaml",
+            CONFIGS / "datasets" / f"{dataset}.yaml",
+        ]
+    )
+    expected_metric = (
+        "f1"
+        if dataset in {"antibiotic_resistance", "uniprot_secondary_structure"}
+        else "accuracy"
+    )
+    assert config.steps.tune.hyperparameter_search.metric == expected_metric
+    assert config.steps.tune.hyperparameter_search.direction == "maximize"
+    assert config.steps.score.metrics == (
+        ["accuracy", "f1"] if expected_metric == "accuracy" else ["f1", "accuracy"]
+    )
+    assert config.steps.score.metric_aggregation == "macro"
+    assert config.steps.tune.metric_aggregation == "macro"
 
 
 def test_shared_baselines_require_a_baseline_overlay_for_model_runs():
