@@ -1,12 +1,10 @@
-"""Flatten ScoreStep results into a tidy, one-row-per-(metric[, control])
-table for downstream plotting/aggregation, and merge it into the run-local
-``scores.parquet`` across repeated scoring calls. Kept out of score.py
-since these are pure data-reshaping/merge functions independent of
-ScoreStep's own state (config/workspace/IO orchestration).
-"""
+"""Build, merge, and aggregate evaluation score tables."""
 
 from __future__ import annotations
 
+import json
+import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -127,3 +125,88 @@ def upsert_long_df(
             same_split = pl.lit(split is None or split == "test")
         existing = existing.filter(~(same_variant & same_split))
     return pl.concat([existing, new_df], how="diagonal_relaxed")
+
+
+def aggregate_task_scores(
+    model_root: Path,
+    run_name: str,
+    seed: int,
+    dataset_name: str,
+    target_columns: tuple[str, ...],
+    metric: str,
+    *,
+    target_key: str = "target",
+    count_key: str = "n_targets",
+    aggregation_name: str = "unweighted_target_mean",
+) -> tuple[pl.DataFrame, dict[str, Any]]:
+    """Read completed scalar-target runs and compute an equal-weight score mean."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", run_name) or seed < 0:
+        raise ValueError("A safe run name and nonnegative seed are required.")
+    manifests = {
+        prop: model_root / f"{run_name}-{prop}" / f"seed_{seed}" / "run_manifest.json"
+        for prop in target_columns
+    }
+    missing = [prop for prop, path in manifests.items() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"Missing aggregate-task target runs: {', '.join(missing)}"
+        )
+
+    reference_config = reference_metadata = None
+    rows = []
+    for prop, path in manifests.items():
+        manifest = json.loads(path.read_text())
+        evaluation = manifest["evaluation"]
+        if evaluation["status"] != "complete":
+            raise ValueError(f"Aggregate-task target run is incomplete: {prop}")
+        config = evaluation["config"]
+        metadata = manifest["score"]["metadata"]
+        workspace = config["workspace"]
+        if (
+            workspace["dataset_name"] != dataset_name
+            or workspace["task_type"] != "sequence_regression"
+            or config["steps"]["prepare"]["label_column"] != prop
+            or config["seed"] != seed
+            or metadata["seed"] != seed
+            or metadata["dataset_name"] != workspace["dataset_name"]
+            or metadata["task_type"] != workspace["task_type"]
+            or metadata["model_name"] != workspace["model_name"]
+            or metadata.get("test_subset") is not None
+            or metadata.get("layer_index") is not None
+            or f"{metadata['variant']}-{workspace['run_id']}" != f"{run_name}-{prop}"
+        ):
+            raise ValueError(
+                f"Aggregate-task target run has inconsistent identity: {prop}"
+            )
+
+        del workspace["run_id"]
+        del config["steps"]["prepare"]["label_column"]
+        if reference_config is None:
+            reference_config, reference_metadata = config, metadata
+        elif config != reference_config or metadata != reference_metadata:
+            raise ValueError(
+                f"Aggregate-task target runs use different protocols: {prop}"
+            )
+        value = manifest["score"]["scores"][metric]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise ValueError(
+                f"Aggregate-task target has nonfinite or invalid {metric}: {prop}"
+            )
+        rows.append(
+            {target_key: prop, metric: float(value), "manifest_path": str(path)}
+        )
+
+    table = pl.DataFrame(rows)
+    summary = {
+        "metadata": reference_metadata,
+        "run_name": run_name,
+        "metric": metric,
+        "aggregation": aggregation_name,
+        count_key: len(target_columns),
+        "value": math.fsum(table[metric].to_list()) / len(target_columns),
+    }
+    return table, summary

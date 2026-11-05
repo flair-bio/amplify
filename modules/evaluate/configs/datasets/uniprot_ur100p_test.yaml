@@ -12,3 +12,5 @@ steps:
   prepare:
     # Deterministic prefix, at most 2048 tokens including specials; not full-length PLL.
     max_length: 2048
+  score:
+    metrics: [pseudo_perplexity]

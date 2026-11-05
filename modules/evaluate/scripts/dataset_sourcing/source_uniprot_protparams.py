@@ -196,8 +196,9 @@ def write_protparams_card(
 
 Protein-level sequence property dataset for UniProtKB entries. `length` and
 `mass` are UniProt-reported; the other properties are calculated with
-Biopython's `ProteinAnalysis`. Select one property per scalar regression run
-with `steps.prepare.label_column`.
+Biopython's `ProteinAnalysis`. The evaluation pipeline runs scalar regression
+for all 31 properties and reports each property's R² plus their equal-weight
+mean.
 
 ## Source and preprocessing
 

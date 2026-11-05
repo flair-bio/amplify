@@ -11,6 +11,7 @@ from modules.evaluate.src.contracts.config_loader import (
 )
 from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.runners.baselines import run_baselines
+from modules.evaluate.src.runners.multi_target import run_multi_target_evaluation
 from modules.evaluate.src.runners.pipeline import run_pipeline
 from modules.evaluate.src.utils.seed import seed_everything
 
@@ -142,7 +143,15 @@ def main() -> None:
         workspace.dataset_name,
         config.variant,
     )
-    run_pipeline(config, workspace, accelerator, overwrite=overwrite)
+    if config.multi_target is not None:
+        run_multi_target_evaluation(
+            config,
+            accelerator,
+            multi_target=config.multi_target,
+            overwrite=overwrite,
+        )
+    else:
+        run_pipeline(config, workspace, accelerator, overwrite=overwrite)
 
     logger.info("=== Evaluation Pipeline Completed Successfully ===")
 

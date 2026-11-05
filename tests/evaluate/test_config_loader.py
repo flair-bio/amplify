@@ -215,8 +215,66 @@ def test_default_protocol_needs_only_base_model_and_dataset():
     assert search.search_space.hidden_size == [128, 256, 512]
     assert search.search_space.hidden_depth == [1, 2]
     assert search.search_space.batch_size == [8, 16, 32, 64, 128, 256]
-    assert search.metric == "f1"
+    assert search.metric == "accuracy"
     assert not hasattr(config, "baselines")
+
+
+@pytest.mark.parametrize(
+    "dataset,task",
+    [
+        ("fold_prediction", "sequence_classification"),
+        ("localization_prediction", "sequence_classification"),
+        ("solubility_prediction", "sequence_classification"),
+        ("ssp_q3", "token_classification"),
+        ("ssp_q8", "token_classification"),
+        ("antibiotic_resistance", "sequence_classification"),
+        ("uniprot_secondary_structure", "token_classification"),
+    ],
+)
+def test_dataset_primary_metric_selects_models_and_preserves_macro_f1(dataset, task):
+    config = load_evaluation_config(
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "tasks" / f"{task}.yaml",
+            CONFIGS / "datasets" / f"{dataset}.yaml",
+        ]
+    )
+    expected_metric = (
+        "f1"
+        if dataset in {"antibiotic_resistance", "uniprot_secondary_structure"}
+        else "accuracy"
+    )
+    assert config.steps.tune.hyperparameter_search.metric == expected_metric
+    assert config.steps.tune.hyperparameter_search.direction == "maximize"
+    assert config.steps.score.metrics == (
+        ["accuracy", "f1"] if expected_metric == "accuracy" else ["f1", "accuracy"]
+    )
+    assert config.steps.score.metric_aggregation == "macro"
+    assert config.steps.tune.metric_aggregation == "macro"
+
+
+@pytest.mark.parametrize(
+    "dataset",
+    ["GO_bp", "GO_cc", "GO_mf", "interpro_domain"],
+)
+def test_go_selects_fmax_and_interpro_declares_macro_f1_metrics(dataset):
+    config = load_evaluation_config(
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "tasks/sequence_multilabel_classification.yaml",
+            CONFIGS / "datasets" / f"{dataset}.yaml",
+        ]
+    )
+    is_go = dataset.startswith("GO_")
+    assert config.steps.tune.hyperparameter_search.metric == ("fmax" if is_go else "f1")
+    assert config.steps.tune.hyperparameter_search.direction == "maximize"
+    assert config.steps.score.metrics == (
+        ["fmax", "f1"]
+        if is_go
+        else ["f1", "multilabel_mcc", "average_precision"]
+    )
+    assert config.steps.score.metric_aggregation == "macro"
+    assert config.steps.predict.collect_probabilities is (is_go or dataset.startswith("interpro"))
 
 
 def test_shared_baselines_require_a_baseline_overlay_for_model_runs():
@@ -264,6 +322,8 @@ def test_zero_shot_tasks_disable_default_training(task, dataset):
     assert not config.steps.prepare.embedding_cache.enabled
     assert not config.steps.tune.hyperparameter_search.enabled
     assert not config.steps.tune.refit_on_train_validation
+    if task == "pseudo_perplexity":
+        assert config.steps.score.metrics == ["pseudo_perplexity"]
 
 
 def test_contact_probe_does_not_inherit_cached_mlp_search():
@@ -292,7 +352,8 @@ def test_contact_probe_does_not_inherit_cached_mlp_search():
     ids=lambda p: p.stem,
 )
 def test_dataset_default_matches_explicit_task_config(dataset):
-    task = OmegaConf.load(dataset).workspace.default_task_type
+    overlay = OmegaConf.load(dataset)
+    task = overlay.workspace.default_task_type
     predictors = (
         [CONFIGS / "predictors/contact_embedding.yaml"]
         if task == "contact_prediction"
@@ -309,6 +370,13 @@ def test_dataset_default_matches_explicit_task_config(dataset):
     )
     actual = load_evaluation_config([CONFIGS / "config.yaml", dataset, *predictors])
     assert actual.model_dump() == expected.model_dump()
+    assert OmegaConf.select(overlay, "steps.score.metrics"), (
+        f"{dataset.name} must declare reported metrics"
+    )
+    if actual.steps.tune.hyperparameter_search.enabled:
+        assert OmegaConf.select(overlay, "steps.tune.hyperparameter_search.metric"), (
+            f"{dataset.name} must declare its HPO metric"
+        )
 
 
 def test_uniprot_regions_uses_2048_token_context():
@@ -366,22 +434,6 @@ def test_task_control_defaults(task, dataset, controls):
             [*paths, CONFIGS / "baselines" / f"{task}.yaml"]
         )
         assert baseline.baselines.names == expected_baselines
-
-
-def test_protparams_uses_sequence_regression_r2_defaults():
-    config = load_evaluation_config(
-        [
-            CONFIGS / "config.yaml",
-            CONFIGS / "models/amplify_120m.yaml",
-            CONFIGS / "tasks/sequence_regression.yaml",
-            CONFIGS / "datasets/uniprot_protparams.yaml",
-            CONFIGS / "predictors/torch_linear.yaml",
-        ]
-    )
-    assert config.steps.prepare.label_column == "gravy"
-    assert config.steps.tune.hyperparameter_search.metric == "r2"
-    assert config.steps.tune.hyperparameter_search.direction == "maximize"
-    assert config.steps.score.metrics == ["r2", "mse"]
 
 
 @pytest.mark.parametrize("task_first", [True, False])

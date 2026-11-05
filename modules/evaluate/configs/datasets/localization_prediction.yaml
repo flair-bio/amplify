@@ -7,6 +7,14 @@ workspace:
   label_format: scalar
   num_labels: 10
 
+steps:
+  tune:
+    hyperparameter_search:
+      metric: accuracy
+      direction: maximize
+  score:
+    metrics: [accuracy, f1]
+
 # Evaluated with the DeepLoc-fitted probe; excluded from training, tuning,
 # and model selection.
 # Verify class-index compatibility before interpreting the setHARD score.

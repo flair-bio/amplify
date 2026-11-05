@@ -56,6 +56,71 @@ def f1(
     )
 
 
+def fmax(probabilities: Sequence, labels: Sequence, average: str) -> float:
+    """Unweighted CAFA2 Fmax over inclusive thresholds 0.01:0.01:1.00.
+
+    Precision averages predicted proteins; recall averages all annotated
+    proteins. Ignore ``average`` and unannotated rows; ancestors come upstream.
+    See https://doi.org/10.1186/s13059-016-1037-6.
+    """
+    probs = check_array(probabilities, dtype=float)
+    labels_arr = check_array(labels)
+    if probs.shape != labels_arr.shape:
+        raise ValueError("Fmax probability and label shapes must match.")
+    if not np.isin(labels_arr, (0, 1)).all():
+        raise ValueError("Fmax labels must be binary indicators.")
+    if np.any((probs < 0) | (probs > 1)):
+        raise ValueError("Fmax probabilities must be in [0, 1].")
+
+    support = labels_arr.sum(axis=1)
+    annotated = support > 0
+    if not annotated.any():
+        raise UndefinedMetricError("Fmax requires at least one annotated protein.")
+    if not annotated.all():
+        probs, labels_arr, support = (
+            probs[annotated],
+            labels_arr[annotated],
+            support[annotated],
+        )
+
+    thresholds = np.arange(1, 101) / 100
+    # Histogram scores by the number of thresholds they pass, avoiding a
+    # separate protein-by-term matrix scan for each of the 100 thresholds.
+    bins = np.searchsorted(thresholds, probs, side="right")
+    bins += np.arange(len(probs))[:, None] * 101
+    histogram_shape = (len(probs), 101)
+    predicted = np.bincount(bins.ravel(), minlength=len(probs) * 101).reshape(
+        histogram_shape
+    )
+    true_positives = np.bincount(
+        bins.ravel(), weights=labels_arr.ravel(), minlength=len(probs) * 101
+    ).reshape(histogram_shape)
+    predicted = predicted[:, :0:-1].cumsum(axis=1)[:, ::-1]
+    true_positives = true_positives[:, :0:-1].cumsum(axis=1)[:, ::-1]
+
+    per_protein_precision = np.divide(
+        true_positives,
+        predicted,
+        out=np.zeros_like(true_positives),
+        where=predicted > 0,
+    )
+    predicted_proteins = (predicted > 0).sum(axis=0)
+    precision = np.divide(
+        per_protein_precision.sum(axis=0),
+        predicted_proteins,
+        out=np.zeros(len(thresholds)),
+        where=predicted_proteins > 0,
+    )
+    recall = (true_positives / support[:, None]).mean(axis=0)
+    scores = np.divide(
+        2 * precision * recall,
+        precision + recall,
+        out=np.zeros(len(thresholds)),
+        where=precision + recall > 0,
+    )
+    return float(scores.max())
+
+
 def precision(
     predictions: Any,
     labels: Any,

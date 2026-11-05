@@ -10,3 +10,9 @@ workspace:
 steps:
   prepare:
     max_length: 2048
+  tune:
+    hyperparameter_search:
+      metric: accuracy
+      direction: maximize
+  score:
+    metrics: [accuracy, f1]
