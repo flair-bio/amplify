@@ -9,4 +9,4 @@ workspace:
 
 steps:
   score:
-    metrics: [calibration_t, calibration_nt, calibration_high_nt]
+    metrics: [calibration_fit_t, calibration_fit_nt, calibration_fit_high_nt]

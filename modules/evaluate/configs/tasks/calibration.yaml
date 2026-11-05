@@ -8,7 +8,8 @@ steps:
       enabled: false
     refit_on_train_validation: false
   score:
-    metrics: [calibration_t, calibration_nt, calibration_high_nt] # 100 x exp(-mean KL)
+    # 100 x exp(-mean KL) at the cross-fitted temperature
+    metrics: [calibration_fit_t, calibration_fit_nt, calibration_fit_high_nt]
   prepare:
     batch_size: 8 # masked 512-residue windows, not full source proteins
     tokenize_num_proc: 1 # expanded profile rows; bound host-memory concurrency

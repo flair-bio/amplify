@@ -81,7 +81,7 @@ class CalibrationTask(FlatMetricsTask):
             for b in range(NUM_BINS)
         },
     }
-    default_metric_names = tuple(f"calibration_{c}" for c in COHORTS)
+    default_metric_names = tuple(f"calibration_fit_{c}" for c in COHORTS)
     # Scores are computed against the true profiles before metrics run, so
     # shuffling labels afterwards would only shuffle cohort membership. The
     # model is scored as-is, so `untrained` would repeat the trained run.
