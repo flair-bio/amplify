@@ -33,7 +33,7 @@ from .conftest import build_raw_dataset_dict
         ),
         ("token_classification", "tune_probe", "torch_linear", False, "accuracy"),
         ("pseudo_perplexity", "evaluate_as_is", "mlp", False, "pseudo_perplexity"),
-        ("calibration", "evaluate_as_is", "mlp", False, "calibration"),
+        ("calibration", "evaluate_as_is", "mlp", False, "calibration_t"),
     ],
 )
 def test_task_pipeline_roundtrip(
@@ -53,9 +53,12 @@ def test_task_pipeline_roundtrip(
     model_family.tokenizer.save_pretrained(model_path)
     if task == "calibration":
         profile = [0.0] * 20
-        profile[CANONICAL_AMINO_ACIDS.index("C")] = 1.0
+        consensus = CANONICAL_AMINO_ACIDS.index("C")
+        profile[consensus] = 1.0
+        # [position, profile, is_t, bin, fold, in_balanced, in_high_nt, mask]
+        site = [1.0, *profile, 1, 0, 0, 1, 0, 1 << consensus]
         data = Dataset.from_dict(
-            {"id": ["protein"], "sequence": ["ACDE"], "targets": [[[1.0, *profile]]]}
+            {"id": ["protein"], "sequence": ["ACDE"], "targets": [[site]]}
         )
         dataset = DatasetDict({"test": data})
     elif task == "pseudo_perplexity":
