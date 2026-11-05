@@ -223,6 +223,11 @@ def test_score_crossfits_trained_and_control_temperatures():
     kl = forward_kl(logits, profiles, 1.0)
     assert trained["kl_t"] == pytest.approx(kl[t_rows].mean())
     assert trained["calibration_t"] == pytest.approx(100 * np.exp(-kl[t_rows].mean()))
+    bin_rows = t_rows & (bins == 3)
+    assert trained["calibration_t_bin3"] == pytest.approx(
+        100 * np.exp(-kl[bin_rows].mean())
+    )
+    assert trained["calibration_fit_nt_bin4"] == pytest.approx(100)
     assert trained["calibration_fit_high_nt"] == pytest.approx(100)
     assert trained["temperature"] == pytest.approx(2.0)
     assert control["temperature"] == pytest.approx(6.0)

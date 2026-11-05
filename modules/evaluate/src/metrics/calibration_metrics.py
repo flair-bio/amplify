@@ -2,9 +2,10 @@
 Calibration KL, cross-fitted temperature scaling and cohort metrics.
 
 Metric rows are ``[kl, kl_fit, temperature, pred_idx]`` predictions and
-``[is_t, in_balanced, in_high_nt, fold, consensus_mask]`` labels (see
+``[is_t, in_balanced, in_high_nt, fold, consensus_mask, bin]`` labels (see
 ``tasks.calibration.CalibrationTask.score``). Cohorts are balanced T sites
-(``t``), balanced NT sites (``nt``) and high-NT sites (``high_nt``).
+(``t``), balanced NT sites (``nt``) and high-NT sites (``high_nt``); balanced
+cohorts can be restricted to one conservation bin.
 """
 
 from __future__ import annotations
@@ -19,7 +20,8 @@ from scipy.special import logsumexp, xlogy
 logger = logging.getLogger(__name__)
 
 COHORTS = ("t", "nt", "high_nt")
-NUM_STRATA = 18  # 9 conservation bins x {T, NT}
+NUM_BINS = 9  # consensus share in [0, .2), [.2, .3), ..., [.9, 1]
+NUM_STRATA = 2 * NUM_BINS  # x {T, NT}
 TEMPERATURE_BOUNDS = (0.25, 8.0)
 
 
@@ -95,17 +97,20 @@ def crossfit_temperatures(
 def _arrays(predictions: Any, labels: Any) -> tuple[np.ndarray, np.ndarray]:
     return (
         np.asarray(predictions, dtype=float).reshape(-1, 4),
-        np.asarray(labels, dtype=float).reshape(-1, 5),
+        np.asarray(labels, dtype=float).reshape(-1, 6),
     )
 
 
-def _cohort(labels: np.ndarray, cohort: str) -> np.ndarray:
+def _cohort(
+    labels: np.ndarray, cohort: str, bin_index: int | None = None
+) -> np.ndarray:
     is_t, balanced = labels[:, 0] == 1, labels[:, 1] == 1
-    return {
+    rows = {
         "t": balanced & is_t,
         "nt": balanced & ~is_t,
         "high_nt": labels[:, 2] == 1,
     }[cohort]
+    return rows if bin_index is None else rows & (labels[:, 5] == bin_index)
 
 
 def _mean_or_nan(values: np.ndarray) -> float:
@@ -118,12 +123,18 @@ def cohort_kl(predictions: Any, labels: Any, average: str, *, cohort: str) -> fl
 
 
 def cohort_score(
-    predictions: Any, labels: Any, average: str, *, cohort: str, fitted: bool = False
+    predictions: Any,
+    labels: Any,
+    average: str,
+    *,
+    cohort: str,
+    fitted: bool = False,
+    bin_index: int | None = None,
 ) -> float:
     """``100 * exp(-mean KL)`` at ``T = 1`` or at the cross-fitted temperature."""
     preds, labels = _arrays(predictions, labels)
     return 100.0 * float(
-        np.exp(-_mean_or_nan(preds[_cohort(labels, cohort), int(fitted)]))
+        np.exp(-_mean_or_nan(preds[_cohort(labels, cohort, bin_index), int(fitted)]))
     )
 
 

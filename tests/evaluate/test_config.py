@@ -115,6 +115,22 @@ class TestEvaluationConfig:
         with pytest.raises(ValueError, match="Packed evaluation does not support"):
             EvaluationConfig.model_validate(payload)
 
+    @pytest.mark.parametrize("control", ["untrained", "scrambled_labels"])
+    def test_calibration_rejects_meaningless_controls(self, control):
+        payload = _base_config_dict()
+        payload["workspace"].update(
+            task_type="calibration",
+            target_type="categorical",
+            label_format="consensus_profile",
+            num_labels=None,
+        )
+        payload["steps"] = {
+            "mode": "evaluate_as_is",
+            "predict": {"controls": [control]},
+        }
+        with pytest.raises(ValueError, match="are not supported for task_type"):
+            EvaluationConfig.model_validate(payload)
+
     def test_packing_with_embedding_cache_is_valid(self):
         payload = _base_config_dict()
         payload["steps"] = {

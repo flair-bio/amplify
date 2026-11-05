@@ -272,7 +272,7 @@ def test_default_metrics_are_computable(task: TaskHandler):
             [kl, kl, 1.0, int(p)]
             for kl, p in zip(rng.random(n), rng.integers(0, 20, n))
         ]
-        labels = [[i % 2, 1, 1 - i % 2, i % 5, 1] for i in range(n)]
+        labels = [[i % 2, 1, 1 - i % 2, i % 5, 1, i % 9] for i in range(n)]
     elif task.name == "sequence_multilabel_classification":
         num_labels = 3
         predictions = rng.integers(0, 2, size=(n, num_labels)).tolist()

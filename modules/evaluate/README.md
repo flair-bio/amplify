@@ -927,7 +927,7 @@ custom metrics, and unsupported aggregation modes retain the existing path.
 
 | Field | Default | Description |
 |---|---|---|
-| `metrics` | `null` | List of metrics to compute (task-specific defaults apply when unset), e.g. `accuracy`, `f1`, `precision`, `recall`, `average_precision`, `roc_auc`, `mcc`, `mse`, `r2`, `pearsonr`, `spearmanr`, `contact_precision_at_l_long`, `contact_auc_long`, `pseudo_perplexity`, `mean_log_prob`, `calibration_t`, `calibration_nt`, `calibration_high_nt`, `calibration_fit_t`, `kl_t`, `accuracy_t`, `temperature` (and the `_nt`/`_high_nt` variants) |
+| `metrics` | `null` | List of metrics to compute (task-specific defaults apply when unset), e.g. `accuracy`, `f1`, `precision`, `recall`, `average_precision`, `roc_auc`, `mcc`, `mse`, `r2`, `pearsonr`, `spearmanr`, `contact_precision_at_l_long`, `contact_auc_long`, `pseudo_perplexity`, `mean_log_prob`, `calibration_t`, `calibration_nt`, `calibration_high_nt`, `calibration_fit_t`, `kl_t`, `accuracy_t`, `temperature` (and the `_nt`/`_high_nt` variants), `calibration_t_bin0` (per conservation bin, see [datasets](docs/datasets.md)) |
 | `metric_aggregation` | `weighted` | scikit-learn `average` for classification metrics: `micro` pools all classes/labels, `macro` weights each class equally (exposes rare-class failures), `weighted` weights classes by support, `samples` averages per example (multilabel only). Ignored by regression metrics and single-label MCC |
 | `bootstrap_enabled` | `false` | Enable bootstrap confidence intervals + control comparisons |
 | `n_samples` | `1000` | Bootstrap resamples; the code warns when below 1000 because confidence-interval tails are poorly estimated |

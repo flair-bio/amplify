@@ -699,8 +699,10 @@ match the amino-acid frequencies among the protein's homologs?
   KL from homolog to model distribution at temperature 1; 100 is perfect
   agreement), `calibration_fit_{t,nt,high_nt}` (the same at the cross-fitted
   temperature), `kl_{t,nt,high_nt}`, `accuracy_{t,nt,high_nt}` (the argmax is
-  the consensus) and `temperature` (mean of the per-fold fits). The core
-  three are reported by default.
+  the consensus) and `temperature` (mean of the per-fold fits). Per
+  conservation bin, `calibration[_fit]_{t,nt}_bin{0..8}` give the balanced
+  cohort scores (bin 0 is `[0, 0.2)`, bin 8 is `[0.9, 1]`). The core three are
+  reported by default.
 - **Temperature:** proteins are split into 5 folds (identical sequences
   together). For each fold, one temperature in `[0.25, 8]` is fitted on the
   balanced sites of the other four folds, minimizing the mean KL with equal

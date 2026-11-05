@@ -21,7 +21,7 @@ from transformers import AutoModelForMaskedLM
 from modules.evaluate.src.contracts.artifacts import PredictOutput, ScoreOutput
 from modules.evaluate.src.contracts.config import ScoreConfig
 from modules.evaluate.src.metrics import calibration_metrics
-from modules.evaluate.src.metrics.calibration_metrics import COHORTS
+from modules.evaluate.src.metrics.calibration_metrics import COHORTS, NUM_BINS
 from modules.evaluate.src.tasks.base import FlatMetricsTask, MetricFn
 from modules.evaluate.src.tasks.registry import register_task
 from modules.evaluate.src.utils.amino_acids import resolve_aa_token_ids
@@ -69,11 +69,26 @@ class CalibrationTask(FlatMetricsTask):
             for c in COHORTS
         },
         "temperature": calibration_metrics.mean_temperature,
+        **{
+            f"calibration{fit}_{c}_bin{b}": partial(
+                calibration_metrics.cohort_score,
+                cohort=c,
+                fitted=bool(fit),
+                bin_index=b,
+            )
+            for fit in ("", "_fit")
+            for c in ("t", "nt")
+            for b in range(NUM_BINS)
+        },
     }
     default_metric_names = tuple(f"calibration_{c}" for c in COHORTS)
     # Scores are computed against the true profiles before metrics run, so
-    # shuffling labels afterwards would only shuffle cohort membership.
-    supported_controls = FlatMetricsTask.supported_controls - {"scrambled_labels"}
+    # shuffling labels afterwards would only shuffle cohort membership. The
+    # model is scored as-is, so `untrained` would repeat the trained run.
+    supported_controls = FlatMetricsTask.supported_controls - {
+        "scrambled_labels",
+        "untrained",
+    }
 
     def build_model(
         self,
@@ -184,7 +199,7 @@ class CalibrationTask(FlatMetricsTask):
         """Cross-fit a temperature per condition, then score the KL rows.
 
         Predictions become ``[kl, kl_fit, temperature, pred_idx]`` and labels
-        ``[is_t, in_balanced, in_high_nt, fold, consensus_mask]``.
+        ``[is_t, in_balanced, in_high_nt, fold, consensus_mask, bin]``.
         """
         labels = np.asarray(predictions.predictions["label"].to_list(), dtype=float)
         profiles = labels[:, :NUM_AA] / labels[:, :NUM_AA].sum(1, keepdims=True)
@@ -208,7 +223,7 @@ class CalibrationTask(FlatMetricsTask):
             )
             return frame.with_columns(prediction=pl.Series(rows.tolist()))
 
-        compact = labels[:, [IS_T, IN_BALANCED, IN_HIGH_NT, FOLD, CONSENSUS_MASK]]
+        compact = labels[:, [IS_T, IN_BALANCED, IN_HIGH_NT, FOLD, CONSENSUS_MASK, BIN]]
         scored = replace(
             predictions,
             predictions=kl_rows(predictions.predictions, "trained").with_columns(

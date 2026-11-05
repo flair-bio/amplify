@@ -231,6 +231,9 @@ rejects these combinations before any work starts:
   tasks): position-aligned labels would not move with the shuffled tokens.
 - `majority_class` on regression or multilabel tasks; `train_mean` outside
   `sequence_regression`; generic controls on the CASP contact path.
+- `scrambled_labels` and `untrained` on `calibration`: KL is computed against
+  the true profiles before metrics run, and the model is scored as-is, so
+  `untrained` would repeat the trained run.
 - `untrained`, `random_head`, `random_both` with classical heads (`knn`,
   `sklearn_linear`, `random_forest`, `xgboost`): a fitted estimator has no
   random re-initialization.
