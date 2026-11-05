@@ -1,25 +1,24 @@
-"""Source the calibration dataset from homolog alignments or precomputed profiles.
+"""Source the calibration dataset from a precomputed homolog-profile export.
 
-Two inputs are supported:
-
-- ``a3m_dir``: HHblits ``<id>.a3m`` alignments (see ``run_hhblits.py``). The
-  query (first sequence) is the protein; per-column amino-acid frequencies are
-  counted over the query and its homologs.
-- ``proteome_path`` + ``consensus_path``: precomputed profile CSVs
-  (``id, sequence`` and ``sequence_name, position (0-based), wt_aa, A..Y``).
+The export directory holds ``result.json`` plus ``balanced/`` and
+``high_nt_095/`` subsets, each with ``sequences.csv`` (``id, sequence``),
+``consensus_positions.csv`` (``sequence_name, position`` (0-based),
+``wt_aa, A..Y``) and ``position_support.csv`` (``category``,
+``consensus_aas``, ``consensus_proportion``, ...).
 
 The output is a test-only split with one row per protein whose ``targets``
-column lists ``[position, f_A, ..., f_Y]`` for each conserved position.
+column lists ``[position, f_A, ..., f_Y, is_t, bin, fold, in_balanced,
+in_high_nt, consensus_mask]`` for each site.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
 import numpy as np
 import polars as pl
-from pydantic import Field, model_validator
 
 from modules.core.utils.hf_download import resolve_hf_token
 from modules.evaluate.scripts.dataset_sourcing.shared.config import (
@@ -42,158 +41,135 @@ from modules.evaluate.src.utils.amino_acids import CANONICAL_AMINO_ACIDS
 logger = logging.getLogger(__name__)
 
 AA_COLUMNS = list(CANONICAL_AMINO_ACIDS)
+CONSERVATION_EDGES = [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+SUBSETS = {"balanced": "in_balanced", "high_nt_095": "in_high_nt"}
+NUM_FOLDS = 5
+FOLD_SEED = 0
+SITE_FIELDS = ["is_t", "bin", "fold", "in_balanced", "in_high_nt", "consensus_mask"]
 
 
 class SourceCalibrationConfig(DatasetSourcingConfig):
     """Config for sourcing the calibration dataset."""
 
-    dataset_name: str = "human_calibration"
-    a3m_dir: Path | None = None
-    proteome_path: Path | None = None
-    consensus_path: Path | None = None
-    min_consensus_freq: float = Field(0.70, gt=0.0, le=1.0)
-    # a3m input only (the CSVs carry no homolog counts).
-    min_homologs: int = Field(10, ge=0)
+    dataset_name: str = "omicmsa_calibration"
+    export_dir: Path
+    # Optional ``groups.csv`` (dataset, sequence_name, group, fold) to reuse
+    # an existing fold assignment instead of computing one.
+    groups_path: Path | None = None
 
-    @model_validator(mode="after")
-    def _one_input(self) -> SourceCalibrationConfig:
-        csv_set = [p is not None for p in (self.proteome_path, self.consensus_path)]
-        if (self.a3m_dir is not None and any(csv_set)) or (
-            self.a3m_dir is None and not all(csv_set)
-        ):
-            raise ValueError(
-                "Set either a3m_dir, or both proteome_path and consensus_path."
+
+def read_export(export_dir: Path) -> tuple[str, pl.DataFrame, pl.DataFrame]:
+    """Return the dataset name, sequences, and sites of both subsets.
+
+    A site present in both subsets is kept once, flagged as both.
+    """
+    receipt = json.loads((export_dir / "result.json").read_text())
+    if receipt["selection"]["edges"] != CONSERVATION_EDGES:
+        raise ValueError(f"Expected conservation bin edges {CONSERVATION_EDGES}.")
+
+    sequence_frames, site_frames = [], []
+    for subset in SUBSETS:
+        directory = export_dir / subset
+        sequence_frames.append(pl.read_csv(directory / "sequences.csv"))
+        support = pl.read_csv(
+            directory / "position_support.csv",
+            columns=[
+                "sequence_name",
+                "position",
+                "category",
+                "consensus_aas",
+                "consensus_proportion",
+            ],
+        )
+        site_frames.append(
+            pl.read_csv(directory / "consensus_positions.csv")
+            .join(support, on=["sequence_name", "position"], validate="1:1")
+            .with_columns(
+                **{flag: pl.lit(name == subset) for name, flag in SUBSETS.items()}
             )
-        return self
-
-
-# Byte -> amino-acid index; anything else (gaps, X, ...) maps to NUM_AA and is ignored.
-_AA_LOOKUP = np.full(256, len(AA_COLUMNS), dtype=np.int64)
-_AA_LOOKUP[np.frombuffer(CANONICAL_AMINO_ACIDS.encode(), dtype=np.uint8)] = np.arange(
-    len(AA_COLUMNS)
-)
-
-
-def read_a3m(path: Path) -> list[str]:
-    """Return the aligned sequences of an a3m file, insertions (lowercase) removed."""
-    sequences: list[str] = []
-    for line in path.read_text().splitlines():
-        if line.startswith(">"):
-            sequences.append("")
-        elif sequences:
-            sequences[-1] += "".join(c for c in line.strip() if not c.islower())
-    return sequences
-
-
-def a3m_profile(
-    sequences: list[str], min_consensus_freq: float
-) -> tuple[str, pl.DataFrame]:
-    """Return the query sequence and its conserved columns."""
-    if len({len(s) for s in sequences}) != 1:
-        raise ValueError("a3m match columns have unequal lengths.")
-    msa = np.frombuffer("".join(sequences).upper().encode(), dtype=np.uint8)
-    msa = msa.reshape(len(sequences), -1)
-    msa = msa[:, msa[0] != ord("-")]
-    num_aa = len(AA_COLUMNS)
-    length = msa.shape[1]
-    flat = _AA_LOOKUP[msa] + (num_aa + 1) * np.arange(length)
-    counts = np.bincount(flat.ravel(), minlength=(num_aa + 1) * length)
-    counts = counts.reshape(length, num_aa + 1)[:, :num_aa]
-    totals = counts.sum(axis=1, keepdims=True)
-    freqs = counts / np.maximum(totals, 1)
-    keep = (totals[:, 0] > 0) & (freqs.max(axis=1) >= min_consensus_freq)
-
-    query = msa[0].tobytes().decode()
-    positions = np.flatnonzero(keep)
-    profile = pl.DataFrame(
-        {
-            "position": positions,
-            "wt_aa": [query[i] for i in positions],
-            **{aa: freqs[keep, i] for i, aa in enumerate(AA_COLUMNS)},
-        },
-        schema_overrides={"position": pl.Int64},
+        )
+    sequences = pl.concat(sequence_frames).unique().sort("id")
+    flags = list(SUBSETS.values())
+    sites = (
+        pl.concat(site_frames)
+        .group_by("sequence_name", "position", maintain_order=True)
+        .agg(pl.exclude(flags).first(), pl.col(flags).any())
     )
-    return query, profile
+
+    if sequences["id"].is_duplicated().any():
+        raise ValueError("A protein has different sequences in the two subsets.")
+    if sequences["sequence"].str.contains(f"[^{CANONICAL_AMINO_ACIDS}]").any():
+        raise ValueError("Sequences must contain only the 20 canonical amino acids.")
+    if not sites["category"].is_in(["T", "NT"]).all():
+        raise ValueError("Site categories must be T or NT.")
+    residues = sites.join(
+        sequences, left_on="sequence_name", right_on="id", how="left"
+    ).select(pl.col("sequence").str.slice(pl.col("position"), 1) == pl.col("wt_aa"))
+    if not residues.to_series().fill_null(False).all():
+        raise ValueError("Every site's wt_aa must match its sequence.")
+    return receipt["dataset"], sequences, sites
 
 
-def read_a3m_profiles(
-    a3m_dir: Path, min_consensus_freq: float, min_homologs: int
-) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """Build proteome and consensus frames from ``<id>.a3m`` files."""
-    ids, queries, profiles = [], [], []
-    skipped = 0
-    for path in sorted(a3m_dir.glob("*.a3m")):
-        sequences = read_a3m(path)
-        if len(sequences) - 1 < min_homologs:
-            skipped += 1
-            continue
-        protein_id = path.name.removesuffix(".a3m").removesuffix(".align")
-        query, profile = a3m_profile(sequences, min_consensus_freq)
-        ids.append(protein_id)
-        queries.append(query)
-        profiles.append(profile.with_columns(sequence_name=pl.lit(protein_id)))
-    logger.info(
-        "Read %d alignments; skipped %d with fewer than %d homologs.",
-        len(ids),
-        skipped,
-        min_homologs,
+def assign_folds(sequences: pl.DataFrame) -> pl.DataFrame:
+    """Deal proteins into folds, keeping identical sequences together.
+
+    Each group is named by its smallest id; sorted names are shuffled once and
+    assigned round-robin.
+    """
+    groups = sequences.with_columns(group=pl.col("id").min().over("sequence"))
+    names = np.array(sorted(groups["group"].unique()))
+    np.random.default_rng(FOLD_SEED).shuffle(names)
+    fold_of = {name: i % NUM_FOLDS for i, name in enumerate(names)}
+    return groups.select("id", fold=pl.col("group").replace_strict(fold_of))
+
+
+def read_folds(groups_path: Path, dataset: str) -> pl.DataFrame:
+    return (
+        pl.read_csv(groups_path)
+        .filter(pl.col("dataset") == dataset)
+        .select(id="sequence_name", fold="fold")
     )
-    proteome = pl.DataFrame({"id": ids, "sequence": queries})
-    return proteome, pl.concat(profiles)
 
 
 def build_calibration_frame(
-    proteome: pl.DataFrame, consensus: pl.DataFrame, min_consensus_freq: float
+    sequences: pl.DataFrame, sites: pl.DataFrame, folds: pl.DataFrame
 ) -> pl.DataFrame:
-    """Join profiles to sequences and group conserved positions per protein.
-
-    Proteins with any position whose ``wt_aa`` disagrees with the sequence (or
-    falls outside it) are dropped whole: their profile was built on another
-    isoform, so none of their positions can be trusted.
-    """
-    joined = consensus.join(
-        proteome, left_on="sequence_name", right_on="id", how="inner"
-    ).with_columns(
-        residue=pl.col("sequence").str.slice(pl.col("position"), 1),
+    """Group sites per protein, adding their bin, T/NT flag and fold."""
+    bins = np.searchsorted(
+        CONSERVATION_EDGES, sites["consensus_proportion"].to_numpy(), side="right"
     )
-    mismatched = joined.filter(pl.col("residue") != pl.col("wt_aa"))[
-        "sequence_name"
-    ].unique()
-    if mismatched.len():
-        logger.warning(
-            "Dropping %d proteins whose wt_aa disagrees with the sequence.",
-            mismatched.len(),
-        )
-
-    kept = joined.filter(
-        ~pl.col("sequence_name").is_in(mismatched.implode()),
-        pl.col("wt_aa").is_in(AA_COLUMNS),
-        pl.max_horizontal(AA_COLUMNS) >= min_consensus_freq,
-    )
+    aa_bits = {aa: 1 << i for i, aa in enumerate(AA_COLUMNS)}
+    sites = sites.with_columns(
+        is_t=pl.col("category") == "T",
+        bin=pl.Series(np.minimum(bins - 1, len(CONSERVATION_EDGES) - 2)),
+        consensus_mask=pl.col("consensus_aas")
+        .str.split("|")
+        .list.eval(pl.element().replace_strict(aa_bits))
+        .list.sum(),
+    ).join(folds, left_on="sequence_name", right_on="id", how="left")
+    if sites["fold"].is_null().any():
+        raise ValueError("Every protein needs a fold.")
     return (
-        kept.sort("sequence_name", "position")
+        sites.sort("sequence_name", "position")
         .group_by("sequence_name", maintain_order=True)
         .agg(
-            pl.col("sequence").first(),
-            pl.concat_list(pl.col("position").cast(pl.Float64), *AA_COLUMNS).alias(
-                "targets"
-            ),
+            pl.concat_list(
+                pl.col("position", *AA_COLUMNS, *SITE_FIELDS).cast(pl.Float64)
+            ).alias("targets")
         )
-        .rename({"sequence_name": "id"})
+        .join(sequences, left_on="sequence_name", right_on="id")
+        .select(id="sequence_name", sequence="sequence", targets="targets")
     )
 
 
 def write_card(
     output_dir: Path, config: SourceCalibrationConfig, frame: pl.DataFrame
 ) -> None:
-    num_positions = frame["targets"].list.len().sum()
-    if config.a3m_dir is not None:
-        source = (
-            "HHblits alignments (query counted in the profile, proteins with "
-            f"fewer than {config.min_homologs} homologs dropped)"
-        )
-    else:
-        source = "precomputed HHblits profiles"
+    sites = frame["targets"].explode()
+    field = {name: 1 + len(AA_COLUMNS) + i for i, name in enumerate(SITE_FIELDS)}
+    balanced = sites.list.get(field["in_balanced"]) == 1
+    high_nt = sites.list.get(field["in_high_nt"]) == 1
+    is_t = sites.list.get(field["is_t"]) == 1
     card = f"""---
 pretty_name: {config.dataset_name}
 ---
@@ -202,13 +178,18 @@ pretty_name: {config.dataset_name}
 
 Generated: {generated_utc_date()}
 
-Zero-shot calibration benchmark: proteins with conserved alignment columns
-(consensus frequency >= {config.min_consensus_freq}) from {source}.
-Evaluated with `task_type: calibration`.
+Zero-shot calibration benchmark: masked-residue predictions are compared to
+homolog amino-acid profiles. Evaluated with `task_type: calibration`.
 
-- `test`: {frame.height} proteins, {num_positions} conserved positions.
-- `targets`: per protein, a list of `[position, f_A, ..., f_Y]` (0-based
-  residue position, then homolog frequencies in `{CANONICAL_AMINO_ACIDS}` order).
+- `test`: {frame.height} proteins, {sites.len()} sites.
+- Balanced cohort: {(balanced & is_t).sum()} T and {(balanced & ~is_t).sum()} NT
+  sites over conservation bins `{CONSERVATION_EDGES}`.
+- High-NT cohort: {high_nt.sum()} NT sites with consensus >= 0.95.
+- `targets`: per protein, a list of `[position, f_A, ..., f_Y, is_t, bin, fold,
+  in_balanced, in_high_nt, consensus_mask]`: 0-based residue position, homolog
+  frequencies in `{CANONICAL_AMINO_ACIDS}` order, whether the residue is the
+  consensus (T), the conservation bin, the cross-fitting fold, cohort
+  membership, and a bitmask of the (possibly tied) consensus residues.
 
 [`stats.json`](stats.json) contains row counts and SeqKit metrics.
 """
@@ -216,22 +197,14 @@ Evaluated with `task_type: calibration`.
 
 
 def run(config: SourceCalibrationConfig) -> Path:
-    if config.a3m_dir is not None:
-        proteome, consensus = read_a3m_profiles(
-            config.a3m_dir, config.min_consensus_freq, config.min_homologs
-        )
-    else:
-        proteome = pl.read_csv(config.proteome_path, columns=["id", "sequence"])
-        consensus = pl.read_csv(
-            config.consensus_path,
-            columns=["sequence_name", "position", "wt_aa", *AA_COLUMNS],
-        )
-    frame = build_calibration_frame(proteome, consensus, config.min_consensus_freq)
-    logger.info(
-        "Built %d proteins with %d conserved positions.",
-        frame.height,
-        frame["targets"].list.len().sum(),
+    dataset, sequences, sites = read_export(config.export_dir)
+    folds = (
+        assign_folds(sequences)
+        if config.groups_path is None
+        else read_folds(config.groups_path, dataset)
     )
+    frame = build_calibration_frame(sequences, sites, folds)
+    logger.info("Built %d proteins with %d sites.", frame.height, sites.height)
 
     split_frames = {"test": frame}
     output_dir = prepare_output_dir(config, config.dataset_name)

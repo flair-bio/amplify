@@ -47,7 +47,7 @@ dataset's `targets`.
 | `token_classification` | One class per residue | `[0, 0, 2, 2, 2, 1, -100, …]` | One class index per residue (same length as the sequence); `-100` is ignored |
 | `contact_prediction` | Which residue pairs touch | `[[3, 17], [5, 40], …]` | Positive pairs only; other valid pairs at separation ≥ 6 are negatives |
 | `pseudo_perplexity` | Nothing (zero-shot) | none | Each residue is masked in turn and the model scores the original amino acid |
-| `calibration` | Homolog profile (zero-shot) | `[[12, f_A, …, f_Y], …]` | One `[position, 20 homolog frequencies]` entry per conserved column; `label_format: consensus_profile` |
+| `calibration` | Homolog profile (zero-shot) | `[[12, f_A, …, f_Y, is_t, bin, fold, in_balanced, in_high_nt, consensus_mask], …]` | One entry per scored site: position, 20 homolog frequencies and site fields; `label_format: consensus_profile` |
 
 **Why each task matters.** Each task tests a different kind of knowledge a
 protein language model should pick up from sequence alone:
@@ -73,12 +73,11 @@ protein language model should pick up from sequence alone:
   less surprising. It needs no labels, so it is a quick check of
   pretraining. Scores depend on the tokenizer, so compare them only between
   checkpoints of the same model.
-- **Calibration** masks each conserved residue of a human protein and compares
-  the model's distribution over the 20 amino acids to the frequencies seen in
-  its homologs (KL divergence). Positions split into T (human residue equals
-  the consensus) and NT (it differs); on NT, `accuracy_nt` counts consensus
-  predictions and `memorization_nt` counts predictions of the human residue,
-  which signals memorization rather than learned evolutionary constraint.
+- **Calibration** masks a residue and compares the model's distribution over
+  the 20 amino acids to the frequencies seen in its homologs (KL divergence).
+  Sites split into T (the residue equals the homolog consensus) and NT (it
+  differs). A cross-fitted temperature separates which residues the model
+  prefers from how sharp its distribution is.
 
 CASP contact prediction offers a zero-shot categorical-Jacobian predictor
 alongside its fitted readouts; both use the same contact-pair labels.
@@ -110,7 +109,7 @@ each task's `default_metric_names`; the task handlers in
 | UniProt ProtParam | `uniprot_protparams` (one property per run) | `sequence_regression` | R² |
 | AMPLIFY / UR100P | `uniprot_ur100p_test` | `pseudo_perplexity` | `pseudo_perplexity` |
 | Any sequence dataset | MLM models with a mask token | `pseudo_perplexity` | `pseudo_perplexity` |
-| HHblits/BFD homolog profiles | `human_calibration` (test split only) | `calibration` | `kl`, `kl_t`, `kl_nt`, `calibration`, `calibration_t`, `calibration_nt`, `accuracy_t`, `accuracy_nt`, `memorization_nt` |
+| omicMSA homolog profiles | `omicmsa_calibration` (test split only) | `calibration` | `calibration_t`, `calibration_nt`, `calibration_high_nt` |
 | ProteinGym | 4 assay tracks | Separate runners | Spearman (DMS), AUC (clinical), per assay |
 
 ProteinGym uses separate runners. The next section describes the active
@@ -716,34 +715,41 @@ the existing `uniprot_protparams` regression dataset remains separate.
 
 ### Calibration
 
-Human proteins with conserved alignment columns from HHblits searches against
-BFD. The published dataset was built from precomputed profiles. It can
-also be regenerated from HHblits alignments
+Sites from omicMSA homolog profiles, sourced from a precomputed export
 ([sourcing](dataset-sourcing.md#calibration)).
 
-#### `human_calibration`
+#### `omicmsa_calibration`
 
-**Question:** does the masked language model predict the evolutionary
-consensus at conserved positions, or the human residue it saw in training?
+**Question:** does the masked language model's distribution at a masked site
+match the amino-acid frequencies among the protein's homologs?
 
-- **Readout:** for each conserved column (consensus frequency ≥ 0.70), the
-  residue is masked inside a 512-residue window centred on it, and the
-  model's softmax over the 20 amino acids is compared to the homolog
-  frequencies. About 6.9k proteins and 1.85M positions, test split only.
-- **Metrics:** `kl` (mean KL divergence from homolog to model distribution,
-  also as `kl_t`/`kl_nt`), `calibration` (`100 × mean(exp(-KL))` over
-  positions, 100 is perfect agreement, also as
-  `calibration_t`/`calibration_nt`), `accuracy_t`/`accuracy_nt` (predicts the
-  consensus), and `memorization_nt` (predicts the human residue where it
-  differs from the consensus).
-- **Why it matters:** a model that has learned evolutionary constraints
-  should follow the consensus; a high `memorization_nt` suggests it memorized
-  the human sequences instead.
-- **Run:** [`human_calibration.yaml`](../configs/datasets/human_calibration.yaml)
+- **Cohorts:** a balanced cohort of 18,000 sites, 1,000 per T/NT ×
+  conservation bin (consensus share in `[0, 0.2, 0.3, …, 0.9, 1.0]`), and a
+  high-NT cohort of 4,580 NT sites with consensus ≥ 0.95; 326 sites are in
+  both. 18,058 proteins, test split only.
+- **Readout:** each site is masked inside a 512-residue window centred on it,
+  and the model's raw logits over the 20 amino acids are kept.
+- **Metrics:** `calibration_{t,nt,high_nt}` (`100 × exp(-mean KL)` per cohort,
+  KL from homolog to model distribution at temperature 1; 100 is perfect
+  agreement), `calibration_fit_{t,nt,high_nt}` (the same at the cross-fitted
+  temperature), `kl_{t,nt,high_nt}`, `accuracy_{t,nt,high_nt}` (the argmax is
+  the consensus) and `temperature` (mean of the per-fold fits). Per
+  conservation bin, `calibration[_fit]_{t,nt}_bin{0..8}` give the balanced
+  cohort scores (bin 0 is `[0, 0.2)`, bin 8 is `[0.9, 1]`). The core three are
+  reported by default.
+- **Temperature:** proteins are split into 5 folds (identical sequences
+  together). For each fold, one temperature in `[0.25, 8]` is fitted on the
+  balanced sites of the other four folds, minimizing the mean KL with equal
+  weight per T/NT × bin stratum, and applied to the held-out fold's sites,
+  including high-NT ones. Each control gets its own fitted temperature.
+  Bootstrap intervals hold the fitted temperatures fixed.
+- **Why it matters:** the temperature-1 score mixes which residues a model
+  prefers with how sharp its distribution is; the fitted score isolates the
+  former.
+- **Run:** [`omicmsa_calibration.yaml`](../configs/datasets/omicmsa_calibration.yaml)
   with [`tasks/calibration.yaml`](../configs/tasks/calibration.yaml), which
   keeps full sequences (`max_length: 100000`) so the handler can centre its
-  own window. Each position is a separate forward pass, so a full run is
-  1.85M masked forwards.
+  own window. Each site is a separate forward pass (22,254 in total).
 
 ---
 

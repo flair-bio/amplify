@@ -30,7 +30,7 @@ from sklearn.metrics import (
 from sklearn.utils.validation import check_array
 
 LOWER_IS_BETTER_METRICS = frozenset(
-    {"mse", "mae", "pseudo_perplexity", "kl", "kl_t", "kl_nt"}
+    {"mse", "mae", "pseudo_perplexity", "kl_t", "kl_nt", "kl_high_nt"}
 )
 
 
@@ -255,67 +255,6 @@ def mean_log_prob(predictions: Any, labels: Any, average: str) -> float:
 
 def pseudo_perplexity(predictions: Any, labels: Any, average: str) -> float:
     return float(np.exp(-np.mean(predictions)))
-
-
-# Calibration rows: predictions are [kl, pred_idx], labels are
-# [wt_idx, consensus_idx]. T positions have wt == consensus, NT the rest.
-def _calibration_arrays(
-    predictions: Any, labels: Any
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    preds = np.asarray(predictions, dtype=float).reshape(-1, 2)
-    labels_arr = np.asarray(labels, dtype=int).reshape(-1, 2)
-    wt, consensus = labels_arr[:, 0], labels_arr[:, 1]
-    return preds[:, 0], preds[:, 1].astype(int), wt, consensus, wt == consensus
-
-
-def _mean_or_nan(values: np.ndarray) -> float:
-    return float(values.mean()) if values.size else float("nan")
-
-
-def calibration_kl(predictions: Any, labels: Any, average: str) -> float:
-    kl, *_ = _calibration_arrays(predictions, labels)
-    return _mean_or_nan(kl)
-
-
-def calibration_kl_t(predictions: Any, labels: Any, average: str) -> float:
-    kl, _, _, _, is_t = _calibration_arrays(predictions, labels)
-    return _mean_or_nan(kl[is_t])
-
-
-def calibration_kl_nt(predictions: Any, labels: Any, average: str) -> float:
-    kl, _, _, _, is_t = _calibration_arrays(predictions, labels)
-    return _mean_or_nan(kl[~is_t])
-
-
-# Calibration agreement: 100 times the mean of per-position exp(-KL).
-def calibration_score(predictions: Any, labels: Any, average: str) -> float:
-    kl, *_ = _calibration_arrays(predictions, labels)
-    return 100.0 * _mean_or_nan(np.exp(-kl))
-
-
-def calibration_score_t(predictions: Any, labels: Any, average: str) -> float:
-    kl, _, _, _, is_t = _calibration_arrays(predictions, labels)
-    return 100.0 * _mean_or_nan(np.exp(-kl[is_t]))
-
-
-def calibration_score_nt(predictions: Any, labels: Any, average: str) -> float:
-    kl, _, _, _, is_t = _calibration_arrays(predictions, labels)
-    return 100.0 * _mean_or_nan(np.exp(-kl[~is_t]))
-
-
-def calibration_accuracy_t(predictions: Any, labels: Any, average: str) -> float:
-    _, pred, _, consensus, is_t = _calibration_arrays(predictions, labels)
-    return _mean_or_nan(pred[is_t] == consensus[is_t])
-
-
-def calibration_accuracy_nt(predictions: Any, labels: Any, average: str) -> float:
-    _, pred, _, consensus, is_t = _calibration_arrays(predictions, labels)
-    return _mean_or_nan(pred[~is_t] == consensus[~is_t])
-
-
-def calibration_memorization_nt(predictions: Any, labels: Any, average: str) -> float:
-    _, pred, wt, _, is_t = _calibration_arrays(predictions, labels)
-    return _mean_or_nan(pred[~is_t] == wt[~is_t])
 
 
 def r2(predictions: Any, labels: Any, average: str) -> float:

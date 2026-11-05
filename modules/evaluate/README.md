@@ -248,7 +248,7 @@ including chains of 2,048 residues or longer; the plan's length exclusion is def
 | `token_classification` | One class per residue |
 | `contact_prediction` | Which residue pairs touch (fixed CASP protocol) |
 | `pseudo_perplexity` | Nothing; scores masked residues, zero-shot |
-| `calibration` | Homolog amino-acid profiles at conserved positions, zero-shot |
+| `calibration` | Homolog amino-acid profiles at masked sites, zero-shot |
 
 `pseudo_perplexity` and `calibration` run only with
 `steps.mode=evaluate_as_is`. Target formats, why each task matters, and default
@@ -330,9 +330,8 @@ Spearman for Meltome and the current stability dataset) while selecting by the
 benchmark metric. Other primary metrics include long-range contact AUC,
 calibration agreement, and pseudo-perplexity. Stability's intended grouped
 Macro-Spearman still requires verified parent-design metadata and scorer support. Calibration
-agreement reports `100 × mean(exp(-KL))` over per-position KL values; it does
-not exponentiate the mean KL. The target/non-target breakdowns use the same
-scale and aggregation.
+agreement reports `100 × exp(-mean KL)` per cohort (T, NT, high-NT), at
+temperature 1 and at a cross-fitted temperature.
 Classification F1 includes every class configured by `workspace.num_labels`,
 even when absent from a split or resample (zero F1 for an absent class).
 This includes background class 0, both binary classes, all three Q3 states,
@@ -928,7 +927,7 @@ custom metrics, and unsupported aggregation modes retain the existing path.
 
 | Field | Default | Description |
 |---|---|---|
-| `metrics` | `null` | List of metrics to compute (task-specific defaults apply when unset), e.g. `accuracy`, `f1`, `precision`, `recall`, `average_precision`, `roc_auc`, `mcc`, `mse`, `r2`, `pearsonr`, `spearmanr`, `contact_precision_at_l_long`, `contact_auc_long`, `pseudo_perplexity`, `mean_log_prob`, `kl`, `kl_t`, `kl_nt`, `calibration`, `calibration_t`, `calibration_nt`, `accuracy_t`, `accuracy_nt`, `memorization_nt` |
+| `metrics` | `null` | List of metrics to compute (task-specific defaults apply when unset), e.g. `accuracy`, `f1`, `precision`, `recall`, `average_precision`, `roc_auc`, `mcc`, `mse`, `r2`, `pearsonr`, `spearmanr`, `contact_precision_at_l_long`, `contact_auc_long`, `pseudo_perplexity`, `mean_log_prob`, `calibration_t`, `calibration_nt`, `calibration_high_nt`, `calibration_fit_t`, `kl_t`, `accuracy_t`, `temperature` (and the `_nt`/`_high_nt` variants), `calibration_t_bin0` (per conservation bin, see [datasets](docs/datasets.md)) |
 | `metric_aggregation` | `weighted` | scikit-learn `average` for classification metrics: `micro` pools all classes/labels, `macro` weights each class equally (exposes rare-class failures), `weighted` weights classes by support, `samples` averages per example (multilabel only). Ignored by regression metrics and single-label MCC |
 | `bootstrap_enabled` | `false` | Enable bootstrap confidence intervals + control comparisons |
 | `n_samples` | `1000` | Bootstrap resamples; the code warns when below 1000 because confidence-interval tails are poorly estimated |
