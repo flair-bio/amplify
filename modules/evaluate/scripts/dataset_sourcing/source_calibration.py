@@ -67,10 +67,10 @@ def read_export(export_dir: Path) -> tuple[str, pl.DataFrame, pl.DataFrame]:
     if receipt["selection"]["edges"] != CONSERVATION_EDGES:
         raise ValueError(f"Expected conservation bin edges {CONSERVATION_EDGES}.")
 
-    sequences, sites = [], []
+    sequence_frames, site_frames = [], []
     for subset in SUBSETS:
         directory = export_dir / subset
-        sequences.append(pl.read_csv(directory / "sequences.csv"))
+        sequence_frames.append(pl.read_csv(directory / "sequences.csv"))
         support = pl.read_csv(
             directory / "position_support.csv",
             columns=[
@@ -81,17 +81,17 @@ def read_export(export_dir: Path) -> tuple[str, pl.DataFrame, pl.DataFrame]:
                 "consensus_proportion",
             ],
         )
-        sites.append(
+        site_frames.append(
             pl.read_csv(directory / "consensus_positions.csv")
             .join(support, on=["sequence_name", "position"], validate="1:1")
             .with_columns(
                 **{flag: pl.lit(name == subset) for name, flag in SUBSETS.items()}
             )
         )
-    sequences = pl.concat(sequences).unique().sort("id")
+    sequences = pl.concat(sequence_frames).unique().sort("id")
     flags = list(SUBSETS.values())
     sites = (
-        pl.concat(sites)
+        pl.concat(site_frames)
         .group_by("sequence_name", "position", maintain_order=True)
         .agg(pl.exclude(flags).first(), pl.col(flags).any())
     )
