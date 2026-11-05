@@ -262,7 +262,8 @@ def test_identity_changes_with_data_and_protocol(tmp_path, change):
     )
 
 
-def test_external_baseline_keeps_source_training_prior(tmp_path, monkeypatch):
+@pytest.mark.parametrize("subsets", [False, True])
+def test_external_baseline_keeps_source_training_prior(tmp_path, monkeypatch, subsets):
     config, data = _config(tmp_path), _data()
     config = BaselineRunConfig.model_validate(
         {
@@ -275,22 +276,35 @@ def test_external_baseline_keeps_source_training_prior(tmp_path, monkeypatch):
     external = DatasetDict(
         {
             "holdout": Dataset.from_dict(
-                {"sequence": ["WWW"], "targets": [0], "id": ["external"]}
+                {
+                    "sequence": ["WWW", "AAA"], "targets": [0, 0],
+                    "id": ["external", "other"], "cohort": ["a", "b"],
+                }
             )
         }
     )
     config.external_test_sets[0].split = "holdout"
+    if subsets:
+        config.external_test_sets[0].test_subsets = {
+            "a": {"cohort": "a"}, "b": {"cohort": "b"}
+        }
     monkeypatch.setattr(dataloader, "load_raw_evaluation_dataset", lambda _: external)
     paths = run_baselines(config, dataset=data)
-    frame = pl.read_parquet(paths["external/heldout"]["majority_class"])
-    assert frame["prediction"].to_list() == [1]
-    assert frame["id"].to_list() == ["external"]
+    label = "external/heldout/tests/a" if subsets else "external/heldout"
+    frame = pl.read_parquet(paths[label]["majority_class"])
+    assert frame["prediction"].to_list() == ([1] if subsets else [1, 1])
+    assert frame["id"].to_list() == (["external"] if subsets else ["external", "other"])
+    if subsets:
+        other = pl.read_parquet(paths["external/heldout/tests/b"]["majority_class"])
+        assert other["prediction"].to_list() == [1]
+        assert other["id"].to_list() == ["other"]
     manifest = json.loads(
-        paths["external/heldout"]["majority_class"]
+        paths[label]["majority_class"]
         .with_name("run_manifest.json")
         .read_text()
     )
     assert manifest["identity"]["test"]["dataset"] == "org/heldout"
+    assert manifest["identity"]["test"]["split"] == "holdout"
     assert manifest["identity"]["fit"] == _context(config, data)["fit"]
 
 

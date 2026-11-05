@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import polars as pl
 import pytest
 import torch
+from datasets import Dataset, DatasetDict
 
 from modules.evaluate.src.contracts.artifacts import (
     EvaluationMetadata,
@@ -17,6 +18,7 @@ from modules.evaluate.src.contracts.artifacts import (
 from modules.evaluate.src.contracts.config import EvaluationConfig
 from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.runners import pipeline
+from modules.evaluate.src.steps.prepare import PrepareStep
 
 
 def _config(mode: str) -> EvaluationConfig:
@@ -51,14 +53,28 @@ def _stub_steps(monkeypatch, calls):
 
     class Prepare:
         def __init__(self, config):
-            pass
+            self.config = config
 
         def run(self, workspace, **kwargs):
             return prepared
 
+        def resolve_test_subsets(self, workspace, subsets, **kwargs):
+            return PrepareStep(self.config).resolve_test_subsets(workspace, subsets, **kwargs)
+
         def prepare_external_test(self, workspace, base, external, **kwargs):
             return SimpleNamespace(
-                contact=None, model=base.model, test_dataloader=external.name
+                contact=None,
+                model=base.model,
+                test_dataloader=(
+                    list(kwargs["dataset"]["test"]["id"])
+                    if kwargs.get("dataset") is not None
+                    else external.name
+                ),
+            )
+
+        def prepare_test_subset(self, workspace, base, name, dataset, *, external, **kwargs):
+            return self.prepare_external_test(
+                workspace, base, external, dataset=dataset, **kwargs
             )
 
     class Tune:
@@ -141,6 +157,39 @@ def test_external_set_reuses_fitted_model_without_retuning(
     assert result.evaluations[0].score is result.scores[None]
     assert not (workspace.run_root / "log").exists()
     assert not list(tmp_path.rglob("logs"))
+
+
+def test_external_subsets_share_fitting_and_preserve_source_split(
+    monkeypatch, tmp_path
+):
+    from modules.evaluate.src.dataset import dataloader
+
+    calls = []
+    _stub_steps(monkeypatch, calls)
+    raw = DatasetDict({
+        "holdout": Dataset.from_dict({
+            "id": ["a", "b", "unselected"], "cohort": ["a", "b", "c"],
+        }),
+    })
+    monkeypatch.setattr(dataloader, "load_raw_evaluation_dataset", lambda _: raw)
+    config = _config("tune_probe")
+    config.workspace.base_path = str(tmp_path)
+    external = config.external_test_sets[0]
+    external.split = "holdout"
+    external.test_subsets = {"a": {"cohort": "a"}, "b": {"cohort": "b"}}
+    workspace = get_evaluation_workspace(config.workspace, variant=config.variant)
+    result = pipeline.run_pipeline(config, workspace, _Accelerator())
+    assert calls[0][0] == "tune"
+    assert calls[1][:2] == ("org/loc", "main")
+    assert calls[2][:2] == ("org/sethard", ["a"])
+    assert calls[3][:2] == ("org/sethard", ["b"])
+    assert len({call[2] for call in calls[1:]}) == 1
+    assert set(result.external["sethard"].test_subsets) == {"a", "b"}
+    manifest = json.loads(
+        result.external["sethard"].test_subsets["b"].evaluations[0]
+        .workspace.run_manifest_path.read_text()
+    )
+    assert manifest["tests"]["b"]["evaluation"]["filters"] == {"cohort": "b"}
 
 
 @pytest.mark.parametrize("mode", ["tune_probe", "evaluate_as_is"])

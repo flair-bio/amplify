@@ -115,6 +115,21 @@ class ExternalTestSetConfig(BaseModel):
     dataset_config_name: str | None = Field(None, min_length=1)
     dataset_revision: str | None = None
     split: str = Field("test", min_length=1)
+    test_subsets: TestSubsets = Field(default_factory=dict)
+
+    @field_validator("test_subsets", mode="before")
+    @classmethod
+    def _normalize_test_subsets(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                name: filters for name, filters in value.items() if filters is not None
+            }
+        return {} if value is None else value
+
+    @field_validator("test_subsets")
+    @classmethod
+    def _validate_test_subsets(cls, value: TestSubsets) -> TestSubsets:
+        return validate_test_subsets(value)
 
 
 class DatasetSplitConfig(BaseModel):

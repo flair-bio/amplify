@@ -74,6 +74,8 @@ class TaskHandler(ABC):
     name: ClassVar[str]
     class_labels: tuple[int, ...] | None = None
     uses_predictor_identity: ClassVar[bool] = False
+    supports_zero_shot_transfer: ClassVar[bool] = False
+    test_group_column: ClassVar[str | None] = None
     supports_packing: ClassVar[bool] = True
     supports_layerwise: ClassVar[bool] = False
     fixed_protocol: ClassVar[bool] = False
@@ -188,6 +190,12 @@ class TaskHandler(ABC):
 
     def validate_config(self, config: EvaluationConfig) -> None:
         """Validate scientific constraints beyond generic stage compatibility."""
+
+    def validate_test_source(self, source: str, revision: str | None) -> None:
+        """Validate a test source before loading it."""
+
+    def validate_test_dataset(self, dataset: DatasetDict) -> None:
+        """Validate source observations before selecting test subsets."""
 
     def validate_head(self, head_type: str) -> None:
         if head_type not in self.supported_head_types:
@@ -650,6 +658,16 @@ class FlatMetricsTask(TaskHandler, abstract=True):
 
 class StructuredTask(TaskHandler, abstract=True):
     """Tasks scored using structured prediction records."""
+
+    def prepare_test_inputs(
+        self,
+        prepared: PreparedArtifacts,
+        *,
+        inputs: EvaluationWorkspaceConfig,
+        dataset: DatasetDict,
+    ) -> PreparedArtifacts:
+        """Reuse scientific predictors with another test dataset."""
+        raise NotImplementedError(f"Task '{self.name}' does not support test transfer.")
 
     @abstractmethod
     def prepare_inputs(

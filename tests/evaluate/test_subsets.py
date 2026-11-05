@@ -15,7 +15,11 @@ from modules.evaluate.src.contracts.artifacts import (
     PreparedArtifacts,
     ScoreOutput,
 )
-from modules.evaluate.src.contracts.config import EvaluationConfig, PredictConfig
+from modules.evaluate.src.contracts.config import (
+    EvaluationConfig,
+    ExternalTestSetConfig,
+    PredictConfig,
+)
 from modules.evaluate.src.contracts.config_loader import (
     load_baseline_config,
     load_evaluation_config,
@@ -24,6 +28,7 @@ from modules.evaluate.src.dataset.contact import prepare_contact_dataset
 from modules.evaluate.src.dataset.subsets import select_test_subsets
 from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.runners import pipeline
+from modules.evaluate.src.steps.prepare import PrepareStep
 from modules.evaluate.src.tasks import get_task
 from modules.evaluate.src.tasks.contact_prediction import (
     contact_development_attention_fingerprint,
@@ -102,6 +107,52 @@ def test_selection_preserves_development_and_all_chain_units():
         select_test_subsets(data, {"missing": {"typo": 14}})
     with pytest.raises(ValueError, match="empty"):
         select_test_subsets(data, {"empty": {"edition": 17}})
+
+
+def test_external_contact_selection_validates_source_and_chain_units(
+    monkeypatch, tmp_path
+):
+    from modules.evaluate.src.dataset import dataloader
+    from .test_contact_embedding import config_for
+
+    config = config_for(tmp_path, tmp_path / "model")
+    workspace = get_evaluation_workspace(config.workspace, config.variant, seed=config.seed)
+    eu = row(kind="intra_eu", unit_id="D1", positions=[0, 6], valid_positions=[0, 6])
+    data = hf_data([row(), eu, row("c15", edition=15)])
+    calls = []
+
+    def load(*args, **kwargs):
+        calls.append((args, kwargs))
+        return data
+
+    monkeypatch.setattr(dataloader, "load_raw_evaluation_dataset", load)
+    step = PrepareStep(config.steps.prepare)
+    external = ExternalTestSetConfig(
+        name="heldout",
+        dataset_repo_id="org/contacts",
+        dataset_config_name="casp",
+        test_subsets={"casp15": {"edition": 15}},
+    )
+    with pytest.raises(ValueError, match="commit SHA"):
+        step.resolve_test_subsets(
+            workspace, external.test_subsets, external=external, seed=config.seed
+        )
+    assert calls == []
+    external.dataset_revision = "a" * 40
+    subsets = step.resolve_test_subsets(
+        workspace, external.test_subsets, external=external, seed=config.seed
+    )
+    assert set(subsets["casp15"]) == {"test"}
+    assert list(subsets["casp15"]["test"]["record_id"]) == ["c15"]
+    assert calls[0][1] == {"config_name": "casp", "revision": "a" * 40}
+    for filters, error in (
+        ({"kind": "global"}, "all scoring units"),
+        ({"edition": 17}, "empty"),
+    ):
+        with pytest.raises(ValueError, match=error):
+            step.resolve_test_subsets(
+                workspace, {"invalid": filters}, external=external, seed=config.seed
+            )
 
 
 def test_generic_baselines_use_matching_subset_artifacts(tmp_path):
@@ -223,6 +274,9 @@ def test_pipeline_fits_once_and_predicts_only_selected_subsets(
     class Prepare:
         def __init__(self, _config):
             pass
+
+        def resolve_test_subsets(self, workspace, subsets, *, dataset, **kwargs):
+            return select_test_subsets(dataset, subsets)
 
         def run(self, workspace, *, dataset, **kwargs):
             return PreparedArtifacts(

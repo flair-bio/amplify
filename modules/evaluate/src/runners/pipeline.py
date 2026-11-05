@@ -20,10 +20,8 @@ from modules.evaluate.src.contracts.artifacts import (
 from modules.evaluate.src.contracts.config import (
     EvaluationConfig,
     ExternalTestSetConfig,
+    TestSubsets,
 )
-from modules.evaluate.src.dataset.contact import prepare_contact_dataset
-from modules.evaluate.src.dataset.dataloader import resolve_evaluation_data
-from modules.evaluate.src.dataset.subsets import select_test_subsets
 from modules.evaluate.src.dataset.workspace import (
     EvaluationWorkspace,
     get_evaluation_workspace,
@@ -89,7 +87,7 @@ def _reserve_outputs(
         if accelerator.is_main_process:
             try:
                 workspaces = [workspace]
-                if config.steps.mode != "evaluate_as_is":
+                if _supports_external_tests(config, workspace):
                     workspaces.extend(
                         _external_workspace(workspace, external)
                         for external in config.external_test_sets
@@ -136,28 +134,17 @@ def _execute_steps(
     dataset: DatasetDict | None,
 ) -> PipelineResult:
     logger.info("Preparing evaluation inputs")
+    prepare_step = PrepareStep(config.steps.prepare)
     subsets: dict[str, DatasetDict] = {}
     if config.steps.predict.test_subsets:
-        dataset = resolve_evaluation_data(
-            workspace.dataset_repo_id or workspace.dataset_name,
-            split=config.steps.prepare.split,
-            seed=config.seed,
-            validation_fraction=config.steps.prepare.validation_fraction,
-            dataset=dataset,
-            config_name=config.workspace.dataset_config_name,
-            revision=config.workspace.dataset_revision,
-        )
-        if workspace.task_type == "contact_prediction":
-            prepare_contact_dataset(dataset)
-        subsets = select_test_subsets(
-            dataset,
+        subsets = prepare_step.resolve_test_subsets(
+            workspace,
             config.steps.predict.test_subsets,
-            group_column="record_id"
-            if workspace.task_type == "contact_prediction"
-            else None,
+            seed=config.seed,
+            dataset=dataset,
         )
         dataset = next(iter(subsets.values()))
-    prepared = PrepareStep(config.steps.prepare).run(
+    prepared = prepare_step.run(
         workspace,
         seed=config.seed,
         accelerator=accelerator,
@@ -195,48 +182,15 @@ def _execute_steps(
         fitted=tuned,
     )
     if subsets:
-        result = PipelineResult([])
-        prepare_step = PrepareStep(config.steps.prepare)
-        for index, (name, subset_data) in enumerate(subsets.items()):
-            subset_workspace = workspace.test_workspace(name)
-            subset_workspace.setup_directories()
-            evaluation = {
-                "status": "running",
-                "test_subset": name,
-                "filters": config.steps.predict.test_subsets[name],
-                "parent_manifest": str(workspace.run_manifest_path),
-                "model_path": str(workspace.model_path),
-            }
-            if accelerator.is_main_process:
-                update_run_manifest(
-                    workspace.run_manifest_path,
-                    "evaluation",
-                    evaluation,
-                    namespace=subset_workspace.manifest_namespace,
-                )
-            subset_prepared = (
-                prepared
-                if index == 0
-                else prepare_step.prepare_test_subset(
-                    workspace,
-                    prepared,
-                    name,
-                    subset_data,
-                    accelerator=accelerator,
-                    seed=config.seed,
-                    layerwise_config=config.steps.layerwise,
-                )
-            )
-            result.test_subsets[name] = _predict_and_score(
-                config, subset_workspace, subset_prepared, accelerator, tuned=tuned
-            )
-            if accelerator.is_main_process:
-                update_run_manifest(
-                    workspace.run_manifest_path,
-                    "evaluation",
-                    {**evaluation, "status": "complete"},
-                    namespace=subset_workspace.manifest_namespace,
-                )
+        result = _evaluate_test_subsets(
+            config,
+            workspace,
+            prepared,
+            accelerator,
+            subsets,
+            config.steps.predict.test_subsets,
+            tuned=tuned,
+        )
     else:
         result = _predict_and_score(
             config, workspace, prepared, accelerator, tuned=tuned
@@ -245,6 +199,73 @@ def _execute_steps(
         config, workspace, prepared, accelerator, tuned=tuned
     )
     accelerator.wait_for_everyone()
+    return result
+
+
+def _supports_external_tests(
+    config: EvaluationConfig, workspace: EvaluationWorkspace
+) -> bool:
+    return (
+        config.steps.mode != "evaluate_as_is"
+        or get_task(workspace.task_type).supports_zero_shot_transfer
+    )
+
+
+def _evaluate_test_subsets(
+    config: EvaluationConfig,
+    workspace: EvaluationWorkspace,
+    prepared: PreparedArtifacts,
+    accelerator: Any,
+    subsets: dict[str, DatasetDict],
+    filters: TestSubsets,
+    *,
+    tuned: bool,
+    external: ExternalTestSetConfig | None = None,
+) -> PipelineResult:
+    """Publish named selections identically for main and external test sources."""
+    result = PipelineResult([])
+    prepare_step = PrepareStep(config.steps.prepare)
+    for index, (name, subset_data) in enumerate(subsets.items()):
+        subset_workspace = workspace.test_workspace(name)
+        subset_workspace.setup_directories()
+        evaluation = {
+            "status": "running",
+            "test_subset": name,
+            "filters": filters[name],
+            "parent_manifest": str(workspace.run_manifest_path),
+            "model_path": str(workspace.model_path),
+        }
+        if accelerator.is_main_process:
+            update_run_manifest(
+                workspace.run_manifest_path,
+                "evaluation",
+                evaluation,
+                namespace=subset_workspace.manifest_namespace,
+            )
+        subset_prepared = (
+            prepared
+            if index == 0
+            else prepare_step.prepare_test_subset(
+                workspace,
+                prepared,
+                name,
+                subset_data,
+                accelerator=accelerator,
+                seed=config.seed,
+                layerwise_config=config.steps.layerwise,
+                external=external,
+            )
+        )
+        result.test_subsets[name] = _predict_and_score(
+            config, subset_workspace, subset_prepared, accelerator, tuned=tuned
+        )
+        if accelerator.is_main_process:
+            update_run_manifest(
+                workspace.run_manifest_path,
+                "evaluation",
+                {**evaluation, "status": "complete"},
+                namespace=subset_workspace.manifest_namespace,
+            )
     return result
 
 
@@ -257,17 +278,28 @@ def _evaluate_external_tests(
     tuned: bool,
 ) -> dict[str, PipelineResult]:
     """Evaluate the same fitted predictor without repeating tuning or controls."""
-    if config.external_test_sets and not tuned:
+    supported = _supports_external_tests(config, workspace)
+    if config.external_test_sets and not supported:
         logger.warning(
             "Skipping external_test_sets: steps.mode=evaluate_as_is has no "
             "fitted probe to transfer."
         )
-    if not tuned or not config.external_test_sets:
+    if not supported or not config.external_test_sets:
         return {}
     results = {}
     prepare_step = PrepareStep(config.steps.prepare)
     for external in config.external_test_sets:
         logger.info("Evaluating external test set '%s'", external.name)
+        subsets = (
+            prepare_step.resolve_test_subsets(
+                workspace,
+                external.test_subsets,
+                seed=config.seed,
+                external=external,
+            )
+            if external.test_subsets
+            else {}
+        )
         external_prepared = prepare_step.prepare_external_test(
             workspace,
             prepared,
@@ -275,11 +307,26 @@ def _evaluate_external_tests(
             accelerator=accelerator,
             seed=config.seed,
             layerwise_config=config.steps.layerwise,
+            dataset=next(iter(subsets.values()), None),
         )
         external_workspace = _external_workspace(workspace, external)
+        external_workspace.model_path = workspace.model_path
         external_workspace.setup_directories()
-        results[external.name] = _predict_and_score(
-            config, external_workspace, external_prepared, accelerator, tuned=tuned
+        results[external.name] = (
+            _evaluate_test_subsets(
+                config,
+                external_workspace,
+                external_prepared,
+                accelerator,
+                subsets,
+                external.test_subsets,
+                tuned=tuned,
+                external=external,
+            )
+            if subsets
+            else _predict_and_score(
+                config, external_workspace, external_prepared, accelerator, tuned=tuned
+            )
         )
     return results
 

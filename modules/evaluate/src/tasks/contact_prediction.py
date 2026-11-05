@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import numpy as np
@@ -72,7 +72,9 @@ from modules.evaluate.src.dataset.contact import (
     ContactTokens,
     load_contact_dataset,
     prepare_contact_dataset,
+    prepare_contact_test_dataset,
     tokenize_contact_chain,
+    validate_contact_source,
 )
 
 
@@ -161,6 +163,8 @@ class ContactPredictionTask(StructuredTask):
     supported_controls = frozenset({"random_trunk"})
     dataset_baselines = frozenset({"separation_prior"})
     uses_predictor_identity = True
+    supports_zero_shot_transfer = True
+    test_group_column = "record_id"
     is_ragged = True
     pairwise = True
     aligns_labels = True
@@ -180,6 +184,30 @@ class ContactPredictionTask(StructuredTask):
         *contact_metrics.PRECISION_METRICS,
         *contact_metrics.RANGE_AUC_METRICS,
     )
+
+    def validate_test_source(self, source: str, revision: str | None) -> None:
+        validate_contact_source(source, revision)
+
+    def validate_test_dataset(self, dataset: DatasetDict) -> None:
+        prepare_contact_test_dataset(dataset)
+
+    def prepare_test_inputs(
+        self,
+        prepared: PreparedArtifacts,
+        *,
+        inputs: EvaluationWorkspaceConfig,
+        dataset: DatasetDict,
+    ) -> PreparedArtifacts:
+        return replace(
+            prepared,
+            contact=ContactArtifacts(
+                dataset=prepare_contact_test_dataset(
+                    dataset,
+                    source=inputs.dataset_repo_id or inputs.dataset_name,
+                    revision=inputs.dataset_revision,
+                )
+            ),
+        )
 
     def prepare_inputs(
         self,
@@ -251,13 +279,9 @@ class ContactPredictionTask(StructuredTask):
             config.workspace.label_format,
             config.workspace.dataset_name,
         )
-        if (
-            config.external_test_sets
-            or steps.layerwise.enabled
-            or steps.predict.baselines
-        ):
+        if steps.layerwise.enabled or steps.predict.baselines:
             raise ValueError(
-                "Contact prediction requires fixed CASP splits, without generic external tests/layers/inline baselines"
+                "Contact prediction requires fixed CASP splits, without generic layers/inline baselines"
             )
         if steps.prepare.packed or steps.prepare.split.model_dump() != {
             "name": "default",

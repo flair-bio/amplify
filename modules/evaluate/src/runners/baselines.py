@@ -37,14 +37,14 @@ from modules.evaluate.src.dataset.baseline_data import (
 )
 from modules.evaluate.src.dataset.contact import (
     load_contact_dataset,
-    prepare_contact_dataset,
+    prepare_contact_test_dataset,
     separation_prior_prediction_rows,
 )
 from modules.evaluate.src.dataset.dataloader import (
     resolve_evaluation_data,
     resolve_external_data,
 )
-from modules.evaluate.src.dataset.subsets import select_test_subsets
+from modules.evaluate.src.dataset.subsets import resolve_test_subsets
 from modules.evaluate.src.model.baselines import (
     build_amino_acid_frequency_baseline,
     build_sequence_baseline,
@@ -62,23 +62,12 @@ def run_baselines(
     """Build shared baselines for the main and external test datasets."""
     workspace, prepare = config.workspace, config.prepare
     if config.test_subsets:
-        data = resolve_evaluation_data(
-            workspace.dataset_repo_id or workspace.dataset_name,
-            split=prepare.split,
-            seed=config.seed,
-            validation_fraction=prepare.validation_fraction,
-            dataset=dataset,
-            config_name=workspace.dataset_config_name,
-            revision=workspace.dataset_revision,
-        )
-        if workspace.task_type == "contact_prediction":
-            prepare_contact_dataset(data)
-        subsets = select_test_subsets(
-            data,
+        subsets = resolve_test_subsets(
+            workspace,
+            prepare,
             config.test_subsets,
-            group_column="record_id"
-            if workspace.task_type == "contact_prediction"
-            else None,
+            seed=config.seed,
+            dataset=dataset,
         )
         subset_results: dict[str, dict[str, Path]] = {}
         for index, (name, subset) in enumerate(subsets.items()):
@@ -97,11 +86,38 @@ def run_baselines(
             subset_results.update(subset_outputs)
         return subset_results
     if workspace.task_type == "contact_prediction":
-        if config.external_test_sets:
-            raise ValueError(
-                "Contact separation_prior does not support external test sets."
+        contact_outputs = _run_contact_baselines(config, dataset)
+        for external in config.external_test_sets:
+            get_task(workspace.task_type).validate_test_source(
+                external.dataset_repo_id, external.dataset_revision
             )
-        return _run_contact_baselines(config, dataset)
+            external_data = resolve_external_data(
+                external.dataset_repo_id,
+                external.split,
+                config_name=external.dataset_config_name,
+                revision=external.dataset_revision,
+            )
+            external_outputs = run_baselines(
+                config.model_copy(
+                    update={
+                        "workspace": workspace.model_copy(
+                            update={
+                                "dataset_name": external.name,
+                                "dataset_repo_id": external.dataset_repo_id,
+                                "dataset_config_name": external.dataset_config_name,
+                                "dataset_revision": external.dataset_revision,
+                            }
+                        ),
+                        "test_subsets": external.test_subsets,
+                        "external_test_sets": [],
+                    }
+                ),
+                dataset=external_data,
+            )
+            for name, paths in external_outputs.items():
+                label = f"external/{external.name}"
+                contact_outputs[label if name == "test" else f"{label}/{name}"] = paths
+        return contact_outputs
 
     data = resolve_evaluation_data(
         workspace.dataset_repo_id or workspace.dataset_name,
@@ -158,45 +174,59 @@ def run_baselines(
             config_name=external.dataset_config_name,
             revision=external.dataset_revision,
         )
-        external_context = external_baseline_context(
-            context,
-            workspace,
-            external_data,
-            dataset_id=external.dataset_repo_id,
-            split=external.split,
-            config_name=external.dataset_config_name,
-            revision=external.dataset_revision,
-            sequence_column=prepare.sequence_column,
-            label_column=prepare.label_column,
-            id_column=prepare.id_column,
-            max_length=prepare.max_length,
-            preprocessing=preprocessing_identity(
+        selections = (
+            resolve_test_subsets(
+                workspace,
+                prepare,
+                external.test_subsets,
+                seed=config.seed,
+                dataset=external_data,
+                external=external,
+            )
+            if external.test_subsets
+            else {"test": external_data}
+        )
+        for name, selected_data in selections.items():
+            external_context = external_baseline_context(
+                context,
+                workspace,
+                selected_data,
+                dataset_id=external.dataset_repo_id,
+                split=external.split,
+                config_name=external.dataset_config_name,
+                revision=external.dataset_revision,
                 sequence_column=prepare.sequence_column,
                 label_column=prepare.label_column,
                 id_column=prepare.id_column,
-                split_roles={"name": external.name, "test": external.split},
                 max_length=prepare.max_length,
-                random_truncate_by_split=prepare.random_truncate_by_split,
-                seed=config.seed,
-            ),
-        )
-        external_rows = (
-            unlabeled_sequence_rows(
-                external_data["test"],
-                sequence_column=prepare.sequence_column,
-                id_column=prepare.id_column,
+                preprocessing=preprocessing_identity(
+                    sequence_column=prepare.sequence_column,
+                    label_column=prepare.label_column,
+                    id_column=prepare.id_column,
+                    split_roles={"name": external.name, "test": external.split},
+                    max_length=prepare.max_length,
+                    random_truncate_by_split=prepare.random_truncate_by_split,
+                    seed=config.seed,
+                ),
             )
-            if workspace.task_type == "pseudo_perplexity"
-            else sequence_rows(external_data["test"], **row_options)
-        )
-        tests.append(
-            (
-                f"external/{external.name}",
-                external_context,
-                external_data,
-                external_rows,
+            external_rows = (
+                unlabeled_sequence_rows(
+                    selected_data["test"],
+                    sequence_column=prepare.sequence_column,
+                    id_column=prepare.id_column,
+                )
+                if workspace.task_type == "pseudo_perplexity"
+                else sequence_rows(selected_data["test"], **row_options)
             )
-        )
+            label = f"external/{external.name}"
+            tests.append(
+                (
+                    f"{label}/tests/{name}" if external.test_subsets else label,
+                    external_context,
+                    selected_data,
+                    external_rows,
+                )
+            )
 
     outputs: dict[str, dict[str, Path]] = {}
     for test_name, test_context, _, test_rows in tests:
@@ -251,7 +281,7 @@ def _run_contact_baselines(
             config_name=workspace.dataset_config_name,
         )
         if dataset is None
-        else prepare_contact_dataset(
+        else prepare_contact_test_dataset(
             dataset,
             source=source,
             revision=workspace.dataset_revision,

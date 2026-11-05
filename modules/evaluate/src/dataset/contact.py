@@ -51,14 +51,7 @@ def load_contact_dataset(
     """Load fixed HF scoring splits without synthesis or coordinate dependencies."""
     from modules.evaluate.src.dataset.dataloader import load_raw_evaluation_dataset
 
-    path = Path(path_or_repo)
-    if not path.is_dir():
-        if isinstance(path_or_repo, Path) or path.is_absolute():
-            raise FileNotFoundError(path)
-        if revision is None or re.fullmatch(r"[0-9a-fA-F]{40}", revision) is None:
-            raise ValueError(
-                "Hub contact data requires a pinned 40-character commit SHA"
-            )
+    validate_contact_source(path_or_repo, revision)
     raw = load_raw_evaluation_dataset(
         path_or_repo,
         config_name=config_name,
@@ -68,6 +61,32 @@ def load_contact_dataset(
     return prepare_contact_dataset(
         raw, source=str(path_or_repo), revision=revision, edition=edition
     )
+
+
+def validate_contact_source(path_or_repo: str | Path, revision: str | None) -> None:
+    path = Path(path_or_repo)
+    if not path.is_dir():
+        if isinstance(path_or_repo, Path) or path.is_absolute():
+            raise FileNotFoundError(path)
+        if revision is None or re.fullmatch(r"[0-9a-fA-F]{40}", revision) is None:
+            raise ValueError(
+                "Hub contact data requires a pinned 40-character commit SHA"
+            )
+
+
+def prepare_contact_test_dataset(
+    dataset: DatasetDict,
+    *,
+    source: str = "in-memory",
+    revision: str | None = None,
+) -> ContactDataset:
+    """Validate test-only contacts without importing external development data."""
+    if set(dataset) == {"test"}:
+        empty = dataset["test"].select([])
+        dataset = DatasetDict(
+            {"train": empty, "validation": empty, "test": dataset["test"]}
+        )
+    return prepare_contact_dataset(dataset, source=source, revision=revision)
 
 
 @dataclass(frozen=True)

@@ -104,7 +104,7 @@ too, append a [probe overlay](#predictor-overlays-configspredictors) such as
 The replacement CASP14-16 benchmark consumes the schema-6.0 Hugging Face dataset
 only. `tasks/contact_prediction.py` owns its data/prediction/scoring orchestration;
 the existing step classes delegate to that handler and persist its artifacts.
-The data contract/alignment also live in that task module, shared extraction in
+The data contract/alignment live in `dataset/contact.py`, shared extraction in
 `model/inference.py`, and ranking/aggregation in `metrics/contact_metrics.py`.
 The frozen-embedding, attention, and zero-shot categorical-Jacobian predictors
 run through the normal CLI and prediction entry point. CASP `random_trunk`
@@ -154,6 +154,35 @@ To evaluate only CASP15, disable the other preset entries with
 `steps.predict.test_subsets.casp14=null steps.predict.test_subsets.casp16=null`.
 This also works in a later YAML overlay; named mappings merge when composing
 configs, and null entries disable inherited subsets.
+
+External test datasets support the same selection:
+
+```yaml
+external_test_sets:
+  - name: heldout_casp
+    dataset_repo_id: flair-bio/evaluation-suite
+    dataset_config_name: contact_prediction_casp
+    dataset_revision: <immutable-40-character-HF-commit>
+    test_subsets:
+      casp15: {edition: 15}
+      casp16: {edition: 16}
+```
+
+Only the external `split` (default `test`) is loaded for evaluation; external
+training and validation data never participate in fitting or model selection.
+Contact test data must retain the CASP schema and complete chain scoring units.
+The fitted predictor and controls are reused, including zero-shot Jacobian
+predictors. External subsets appear in
+`result.external["heldout_casp"].test_subsets["casp15"]` and under the external
+dataset's run directory at `tests/casp15/`. Omit external `test_subsets` to
+evaluate its whole test split. Main-dataset subset settings are not inherited
+by external datasets.
+
+`PrepareStep` resolves and validates subset data before fitting, and prepares
+each later test target through the same transfer entry point. Structured tasks
+own their scientific test-input conversion; the runner only orchestrates
+fitting, inference and publication. Shared baselines use the same selection.
+
 Generate shared baselines first using `--baselines` and the same selection.
 Fitting identity covers development inputs and labels independently of test
 selection; each evaluation records its own dataset fingerprint. Existing

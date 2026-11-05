@@ -109,13 +109,12 @@ def config_for(tmp_path, model_path, seed=13):
 
 @pytest.mark.parametrize("predictor", ["bilinear512", "attention_l1", "categorical_jacobian"])
 @pytest.mark.parametrize("controls", [[], ["random_trunk"]])
+@pytest.mark.parametrize("external", [False, True])
 def test_contact_predictor_pipeline_roundtrip(
-    tmp_path, esm2_tokenizer, predictor, controls, monkeypatch
+    tmp_path, esm2_tokenizer, predictor, controls, external, monkeypatch
 ):
     from transformers import EsmForMaskedLM
 
-    from modules.evaluate.src.contracts.config import ScoreConfig
-    from modules.evaluate.src.steps.score import ScoreStep
     from modules.evaluate.src.contracts.config_loader import load_baseline_config
     from modules.evaluate.src.runners.baselines import run_baselines
     from modules.evaluate.src.tasks import contact_prediction
@@ -160,6 +159,33 @@ def test_contact_predictor_pipeline_roundtrip(
             f"steps.predict.controls={json.dumps(controls)}",
             "steps.tune.max_epochs=12",
     ]
+    if external:
+        external_path = tmp_path / "external-data"
+        (external_path / "data").mkdir(parents=True)
+        external_data = Dataset.from_list(
+            [
+                row(f"external{edition}", edition=edition, sequence="ACDEFGHIK")
+                for edition in (14, 15, 16)
+            ],
+            features=FEATURES,
+        )
+        external_data.to_parquet(external_path / "data/test-00000-of-00001.parquet")
+        overrides.append(
+            "external_test_sets=" + json.dumps([
+                {
+                    "name": "heldout",
+                    "dataset_repo_id": str(external_path),
+                    "test_subsets": {
+                        "casp15": {"edition": 15},
+                        "casp16": {"edition": 16},
+                    },
+                },
+                {
+                    "name": "combined",
+                    "dataset_repo_id": str(external_path),
+                },
+            ])
+        )
     config = load_evaluation_config(paths, overrides=overrides)
     baselines = run_baselines(
         load_baseline_config(
@@ -167,7 +193,14 @@ def test_contact_predictor_pipeline_roundtrip(
         ),
         dataset=hf,
     )
-    assert set(baselines) == {"tests/casp14", "tests/casp15", "tests/casp16"}
+    expected_baselines = {"tests/casp14", "tests/casp15", "tests/casp16"}
+    if external:
+        expected_baselines.update({
+            "external/heldout/tests/casp15",
+            "external/heldout/tests/casp16",
+            "external/combined",
+        })
+    assert set(baselines) == expected_baselines
     fit_name = "fit_contact_attention_head" if predictor == "attention_l1" else "fit_contact_head"
     fit = Mock(wraps=getattr(contact_prediction, fit_name))
     monkeypatch.setattr(contact_prediction, fit_name, fit)
@@ -227,6 +260,34 @@ def test_contact_predictor_pipeline_roundtrip(
         assert settings["trunk_seed"] is not None
         if predictor == "categorical_jacobian":
             assert settings["fit"] == {"fitting": "zero_shot"}
+    if external:
+        from modules.evaluate.src.contracts.config import BaselineName
+        from modules.evaluate.src.dataset.baseline_data import load_baseline_artifact
+
+        assert set(result.external) == {"heldout", "combined"}
+        heldout = result.external["heldout"]
+        assert set(heldout.test_subsets) == {"casp15", "casp16"}
+        for edition in (15, 16):
+            subset = heldout.test_subsets[f"casp{edition}"]
+            prediction = subset.predictions[None]
+            assert prediction.predictions["edition"].unique().to_list() == [edition]
+            assert prediction.predictions["record_id"].unique().to_list() == [
+                f"external{edition}"
+            ]
+            assert set(prediction.controls) == set(controls)
+            baseline_name: BaselineName = "separation_prior"
+            _, path = load_baseline_artifact(prediction.baseline_context, baseline_name)
+            assert path == baselines[f"external/heldout/tests/casp{edition}"][baseline_name]
+            external_workspace = subset.evaluations[0].workspace
+            assert external_workspace.model_path == workspace.model_path
+            manifest = json.loads(external_workspace.run_manifest_path.read_text())
+            assert manifest["tests"][f"casp{edition}"]["evaluation"]["model_path"] == str(
+                workspace.model_path
+            )
+        combined = result.external["combined"].predictions[None]
+        assert set(combined.predictions["edition"]) == {14, 15, 16}
+    else:
+        assert not result.external
 
 
 def test_head_directional_symmetry_and_pair_weighted_gradient():

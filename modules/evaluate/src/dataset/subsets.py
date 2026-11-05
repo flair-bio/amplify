@@ -2,7 +2,58 @@
 
 from datasets import DatasetDict
 
-from modules.evaluate.src.contracts.config import TestSubsets
+from modules.evaluate.src.contracts.config import (
+    DatasetWorkspaceConfig,
+    ExternalTestSetConfig,
+    PrepareConfig,
+    TestSubsets,
+)
+from modules.evaluate.src.dataset.dataloader import (
+    resolve_evaluation_data,
+    resolve_external_data,
+)
+from modules.evaluate.src.tasks import get_task
+
+
+def resolve_test_subsets(
+    workspace: DatasetWorkspaceConfig,
+    prepare: PrepareConfig,
+    subsets: TestSubsets,
+    *,
+    seed: int,
+    dataset: DatasetDict | None = None,
+    external: ExternalTestSetConfig | None = None,
+) -> dict[str, DatasetDict]:
+    """Resolve and validate a test source before applying task-aware selection."""
+    task = get_task(workspace.task_type)
+    if external is not None:
+        if dataset is None:
+            task.validate_test_source(
+                external.dataset_repo_id, external.dataset_revision
+            )
+            dataset = resolve_external_data(
+                external.dataset_repo_id,
+                external.split,
+                config_name=external.dataset_config_name,
+                revision=external.dataset_revision,
+            )
+    else:
+        if dataset is None:
+            task.validate_test_source(
+                workspace.dataset_repo_id or workspace.dataset_name,
+                workspace.dataset_revision,
+            )
+        dataset = resolve_evaluation_data(
+            workspace.dataset_repo_id or workspace.dataset_name,
+            split=prepare.split,
+            seed=seed,
+            validation_fraction=prepare.validation_fraction,
+            dataset=dataset,
+            config_name=workspace.dataset_config_name,
+            revision=workspace.dataset_revision,
+        )
+    task.validate_test_dataset(dataset)
+    return select_test_subsets(dataset, subsets, group_column=task.test_group_column)
 
 
 def select_test_subsets(

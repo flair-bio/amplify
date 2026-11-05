@@ -22,7 +22,6 @@ from torch import nn
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from modules.evaluate.src.contracts.artifacts import (
-    ContactArtifacts,
     EmbeddingArtifacts,
     LayerwiseArtifacts,
     PreparedArtifacts,
@@ -33,6 +32,7 @@ from modules.evaluate.src.contracts.config import (
     EmbeddingCacheConfig,
     ExternalTestSetConfig,
     PrepareConfig,
+    TestSubsets,
     dataset_source_identity,
 )
 from modules.evaluate.src.dataset.baseline_data import (
@@ -45,7 +45,6 @@ from modules.evaluate.src.dataset.collator import (
     EvaluationCollator,
     EvaluationCollatorConfig,
 )
-from modules.evaluate.src.dataset.contact import prepare_contact_dataset
 from modules.evaluate.src.dataset.dataloader import (
     DataLoaderConfig,
     build_dataloaders,
@@ -64,6 +63,7 @@ from modules.evaluate.src.dataset.embeddings import (
     EmbeddingBackend,
     build_embedding_dataloaders,
 )
+from modules.evaluate.src.dataset.subsets import resolve_test_subsets
 from modules.evaluate.src.dataset.workspace import EvaluationWorkspace, TaskType
 from modules.evaluate.src.model.embeddings import validate_embedding_cache_compat
 from modules.evaluate.src.model.heads import EmbeddingProbeHead
@@ -110,6 +110,24 @@ def _token_positions_by_id(
 class PrepareStep:
     def __init__(self, config: PrepareConfig) -> None:
         self.config = config
+
+    def resolve_test_subsets(
+        self,
+        workspace: EvaluationWorkspace,
+        subsets: TestSubsets,
+        *,
+        seed: int,
+        dataset: DatasetDict | None = None,
+        external: ExternalTestSetConfig | None = None,
+    ) -> dict[str, DatasetDict]:
+        return resolve_test_subsets(
+            workspace.config,
+            self.config,
+            subsets,
+            seed=seed,
+            dataset=dataset,
+            external=external,
+        )
 
     def run(
         self,
@@ -475,13 +493,39 @@ class PrepareStep:
             external.dataset_repo_id,
             external.split,
         )
+        task = get_task(workspace.task_type)
         if dataset is None:
+            task.validate_test_source(
+                external.dataset_repo_id, external.dataset_revision
+            )
             dataset = resolve_external_data(
                 external.dataset_repo_id,
                 external.split,
                 config_name=external.dataset_config_name,
                 revision=external.dataset_revision,
             )
+        external_inputs = workspace.config.model_copy(
+            update={
+                "dataset_name": external.name,
+                "dataset_repo_id": external.dataset_repo_id,
+                "dataset_config_name": external.dataset_config_name,
+                "dataset_revision": external.dataset_revision,
+            }
+        )
+        if isinstance(task, StructuredTask):
+            transferred = task.prepare_test_inputs(
+                prepared, inputs=external_inputs, dataset=dataset
+            )
+            if transferred.contact is not None:
+                transferred.baseline_context = contact_baseline_context(
+                    external_inputs,
+                    transferred.contact.dataset,
+                    prepared.baseline_context["names"]
+                    if prepared.baseline_context
+                    else [],
+                )
+            return transferred
+        dataset = DatasetDict({"test": dataset["test"]})
         shared_context = (
             external_baseline_context(
                 prepared.baseline_context,
@@ -509,7 +553,6 @@ class PrepareStep:
             else None
         )
 
-        task = get_task(workspace.task_type)
         num_labels = task.resolve_num_labels(
             workspace.num_labels, workspace.dataset_name
         )
@@ -662,28 +705,11 @@ class PrepareStep:
         accelerator: Accelerator,
         seed: int,
         layerwise_config: LayerwiseConfig | None = None,
+        external: ExternalTestSetConfig | None = None,
     ) -> PreparedArtifacts:
         """Reuse the fitted predictor and controls on another selected test set."""
-        if prepared.contact is not None:
-            contacts = prepare_contact_dataset(
-                dataset,
-                source=workspace.dataset_repo_id or workspace.dataset_name,
-                revision=workspace.config.dataset_revision,
-            )
-            context = (
-                contact_baseline_context(
-                    workspace.config, contacts, prepared.baseline_context["names"]
-                )
-                if prepared.baseline_context
-                else None
-            )
-            return replace(
-                prepared,
-                contact=ContactArtifacts(dataset=contacts),
-                baseline_context=context,
-            )
-        external = ExternalTestSetConfig(
-            name=name,
+        external = external or ExternalTestSetConfig(
+            name=workspace.dataset_name,
             dataset_repo_id=workspace.dataset_repo_id or workspace.dataset_name,
             dataset_config_name=workspace.config.dataset_config_name,
             dataset_revision=workspace.config.dataset_revision,
@@ -696,7 +722,7 @@ class PrepareStep:
             accelerator=accelerator,
             seed=seed,
             layerwise_config=layerwise_config,
-            dataset=DatasetDict({"test": dataset["test"]}),
+            dataset=dataset,
         )
 
     def _apply_embedding_cache(
