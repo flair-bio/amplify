@@ -10,3 +10,11 @@ workspace:
 steps:
   prepare:
     max_length: 2048
+  tune:
+    metric_aggregation: macro
+    hyperparameter_search:
+      metric: f1
+      direction: maximize
+  score:
+    metrics: [f1, accuracy]
+    metric_aggregation: macro

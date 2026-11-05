@@ -40,7 +40,7 @@ dataset's `targets`.
 ![The seven evaluation tasks, grouped by output level](../../../figures/downstream_tasks.png)
 
 | Task | Predicts | Example `targets` for one protein | Meaning |
-|---|---|---|---|
+|---|---|---|---|---|
 | `sequence_classification` | One class per protein | `3` | Class index in the dataset's label vocabulary |
 | `sequence_regression` | One number per protein | `62.0` | e.g. optimal temperature in °C |
 | `sequence_multilabel_classification` | A set of labels per protein | `[0, 1, 1, 0, …]` | One bit per vocabulary entry (GO term, InterPro entry); several can be on |
@@ -90,27 +90,29 @@ tokenizer has a mask token.
 ## Datasets by Task
 
 Each dataset is built for one task, except the contact datasets, which support
-multiple predictor overlays on the shared contact task. Default metrics are
-each task's `default_metric_names`; the task handlers in
-[`src/tasks/`](../src/tasks/) define a few more that can be selected.
+multiple predictor overlays on the shared contact task. Dataset overlays
+declare the reported metrics and, when tuning is enabled, the HPO selection
+metric. Task-level defaults remain fallbacks for generic or newly added
+datasets; task handlers in [`src/tasks/`](../src/tasks/) define supported
+metrics.
 
-| Source | Datasets | Task | Default metrics |
+| Source | Datasets | Task | HPO selection | Reported metrics |
 |---|---|---|---|
-| Biomap-research | `fold_prediction`, `localization_prediction` | `sequence_classification` | `f1`, `accuracy`, `mcc`, `roc_auc` |
-| UESolDS | `solubility_prediction` | `sequence_classification` | Macro-F1 |
-| HMD-ARG | `antibiotic_resistance` | `sequence_classification` | Macro-F1 over 14 drug classes |
-| FLIP / Meltome Atlas | `meltome_mixed`, `meltome_human` | `sequence_regression` | `spearmanr` |
-| Biomap-research | `stability_prediction` | `sequence_regression` | `mse`, `mae`, `r2`, `pearsonr`, `spearmanr` |
-| Reprocessed BioMap SSP | `ssp_q3`, `ssp_q8` | `token_classification` | Macro-F1 |
-| CASP14-16 | `contact_prediction_casp` | `contact_prediction` | AUC, P@L, P@L/2, P@L/5 and ROC-AUC; global and intra-EU, original separations >=6/24 |
-| UniProt GO | `GO_mf`, `GO_bp`, `GO_cc` | `sequence_multilabel_classification` | `f1`, `multilabel_mcc`, `average_precision` |
-| InterPro | 7 `interpro_*` entry types | `sequence_multilabel_classification` | `f1`, `multilabel_mcc`, `average_precision` |
-| UniProt features | 12 `uniprot_*` residue overlays | `token_classification` | `f1`, `accuracy`, `precision`, `recall`, `mcc` |
-| UniProt ProtParam | `uniprot_protparams` (one property per run) | `sequence_regression` | R² |
-| AMPLIFY / UR100P | `uniprot_ur100p_test` | `pseudo_perplexity` | `pseudo_perplexity` |
-| Any sequence dataset | MLM models with a mask token | `pseudo_perplexity` | `pseudo_perplexity` |
-| omicMSA homolog profiles | `omicmsa_calibration` (test split only) | `calibration` | `calibration_t`, `calibration_nt`, `calibration_high_nt` |
-| ProteinGym | 4 assay tracks | Separate runners | Spearman (DMS), AUC (clinical), per assay |
+| Biomap-research | `fold_prediction`, `localization_prediction` | `sequence_classification` | Accuracy | Accuracy, F1 |
+| UESolDS | `solubility_prediction` | `sequence_classification` | Accuracy | Accuracy, F1 |
+| HMD-ARG | `antibiotic_resistance` | `sequence_classification` | Macro-F1 | Macro-F1, accuracy |
+| FLIP / Meltome Atlas | `meltome_mixed`, `meltome_human` | `sequence_regression` | Spearman | Spearman, MSE |
+| Biomap-research | `stability_prediction` | `sequence_regression` | Pooled Spearman (cluster average pending) | Pooled Spearman, MSE |
+| Reprocessed BioMap SSP | `ssp_q3`, `ssp_q8` | `token_classification` | Accuracy | Accuracy, F1 |
+| CASP14-16 | `contact_prediction_casp` | `contact_prediction` | Fixed protocol; no HPO | AUC, P@L, P@L/2, P@L/5, ROC-AUC |
+| UniProt GO | `GO_mf`, `GO_bp`, `GO_cc` | `sequence_multilabel_classification` | Protein-centric Fmax | Fmax, F1 |
+| InterPro | 7 `interpro_*` entry types | `sequence_multilabel_classification` | Macro-F1 | Macro-F1, multilabel MCC, average precision |
+| UniProt features | 12 `uniprot_*` residue overlays | `token_classification` | Macro-F1 | Macro-F1, accuracy |
+| UniProt ProtParam | `uniprot_protparams` (all 31 properties per run) | `sequence_regression` | Per-property R² | Per-property R², equal-weight mean R² |
+| AMPLIFY / UR100P | `uniprot_ur100p_test` | `pseudo_perplexity` | Not applicable | Pseudo-perplexity |
+| Any sequence dataset | MLM models with a mask token | `pseudo_perplexity` | Not applicable | Pseudo-perplexity |
+| omicMSA homolog profiles | `omicmsa_calibration` (test split only) | `calibration` | Not applicable | Calibration agreement for T, NT, high-NT |
+| ProteinGym | 4 assay tracks | Separate runners | Per-assay | Spearman (DMS), AUC (clinical) |
 
 ProteinGym uses separate runners. The next section describes the active
 evaluation overlays.
@@ -641,8 +643,9 @@ anchor them to membranes, and change their stability.
 
 ### UniProt ProtParam
 
-Sequence-derived physicochemical properties for UniProt proteins, one
-property per run ([sourcing](dataset-sourcing.md#uniprot-protparam)).
+Sequence-derived physicochemical properties for UniProt proteins, all 31
+properties evaluated by one suite run
+([sourcing](dataset-sourcing.md#uniprot-protparam)).
 
 #### `uniprot_protparams`
 
@@ -677,6 +680,11 @@ python -m modules.evaluate.src.run_evaluate \
     modules/evaluate/configs/models/amplify_120m.yaml \
     modules/evaluate/configs/datasets/uniprot_protparams.yaml
 ```
+
+This behavior is configured through the dataset overlay's `multi_target`
+block (`target_columns`, `metric`, and summary-output settings), not a
+ProtParam-specific runner. Another dataset with multiple scalar targets can
+reuse the same orchestration by declaring its own block.
 
 The Mila launcher uses one job (array index 33) for the complete suite.
 Property runs use IDs `<run_id>-<property>` while retaining the dataset

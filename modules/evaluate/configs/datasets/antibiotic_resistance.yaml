@@ -16,6 +16,9 @@ steps:
   tune:
     refit_on_train_validation: true
     metric_aggregation: macro
+    hyperparameter_search:
+      metric: f1
+      direction: maximize
   score:
     metrics: [f1, accuracy]
     metric_aggregation: macro

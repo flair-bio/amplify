@@ -15,3 +15,5 @@ steps:
       casp14: {edition: 14}
       casp15: {edition: 15}
       casp16: {edition: 16}
+  score:
+    metrics: [AUC, P@L, P@L/2, P@L/5, ROC-AUC]

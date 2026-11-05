@@ -13,5 +13,6 @@ steps:
   tune:
     hyperparameter_search:
       metric: accuracy
+      direction: maximize
   score:
     metrics: [accuracy, f1]

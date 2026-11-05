@@ -6,3 +6,13 @@ workspace:
   target_type: categorical
   label_format: per_token
   num_labels: 4
+
+steps:
+  tune:
+    metric_aggregation: macro
+    hyperparameter_search:
+      metric: f1
+      direction: maximize
+  score:
+    metrics: [f1, accuracy]
+    metric_aggregation: macro

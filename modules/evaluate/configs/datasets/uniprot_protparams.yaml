@@ -6,3 +6,50 @@ workspace:
   target_type: continuous
   label_format: scalar
   num_labels: null
+
+multi_target:
+  target_columns:
+    - length
+    - mass
+    - percent_a
+    - percent_c
+    - percent_d
+    - percent_e
+    - percent_f
+    - percent_g
+    - percent_h
+    - percent_i
+    - percent_k
+    - percent_l
+    - percent_m
+    - percent_n
+    - percent_p
+    - percent_q
+    - percent_r
+    - percent_s
+    - percent_t
+    - percent_v
+    - percent_w
+    - percent_y
+    - fraction_helix_aas
+    - fraction_turn_aas
+    - fraction_sheet_aas
+    - instability_index
+    - gravy
+    - isoelectric_point
+    - charge_at_ph4_7
+    - charge_at_ph7_2
+    - charge_at_ph8
+  metric: r2
+  target_key: property
+  count_key: n_properties
+  aggregation_name: unweighted_property_mean
+  score_table_filename: property_scores.parquet
+
+steps:
+  tune:
+    hyperparameter_search:
+      metric: r2
+      direction: maximize
+  score:
+    metrics: [r2, mse]

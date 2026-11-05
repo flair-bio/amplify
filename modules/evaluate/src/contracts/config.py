@@ -916,6 +916,32 @@ class WandbConfig(BaseModel):
     tags: list[str] = Field(default_factory=list)
 
 
+class MultiTargetConfig(BaseModel):
+    """Run a scalar regression pipeline independently for several target columns."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_columns: list[str] = Field(min_length=1)
+    metric: str
+    target_key: str = "target"
+    count_key: str = "n_targets"
+    aggregation_name: str = "unweighted_target_mean"
+    score_table_filename: str = "target_scores.parquet"
+
+    @model_validator(mode="after")
+    def _validate_targets(self) -> MultiTargetConfig:
+        if len(self.target_columns) != len(set(self.target_columns)):
+            raise ValueError("multi_target.target_columns must be unique.")
+        if any(
+            not column or "/" in column or "\\" in column
+            for column in self.target_columns
+        ):
+            raise ValueError(
+                "multi_target target columns must be nonempty column names."
+            )
+        return self
+
+
 class EvaluationConfig(BaseModel):
     """Overall config. for the evaluation pipeline."""
 
@@ -925,6 +951,7 @@ class EvaluationConfig(BaseModel):
 
     workspace: EvaluationWorkspaceConfig
     wandb: WandbConfig = Field(default_factory=WandbConfig)
+    multi_target: MultiTargetConfig | None = None
     steps: StepsConfig = Field(default_factory=StepsConfig)
     # Test-only datasets scored with the model fitted on the workspace dataset.
     external_test_sets: list[ExternalTestSetConfig] = Field(default_factory=list)

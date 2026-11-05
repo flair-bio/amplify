@@ -28,10 +28,11 @@ def compose_evaluation_config(
 ) -> DictConfig:
     """Load a selected task overlay when no explicit task YAML was supplied.
 
-    Insert the task immediately before the dataset declaring the default, so
-    base settings are overridden by task behavior, and dataset settings and
-    later overlays can still override that behavior. Explicit task overlays
-    retain the usual left-to-right merge semantics.
+    Insert the task next to the dataset declaring the default. For the dataset's
+    own task, insert before it so dataset-specific protocol settings win. When
+    an explicit task override selects a different task, insert after the dataset
+    so the selected task's settings replace incompatible dataset defaults.
+    Explicit task overlays retain the usual left-to-right merge semantics.
     """
     paths = [path] if isinstance(path, (str, Path)) else list(path)
     yaml_config = load_config(paths)
@@ -48,10 +49,11 @@ def compose_evaluation_config(
         )
         insertion = len(paths)
         for index, config_path in enumerate(paths):
-            if OmegaConf.select(
+            declared_task = OmegaConf.select(
                 OmegaConf.load(config_path), "workspace.default_task_type"
-            ):
-                insertion = index
+            )
+            if declared_task:
+                insertion = index + int(task != declared_task)
         paths.insert(insertion, task_path)
         config = load_config(paths, overrides=overrides)
     return config

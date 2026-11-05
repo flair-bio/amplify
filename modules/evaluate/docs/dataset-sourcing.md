@@ -747,8 +747,9 @@ computed from each sequence with Biopython's
 charge, hydrophobicity, and propensity-based estimates.
 
 The output is one dataset, `uniprot_protparams`, with `id`, `sequence`,
-`split`, and 31 numeric property columns. It has no `targets` column: select
-one property per scalar regression run with `steps.prepare.label_column`.
+`split`, and 31 numeric property columns. It has no `targets` column; the
+evaluation runner processes each property column as a scalar target and reports
+the equal-weight mean of their R² scores.
 
 | Feature | Meaning |
 |---|---|

@@ -15,7 +15,6 @@ from modules.evaluate.src.contracts.artifacts import (
     ControlComparison,
     EvaluationMetadata,
 )
-from modules.evaluate.src.utils.protparams import PROTPARAM_COLUMNS
 
 # Keep the seed in the tidy output: bootstrap/control randomness and probe
 # initialization are part of the result identity, not just manifest metadata.
@@ -128,20 +127,29 @@ def upsert_long_df(
     return pl.concat([existing, new_df], how="diagonal_relaxed")
 
 
-def aggregate_protparams(
-    model_root: Path, run_name: str, seed: int
+def aggregate_task_scores(
+    model_root: Path,
+    run_name: str,
+    seed: int,
+    dataset_name: str,
+    target_columns: tuple[str, ...],
+    metric: str,
+    *,
+    target_key: str = "target",
+    count_key: str = "n_targets",
+    aggregation_name: str = "unweighted_target_mean",
 ) -> tuple[pl.DataFrame, dict[str, Any]]:
-    """Read all completed property runs; reject missing or incompatible results."""
+    """Read completed scalar-target runs and compute an equal-weight score mean."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", run_name) or seed < 0:
         raise ValueError("A safe run name and nonnegative seed are required.")
     manifests = {
         prop: model_root / f"{run_name}-{prop}" / f"seed_{seed}" / "run_manifest.json"
-        for prop in PROTPARAM_COLUMNS
+        for prop in target_columns
     }
     missing = [prop for prop, path in manifests.items() if not path.is_file()]
     if missing:
         raise FileNotFoundError(
-            f"Missing ProtParams property runs: {', '.join(missing)}"
+            f"Missing aggregate-task target runs: {', '.join(missing)}"
         )
 
     reference_config = reference_metadata = None
@@ -150,12 +158,12 @@ def aggregate_protparams(
         manifest = json.loads(path.read_text())
         evaluation = manifest["evaluation"]
         if evaluation["status"] != "complete":
-            raise ValueError(f"ProtParams property run is incomplete: {prop}")
+            raise ValueError(f"Aggregate-task target run is incomplete: {prop}")
         config = evaluation["config"]
         metadata = manifest["score"]["metadata"]
         workspace = config["workspace"]
         if (
-            workspace["dataset_name"] != "uniprot_protparams"
+            workspace["dataset_name"] != dataset_name
             or workspace["task_type"] != "sequence_regression"
             or config["steps"]["prepare"]["label_column"] != prop
             or config["seed"] != seed
@@ -168,7 +176,7 @@ def aggregate_protparams(
             or f"{metadata['variant']}-{workspace['run_id']}" != f"{run_name}-{prop}"
         ):
             raise ValueError(
-                f"ProtParams property run has inconsistent identity: {prop}"
+                f"Aggregate-task target run has inconsistent identity: {prop}"
             )
 
         del workspace["run_id"]
@@ -177,24 +185,28 @@ def aggregate_protparams(
             reference_config, reference_metadata = config, metadata
         elif config != reference_config or metadata != reference_metadata:
             raise ValueError(
-                f"ProtParams property runs use different protocols: {prop}"
+                f"Aggregate-task target runs use different protocols: {prop}"
             )
-        value = manifest["score"]["scores"]["r2"]
+        value = manifest["score"]["scores"][metric]
         if (
             isinstance(value, bool)
             or not isinstance(value, (int, float))
             or not math.isfinite(value)
         ):
-            raise ValueError(f"ProtParams property has nonfinite or invalid R2: {prop}")
-        rows.append({"property": prop, "r2": float(value), "manifest_path": str(path)})
+            raise ValueError(
+                f"Aggregate-task target has nonfinite or invalid {metric}: {prop}"
+            )
+        rows.append(
+            {target_key: prop, metric: float(value), "manifest_path": str(path)}
+        )
 
     table = pl.DataFrame(rows)
     summary = {
         "metadata": reference_metadata,
         "run_name": run_name,
-        "metric": "r2",
-        "aggregation": "unweighted_property_mean",
-        "n_properties": len(PROTPARAM_COLUMNS),
-        "value": math.fsum(table["r2"].to_list()) / len(PROTPARAM_COLUMNS),
+        "metric": metric,
+        "aggregation": aggregation_name,
+        count_key: len(target_columns),
+        "value": math.fsum(table[metric].to_list()) / len(target_columns),
     }
     return table, summary
