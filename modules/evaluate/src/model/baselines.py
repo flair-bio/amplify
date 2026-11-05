@@ -29,6 +29,7 @@ def build_sequence_baseline(
     num_labels: int | None,
     *,
     seed: int = 710019,
+    mmseqs_neighbors: list[int | None] | None = None,
 ) -> pl.DataFrame:
     """Build model-independent, train-only sequence prediction rows."""
     labels = [row["label"] for row in train_rows]
@@ -152,7 +153,13 @@ def build_sequence_baseline(
         estimator.fit(features, np.asarray(labels, dtype=float))
         regression_predictions = estimator.predict(test_features).tolist()
     else:
-        neighbors = _mmseqs_nearest_neighbors(train_rows, test_rows)
+        neighbors = (
+            _mmseqs_nearest_neighbors(train_rows, test_rows)
+            if mmseqs_neighbors is None
+            else mmseqs_neighbors
+        )
+        if len(neighbors) != len(test_rows):
+            raise ValueError("MMseqs neighbor count must match test sequence count.")
         train_mean = math.fsum(labels) / len(labels)
         regression_predictions = [
             train_mean if index is None else float(train_rows[index]["label"])

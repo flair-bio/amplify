@@ -998,6 +998,7 @@ class BaselineRunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     workspace: DatasetWorkspaceConfig
+    multi_target: MultiTargetConfig | None = None
     prepare: PrepareConfig = Field(
         default_factory=lambda: PrepareConfig.model_validate({})
     )
@@ -1035,6 +1036,11 @@ class BaselineRunConfig(BaseModel):
         if len(set(names)) != len(names):
             raise ValueError("external_test_sets names must be unique.")
         task = get_task(self.workspace.task_type)
+        if (
+            self.multi_target is not None
+            and self.workspace.task_type != "sequence_regression"
+        ):
+            raise ValueError("Multi-target baselines require sequence_regression.")
         task.validate_dataset_config(
             self.workspace.target_type,
             self.workspace.label_format,

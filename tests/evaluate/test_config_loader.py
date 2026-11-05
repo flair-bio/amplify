@@ -436,6 +436,52 @@ def test_task_control_defaults(task, dataset, controls):
         assert baseline.baselines.names == expected_baselines
 
 
+def test_baseline_loader_preserves_dataset_multi_target_config():
+    baseline = load_baseline_config(
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "datasets/uniprot_protparams.yaml",
+            CONFIGS / "baselines/sequence_regression.yaml",
+        ]
+    )
+    assert baseline.multi_target is not None
+    assert baseline.multi_target.target_columns == [
+        "length",
+        "mass",
+        "percent_a",
+        "percent_c",
+        "percent_d",
+        "percent_e",
+        "percent_f",
+        "percent_g",
+        "percent_h",
+        "percent_i",
+        "percent_k",
+        "percent_l",
+        "percent_m",
+        "percent_n",
+        "percent_p",
+        "percent_q",
+        "percent_r",
+        "percent_s",
+        "percent_t",
+        "percent_v",
+        "percent_w",
+        "percent_y",
+        "fraction_helix_aas",
+        "fraction_turn_aas",
+        "fraction_sheet_aas",
+        "instability_index",
+        "gravy",
+        "isoelectric_point",
+        "charge_at_ph4_7",
+        "charge_at_ph7_2",
+        "charge_at_ph8",
+    ]
+    assert baseline.multi_target.metric == "r2"
+    assert baseline.multi_target.score_table_filename == "property_scores.parquet"
+
+
 @pytest.mark.parametrize("task_first", [True, False])
 @pytest.mark.parametrize(
     "dataset,task",

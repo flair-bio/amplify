@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import polars as pl
 import pytest
@@ -36,7 +36,10 @@ from modules.evaluate.src.model.baselines import (
     build_sequence_baseline,
 )
 from modules.evaluate.src.runners import baselines as runner
-from modules.evaluate.src.runners.baselines import run_baselines
+from modules.evaluate.src.runners.baselines import (
+    run_baselines,
+    run_multi_target_baselines,
+)
 from modules.evaluate.src.steps.predict import PredictStep, persist_predictions
 from modules.evaluate.src.steps.score import ScoreStep
 
@@ -894,6 +897,122 @@ def test_invalid_training_targets_rejected(tmp_path, targets):
         run_baselines(config, dataset=data)
 
 
+def test_multi_target_baselines_score_each_property_and_resume(tmp_path, monkeypatch):
+    data = DatasetDict(
+        {
+            "train": Dataset.from_dict(
+                {
+                    "sequence": ["AAA", "CCC", "DDD"],
+                    "alpha": [0.0, 2.0, 4.0],
+                    "beta": [10.0, 20.0, 30.0],
+                }
+            ),
+            "validation": Dataset.from_dict(
+                {
+                    "sequence": ["WWW"],
+                    "alpha": [100.0],
+                    "beta": [100.0],
+                }
+            ),
+            "test": Dataset.from_dict(
+                {
+                    "sequence": ["ACE", "DFG", "HI"],
+                    "alpha": [1.0, 3.0, 5.0],
+                    "beta": [12.0, 25.0, 25.0],
+                }
+            ),
+        }
+    )
+    base_config = _config(tmp_path, regression=True)
+    config = BaselineRunConfig.model_validate(
+        {
+            **base_config.model_dump(),
+            "multi_target": {
+                "target_columns": ["alpha", "beta"],
+                "metric": "r2",
+                "target_key": "property",
+                "count_key": "n_properties",
+                "aggregation_name": "unweighted_property_mean",
+                "score_table_filename": "property_scores.parquet",
+            },
+            "baselines": {"names": ["train_mean", "composition", "mmseqs_knn"]},
+            "score": ScoreConfig(metrics=["mse"]),
+        }
+    )
+
+    search = Mock(return_value=[0, 1, None])
+    monkeypatch.setattr(runner, "_mmseqs_nearest_neighbors", search)
+    outputs = run_multi_target_baselines(config, dataset=data)
+    search.assert_called_once()
+
+    table_path = outputs["test"]["train_mean"]
+    table = pl.read_parquet(table_path)
+    assert table["property"].to_list() == ["alpha", "beta"]
+    assert table["r2"].to_list() == pytest.approx([-0.375, -0.01183431952662722])
+    assert len(set(table["manifest_path"].to_list())) == 2
+    for property_name, manifest_path in zip(
+        table["property"].to_list(), table["manifest_path"].to_list(), strict=True
+    ):
+        scalar_manifest = json.loads(Path(manifest_path).read_text())
+        assert (
+            scalar_manifest["run"]["config"]["prepare"]["label_column"] == property_name
+        )
+        assert scalar_manifest["score"]["scores"]["r2"] is not None
+
+    summary_path = table_path.with_name("summary.json")
+    summary = json.loads(summary_path.read_text())
+    assert summary["n_properties"] == 2
+    assert summary["metric"] == "r2"
+    assert summary["value"] == pytest.approx(sum(table["r2"].to_list()) / 2)
+    run_manifest = json.loads(table_path.with_name("run_manifest.json").read_text())
+    assert run_manifest["evaluation"]["status"] == "complete"
+    assert run_manifest["score"] == summary
+
+    original_summary = summary_path.read_text()
+    changed_data = DatasetDict(
+        {
+            "train": data["train"].map(
+                lambda row: {
+                    "alpha": row["alpha"] + 5.0,
+                    "beta": row["beta"] + 5.0,
+                }
+            ),
+            "validation": data["validation"],
+            "test": data["test"],
+        }
+    )
+    changed_outputs = run_multi_target_baselines(config, dataset=changed_data)
+    changed_table_path = changed_outputs["test"]["train_mean"]
+    assert changed_table_path != table_path
+    assert summary_path.read_text() == original_summary
+
+    actual_write_json = runner.write_json
+
+    def fail_summary_write(path, payload):
+        if path.name == "summary.json":
+            raise RuntimeError("simulated aggregate publication interruption")
+        return actual_write_json(path, payload)
+
+    with (
+        patch.object(runner, "write_json", side_effect=fail_summary_write),
+        pytest.raises(RuntimeError, match="publication interruption"),
+    ):
+        run_multi_target_baselines(config, dataset=data)
+    interrupted_manifest = json.loads(
+        table_path.with_name("run_manifest.json").read_text()
+    )
+    assert interrupted_manifest["evaluation"]["status"] == "running"
+    run_multi_target_baselines(config, dataset=data)
+
+    builder = Mock(
+        side_effect=AssertionError("completed scalar baselines should resume")
+    )
+    monkeypatch.setattr(runner, "build_sequence_baseline", builder)
+    assert run_multi_target_baselines(config, dataset=data) == outputs
+    builder.assert_not_called()
+    assert search.call_count == 2
+
+
 def test_baseline_cli_uses_data_subset_without_model_validation(tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
     config = load_baseline_config(
@@ -918,6 +1037,32 @@ def test_baseline_cli_uses_data_subset_without_model_validation(tmp_path, monkey
     monkeypatch.setattr(run_evaluate, "load_baseline_config", lambda *args: config)
     run = Mock(return_value={})
     monkeypatch.setattr(run_evaluate, "run_baselines", run)
+    monkeypatch.setattr(
+        run_evaluate,
+        "Accelerator",
+        Mock(side_effect=AssertionError("baseline CLI must not create an accelerator")),
+    )
+    run_evaluate.main()
+    run.assert_called_once_with(config)
+
+
+def test_baseline_cli_dispatches_multi_target_run(tmp_path, monkeypatch):
+    root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
+    config = load_baseline_config(
+        [
+            root / "config.yaml",
+            root / "datasets/uniprot_protparams.yaml",
+            root / "baselines/sequence_regression.yaml",
+        ]
+    )
+    from modules.evaluate.src import run_evaluate
+
+    monkeypatch.setattr(
+        "sys.argv", ["run_evaluate.py", "--baselines", str(root / "config.yaml")]
+    )
+    monkeypatch.setattr(run_evaluate, "load_baseline_config", lambda *args: config)
+    run = Mock(return_value={})
+    monkeypatch.setattr(run_evaluate, "run_multi_target_baselines", run)
     monkeypatch.setattr(
         run_evaluate,
         "Accelerator",

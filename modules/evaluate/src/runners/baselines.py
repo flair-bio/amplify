@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -29,6 +30,7 @@ from modules.evaluate.src.dataset.baseline_data import (
     baseline_context,
     contact_baseline_context,
     external_baseline_context,
+    identity_hash,
     load_baseline_artifact,
     mmseqs_coverage,
     preprocessing_identity,
@@ -46,6 +48,7 @@ from modules.evaluate.src.dataset.dataloader import (
 )
 from modules.evaluate.src.dataset.subsets import select_test_subsets
 from modules.evaluate.src.model.baselines import (
+    _mmseqs_nearest_neighbors,
     build_amino_acid_frequency_baseline,
     build_sequence_baseline,
 )
@@ -57,7 +60,10 @@ logger = logging.getLogger(__name__)
 
 
 def run_baselines(
-    config: BaselineRunConfig, dataset: DatasetDict | None = None
+    config: BaselineRunConfig,
+    dataset: DatasetDict | None = None,
+    *,
+    _mmseqs_neighbor_cache: dict[str, list[int | None]] | None = None,
 ) -> dict[str, dict[str, Path]]:
     """Build shared baselines for the main and external test datasets."""
     workspace, prepare = config.workspace, config.prepare
@@ -92,6 +98,7 @@ def run_baselines(
                     }
                 ),
                 dataset=subset,
+                _mmseqs_neighbor_cache=_mmseqs_neighbor_cache,
             )
             subset_results[f"tests/{name}"] = subset_outputs.pop("test")
             subset_results.update(subset_outputs)
@@ -208,6 +215,23 @@ def run_baselines(
                 _upgrade_legacy_baseline(
                     directory, test_context, name, config, test_name
                 )
+                mmseqs_neighbors = None
+                if (
+                    name == "mmseqs_knn"
+                    and _mmseqs_neighbor_cache is not None
+                    and not (directory / "run_manifest.json").exists()
+                ):
+                    sequence_identity = identity_hash(
+                        {
+                            "train": [row["sequence"] for row in train_rows],
+                            "test": [row["sequence"] for row in test_rows],
+                        }
+                    )
+                    if sequence_identity not in _mmseqs_neighbor_cache:
+                        _mmseqs_neighbor_cache[sequence_identity] = (
+                            _mmseqs_nearest_neighbors(train_rows, test_rows)
+                        )
+                    mmseqs_neighbors = _mmseqs_neighbor_cache[sequence_identity]
                 logger.info(
                     "Resolving baseline %s for %s at %s", name, test_name, directory
                 )
@@ -221,6 +245,7 @@ def run_baselines(
                     task_type=workspace.task_type,
                     seed=config.seed,
                     max_residues=prepare.max_length - 2,
+                    mmseqs_neighbors=mmseqs_neighbors,
                 )
                 frame, path = load_baseline_artifact(test_context, name)
                 _publish_standalone_scores(
@@ -237,6 +262,183 @@ def run_baselines(
                 logger.info("Baseline predictions ready: %s", path)
                 outputs[test_name][name] = path
     return outputs
+
+
+def run_multi_target_baselines(
+    config: BaselineRunConfig, dataset: DatasetDict | None = None
+) -> dict[str, dict[str, Path]]:
+    """Run scalar baselines per target and publish an unweighted metric mean."""
+    multi_target = config.multi_target
+    if multi_target is None:
+        raise ValueError("Multi-target baselines require multi_target configuration.")
+    if config.external_test_sets or config.test_subsets:
+        raise ValueError(
+            "Multi-target baselines do not support external test sets or test subsets."
+        )
+    task = get_task(config.workspace.task_type)
+    if multi_target.metric not in task.metrics:
+        raise ValueError(
+            f"Metric {multi_target.metric!r} is not supported for "
+            f"task_type={config.workspace.task_type!r}."
+        )
+
+    scores_config = config.score
+    if (
+        scores_config.metrics is not None
+        and multi_target.metric not in scores_config.metrics
+    ):
+        scores_config = scores_config.model_copy(
+            update={"metrics": [*scores_config.metrics, multi_target.metric]}
+        )
+
+    property_outputs: dict[str, dict[str, Path]] = {}
+    mmseqs_neighbor_cache: dict[str, list[int | None]] = {}
+    for property_name in multi_target.target_columns:
+        property_config = config.model_copy(
+            update={
+                "multi_target": None,
+                "prepare": config.prepare.model_copy(
+                    update={"label_column": property_name}
+                ),
+                "score": scores_config,
+            }
+        )
+        outputs = run_baselines(
+            property_config,
+            dataset=dataset,
+            _mmseqs_neighbor_cache=mmseqs_neighbor_cache,
+        )
+        if set(outputs) != {"test"}:
+            raise ValueError(
+                "Multi-target baseline aggregation requires exactly one test output."
+            )
+        property_outputs[property_name] = outputs["test"]
+
+    aggregate_outputs: dict[str, Path] = {}
+    for name in config.baselines.names:
+        rows = []
+        target_identities = {}
+        for property_name in multi_target.target_columns:
+            try:
+                prediction_path = property_outputs[property_name][name]
+            except KeyError as error:
+                raise ValueError(
+                    f"Missing {name} baseline output for property {property_name!r}."
+                ) from error
+            manifest_path = prediction_path.with_name("run_manifest.json")
+            manifest = json.loads(manifest_path.read_text())
+            if manifest.get("status") != "complete":
+                raise ValueError(
+                    f"Incomplete {name} baseline run for {property_name!r}: "
+                    f"{manifest_path}"
+                )
+            target_identity = manifest.get("identity")
+            if not isinstance(target_identity, dict):
+                raise TypeError(f"Invalid baseline identity: {manifest_path}")
+            target_identities[property_name] = target_identity
+            value = _baseline_metric_value(
+                manifest.get("score", {}).get("scores"), multi_target.metric
+            )
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                raise ValueError(
+                    f"Invalid {multi_target.metric} for {name} baseline "
+                    f"and property {property_name!r}."
+                )
+            rows.append(
+                {
+                    multi_target.target_key: property_name,
+                    multi_target.metric: float(value),
+                    "manifest_path": str(manifest_path),
+                }
+            )
+
+        table = pl.DataFrame(rows)
+        summary = {
+            "metadata": {
+                "model_name": "baselines",
+                "dataset_name": config.workspace.dataset_name,
+                "dataset_repo_id": config.workspace.dataset_repo_id,
+                "dataset_config_name": config.workspace.dataset_config_name,
+                "dataset_revision": config.workspace.dataset_revision,
+                "task_type": config.workspace.task_type,
+                "split": config.prepare.split.name,
+                "seed": config.seed,
+                "baseline": name,
+            },
+            "run_name": f"baselines-{name}",
+            "metric": multi_target.metric,
+            "aggregation": multi_target.aggregation_name,
+            multi_target.count_key: len(multi_target.target_columns),
+            "value": math.fsum(table[multi_target.metric].to_list())
+            / len(multi_target.target_columns),
+        }
+        identity = {
+            "config": config.model_dump(mode="json"),
+            "baseline": name,
+            "targets": target_identities,
+        }
+        output_root = (
+            config.workspace.dataset_root
+            / "baselines"
+            / "multi_target"
+            / name
+            / f"run-{identity_hash(identity)[:16]}"
+        )
+        table_path = output_root / multi_target.score_table_filename
+        manifest_path = output_root / "run_manifest.json"
+        with cache_lock(output_root.parent / f".{output_root.name}.lock"):
+            if manifest_path.exists():
+                previous = json.loads(manifest_path.read_text())
+                if previous.get("evaluation", {}).get("config") != identity["config"]:
+                    raise ValueError(
+                        f"Incompatible multi-target baseline manifest: {manifest_path}"
+                    )
+            write_json(
+                manifest_path,
+                {
+                    "workspace": config.workspace.model_dump(mode="json"),
+                    "evaluation": {
+                        "status": "running",
+                        "config": identity["config"],
+                    },
+                },
+            )
+            write_parquet(table, table_path)
+            write_json(output_root / "summary.json", summary)
+            write_json(
+                manifest_path,
+                {
+                    "workspace": config.workspace.model_dump(mode="json"),
+                    "evaluation": {
+                        "status": "complete",
+                        "config": identity["config"],
+                    },
+                    "score": summary,
+                },
+            )
+        aggregate_outputs[name] = table_path
+        logger.info(
+            "Multi-target baseline %s mean %s over %d properties: %.6g",
+            name,
+            multi_target.metric,
+            len(multi_target.target_columns),
+            summary["value"],
+        )
+    return {"test": aggregate_outputs}
+
+
+def _baseline_metric_value(scores: Any, metric: str) -> Any:
+    if isinstance(scores, dict):
+        return scores.get(metric)
+    if isinstance(scores, list):
+        for row in scores:
+            if isinstance(row, dict) and row.get("metric") == metric:
+                return row.get("value")
+    return None
 
 
 def _run_contact_baselines(
@@ -360,12 +562,15 @@ def _publish_baseline(
     task_type: str,
     seed: int,
     max_residues: int,
+    mmseqs_neighbors: list[int | None] | None = None,
 ) -> None:
     if not (directory / "run_manifest.json").exists():
-        frame = (
-            build_amino_acid_frequency_baseline(test_rows, max_residues=max_residues)
-            if name == "amino_acid_frequency"
-            else build_sequence_baseline(
+        if name == "amino_acid_frequency":
+            frame = build_amino_acid_frequency_baseline(
+                test_rows, max_residues=max_residues
+            )
+        elif mmseqs_neighbors is None:
+            frame = build_sequence_baseline(
                 name,
                 task_type,
                 train_rows,
@@ -373,7 +578,16 @@ def _publish_baseline(
                 num_labels,
                 seed=seed,
             )
-        )
+        else:
+            frame = build_sequence_baseline(
+                name,
+                task_type,
+                train_rows,
+                test_rows,
+                num_labels,
+                seed=seed,
+                mmseqs_neighbors=mmseqs_neighbors,
+            )
         temporary = directory / f".{uuid4().hex}.parquet"
         path = directory / "predictions.parquet"
         try:

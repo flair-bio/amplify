@@ -10,7 +10,10 @@ from modules.evaluate.src.contracts.config_loader import (
     load_evaluation_config,
 )
 from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
-from modules.evaluate.src.runners.baselines import run_baselines
+from modules.evaluate.src.runners.baselines import (
+    run_baselines,
+    run_multi_target_baselines,
+)
 from modules.evaluate.src.runners.multi_target import run_multi_target_evaluation
 from modules.evaluate.src.runners.pipeline import run_pipeline
 from modules.evaluate.src.utils.seed import seed_everything
@@ -79,7 +82,12 @@ def main() -> None:
 
     if baseline_only:
         baseline_config = load_baseline_config(config_paths, overrides or None)
-        for test, artifacts in run_baselines(baseline_config).items():
+        baseline_runner = (
+            run_multi_target_baselines
+            if baseline_config.multi_target is not None
+            else run_baselines
+        )
+        for test, artifacts in baseline_runner(baseline_config).items():
             for name, path in artifacts.items():
                 logger.info("Baseline %s / %s: %s", test, name, path)
         return
