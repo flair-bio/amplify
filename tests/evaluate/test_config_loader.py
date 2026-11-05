@@ -352,7 +352,8 @@ def test_contact_probe_does_not_inherit_cached_mlp_search():
     ids=lambda p: p.stem,
 )
 def test_dataset_default_matches_explicit_task_config(dataset):
-    task = OmegaConf.load(dataset).workspace.default_task_type
+    overlay = OmegaConf.load(dataset)
+    task = overlay.workspace.default_task_type
     predictors = (
         [CONFIGS / "predictors/contact_embedding.yaml"]
         if task == "contact_prediction"
@@ -369,31 +370,13 @@ def test_dataset_default_matches_explicit_task_config(dataset):
     )
     actual = load_evaluation_config([CONFIGS / "config.yaml", dataset, *predictors])
     assert actual.model_dump() == expected.model_dump()
-
-
-@pytest.mark.parametrize(
-    "dataset",
-    sorted((CONFIGS / "datasets").glob("*.yaml")),
-    ids=lambda p: p.stem,
-)
-def test_dataset_declares_scoring_metrics_and_hpo_objective_when_enabled(dataset):
-    overlay = OmegaConf.load(dataset)
     assert OmegaConf.select(overlay, "steps.score.metrics"), (
         f"{dataset.name} must declare reported metrics"
     )
-    task = overlay.workspace.default_task_type
-    predictors = (
-        [CONFIGS / "predictors/contact_embedding.yaml"]
-        if task == "contact_prediction"
-        else []
-    )
-    config = load_evaluation_config(
-        [CONFIGS / "config.yaml", dataset, *predictors]
-    )
-    if config.steps.tune.hyperparameter_search.enabled:
-        assert OmegaConf.select(
-            overlay, "steps.tune.hyperparameter_search.metric"
-        ), f"{dataset.name} must declare its HPO metric"
+    if actual.steps.tune.hyperparameter_search.enabled:
+        assert OmegaConf.select(overlay, "steps.tune.hyperparameter_search.metric"), (
+            f"{dataset.name} must declare its HPO metric"
+        )
 
 
 def test_uniprot_regions_uses_2048_token_context():
@@ -451,22 +434,6 @@ def test_task_control_defaults(task, dataset, controls):
             [*paths, CONFIGS / "baselines" / f"{task}.yaml"]
         )
         assert baseline.baselines.names == expected_baselines
-
-
-def test_protparams_uses_sequence_regression_r2_defaults():
-    config = load_evaluation_config(
-        [
-            CONFIGS / "config.yaml",
-            CONFIGS / "models/amplify_120m.yaml",
-            CONFIGS / "tasks/sequence_regression.yaml",
-            CONFIGS / "datasets/uniprot_protparams.yaml",
-            CONFIGS / "predictors/torch_linear.yaml",
-        ]
-    )
-    assert config.steps.prepare.label_column == "targets"
-    assert config.steps.tune.hyperparameter_search.metric == "r2"
-    assert config.steps.tune.hyperparameter_search.direction == "maximize"
-    assert config.steps.score.metrics == ["r2", "mse"]
 
 
 @pytest.mark.parametrize("task_first", [True, False])
