@@ -144,7 +144,7 @@ def main() -> None:
         config.variant,
     )
     if (
-        config.protparams_all_properties
+        config.workspace.dataset_name == "uniprot_protparams"
         and config.workspace.task_type == "sequence_regression"
     ):
         run_protparams(config, accelerator, overwrite=overwrite)

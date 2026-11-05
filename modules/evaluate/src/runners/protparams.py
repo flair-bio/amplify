@@ -86,7 +86,6 @@ def run_protparams(
     properties = []
     for prop in PROTPARAM_COLUMNS:
         payload = config.model_dump(mode="json")
-        payload["protparams_all_properties"] = False
         payload["workspace"]["run_id"] += f"-{prop}"
         payload["steps"]["prepare"]["label_column"] = prop
         child = EvaluationConfig.model_validate(payload)

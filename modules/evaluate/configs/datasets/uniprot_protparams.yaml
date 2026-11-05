@@ -1,5 +1,3 @@
-protparams_all_properties: true
-
 workspace:
   default_task_type: sequence_regression
   dataset_name: uniprot_protparams
@@ -8,7 +6,3 @@ workspace:
   target_type: continuous
   label_format: scalar
   num_labels: null
-
-steps:
-  prepare:
-    label_column: gravy # single-property mode: set protparams_all_properties=false

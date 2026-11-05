@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import polars as pl
 import pytest
+from pydantic import ValidationError
 
 from modules.evaluate.src.contracts.config_loader import load_evaluation_config
 from modules.evaluate.src.metrics.tables import aggregate_protparams
@@ -129,13 +130,11 @@ def test_suite_overwrite_failure_removes_stale_summary(suite, monkeypatch):
     assert not (output / "property_scores.parquet").exists()
 
 
-@pytest.mark.parametrize("all_properties", [True, False])
-def test_entry_point_dispatches_suite_or_single_property(suite, monkeypatch, all_properties):
+def test_entry_point_always_dispatches_protparams_suite(suite, monkeypatch):
     import sys
     from modules.evaluate.src import run_evaluate
 
     config, accelerator, _ = suite
-    config.protparams_all_properties = all_properties
     suite_runner, single = MagicMock(), MagicMock()
     monkeypatch.setattr(sys, "argv", ["run_evaluate", "config.yaml"])
     monkeypatch.setattr(run_evaluate, "load_evaluation_config", lambda **kwargs: config)
@@ -143,5 +142,13 @@ def test_entry_point_dispatches_suite_or_single_property(suite, monkeypatch, all
     monkeypatch.setattr(run_evaluate, "run_protparams", suite_runner)
     monkeypatch.setattr(run_evaluate, "run_pipeline", single)
     run_evaluate.main()
-    assert suite_runner.call_count == int(all_properties)
-    assert single.call_count == int(not all_properties)
+    suite_runner.assert_called_once()
+    single.assert_not_called()
+
+
+def test_legacy_single_property_switch_is_rejected(suite):
+    config, _, _ = suite
+    payload = config.model_dump()
+    payload["protparams_all_properties"] = False
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        type(config).model_validate(payload)

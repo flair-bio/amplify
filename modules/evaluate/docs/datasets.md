@@ -689,11 +689,11 @@ The runner writes `property_scores.parquet` and `summary.json` under
 `<model_root>/<variant>-<run_id>-summary/seed_<seed>/` only after all properties
 complete. Negative R² values are retained; targets are never pooled.
 Missing, nonfinite, or incompatible results prevent publication of a partial mean.
-All-property mode requires ordinary regression probes, without layerwise or
-additional test sets. For a single property, pass
-`protparams_all_properties=false steps.prepare.label_column=gravy` and use a
-distinct `workspace.run_id`. Baseline-only and non-regression evaluations
-continue to use their existing paths.
+Regression evaluation of `uniprot_protparams` always runs the complete property
+suite; selecting an individual property is not supported. The suite requires
+ordinary regression probes, without layerwise or additional test sets.
+Baseline-only and non-regression evaluations continue to use their existing
+paths.
 
 ### Pseudo-perplexity: UniProt UR100P test set
 
