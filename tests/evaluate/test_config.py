@@ -379,7 +379,7 @@ class TestShippedConfigOverlays:
             ("pseudo_perplexity", "localization_prediction"),
             ("pseudo_perplexity", "ssp_q3"),
             ("pseudo_perplexity", "contact_prediction_casp"),
-            ("calibration", "human_calibration"),
+            ("calibration", "omicmsa_calibration"),
         ],
     )
     def test_shipped_task_dataset_combinations_parse(self, task_name, dataset_name):

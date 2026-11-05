@@ -102,7 +102,6 @@ download HF snapshot                       download API/file sources (URL-keyed 
 modules/evaluate/scripts/dataset_sourcing/
     ├── configs/*.yaml ← one shipped config per source
     ├── source_*.py    ← one entry point per source
-    ├── run_hhblits.py ← alignment entry point
     └── shared/
         ├── config.py      ← shared Pydantic schemas (sourcing, UniProt query, label support, upload)
         ├── spec.py        ← DatasetSourceSpec: repo-id template + column renames (HF flow)
@@ -148,8 +147,7 @@ differs, that is noted.
 | [`source_interpro.yaml`](../scripts/dataset_sourcing/configs/source_interpro.yaml) | All 7 InterPro entry types, human Swiss-Prot |
 | [`source_uniprot_protparams.yaml`](../scripts/dataset_sourcing/configs/source_uniprot_protparams.yaml) | `uniprot_protparams`, human Swiss-Prot |
 | [`source_proteingym.yaml`](../scripts/dataset_sourcing/configs/source_proteingym.yaml) | `dms_substitutions` track, assays combined |
-| [`run_hhblits.yaml`](../scripts/dataset_sourcing/configs/run_hhblits.yaml) | Step 1 of the from-scratch calibration build: HHblits alignments of the human reference proteome (needs HH-suite and a BFD database; one shard per SLURM array task) |
-| [`source_calibration.yaml`](../scripts/dataset_sourcing/configs/source_calibration.yaml) | Step 2: `human_calibration` from those alignments (≥ 10 homologs, consensus ≥ 0.70), or from precomputed profile CSVs via overrides |
+| [`source_calibration.yaml`](../scripts/dataset_sourcing/configs/source_calibration.yaml) | `omicmsa_calibration` from a precomputed homolog-profile export (balanced and high-NT subsets) |
 
 **Selection and paths**
 
@@ -889,48 +887,26 @@ uv run python modules/evaluate/scripts/dataset_sourcing/source_proteingym.py \
 
 ### Calibration
 
-`human_calibration` stores, for each conserved column of a human protein,
-the amino-acid frequencies among its homologs (see the
-[dataset entry](datasets.md#calibration)). It can be built from either input:
+`omicmsa_calibration` is read from a precomputed export (see the
+[dataset entry](datasets.md#calibration)). The export directory holds
+`result.json` plus `balanced/` and `high_nt_095/`, each with `sequences.csv`,
+`consensus_positions.csv` and `position_support.csv`.
 
-- **From scratch (alignments).** Two steps:
-  1. [`run_hhblits.py`](../scripts/dataset_sourcing/run_hhblits.py) downloads the
-     UniProt human reference proteome (UP000005640) and runs HHblits once per
-     protein. It writes `<work_dir>/a3m/<accession>.a3m`, with HHblits
-     defaults `-id 99 -cov 50 -qid 50`.
-     - Requires [HH-suite](https://github.com/soedinglab/hh-suite)
-       (`conda install -c bioconda hhsuite`) and a database such as full
-       [BFD](https://bfd.mmseqs.com/), which is ~272 GB to download and
-       ~1.8 TB unpacked.
-     - Each protein takes minutes, so run it as a SLURM array. Inside an
-       array job, `shard_index`/`shard_count` default to the array task.
-     - Existing alignments are skipped, so a rerun resumes.
-  2. `source_calibration.py` with `a3m_dir` builds the profiles:
-     - It strips insertions (lowercase), counts the query plus its homologs at
-       each query column, ignoring gaps and non-standard letters.
-     - It keeps columns whose top residue reaches `min_consensus_freq`.
-     - It skips proteins with fewer than `min_homologs` homologs.
-- **From precomputed CSVs.** `source_calibration.py` with `proteome_path` and
-  `consensus_path` rebuilds the published dataset from precomputed profiles.
-  These lack homolog counts, so `min_homologs` does not apply.
+`source_calibration.py`:
 
-Any a3m directory works for step 2, so a new organism or database only needs a
-different `fasta`/`database` in step 1.
+- merges both subsets, keeping a site present in both once with both flags;
+- checks the conservation bin edges, canonical residues, T/NT categories and
+  that each `wt_aa` matches its sequence;
+- bins each site by its consensus share and encodes the (possibly tied)
+  consensus residues as a bitmask;
+- deals proteins into 5 folds, keeping identical sequences together, or reads
+  them from `groups_path` (`dataset, sequence_name, group, fold`).
 
 ```bash
-S=modules/evaluate/scripts/dataset_sourcing
-C=modules/evaluate/scripts/dataset_sourcing/configs
-
-# Step 1, on a cluster: 100 array tasks, each aligning 1/100 of the proteome
-sbatch --array=0-99 --cpus-per-task=8 --wrap \
-    "uv run python $S/run_hhblits.py $C/run_hhblits.yaml database=/path/to/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt cpu=8"
-
-# Step 2, once all shards are done
-uv run python $S/source_calibration.py $C/source_calibration.yaml
-
-# Or build from precomputed profile CSVs
-uv run python $S/source_calibration.py $C/source_calibration.yaml a3m_dir=null \
-    proteome_path=/path/to/proteome.csv consensus_path=/path/to/consensus.csv
+uv run python modules/evaluate/scripts/dataset_sourcing/source_calibration.py \
+    modules/evaluate/scripts/dataset_sourcing/configs/source_calibration.yaml \
+    export_dir=/path/to/omicmsa_final_18k_v1 \
+    upload_layout=single_repo repo_id=flair-bio/evaluation-suite
 ```
 
 ---

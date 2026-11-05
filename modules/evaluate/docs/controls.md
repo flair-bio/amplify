@@ -269,7 +269,8 @@ Per (control, metric), Score reports:
   Metrics are not pooled, because accuracy, F1, and MCC on the same predictions
   are highly correlated.
 - Rows that share a source ID (per-residue rows from one protein, or the
-  calibration positions of one protein) are resampled and swapped together.
+  calibration sites of one protein) are resampled and swapped together.
+  Calibration fits each condition's temperatures once, before resampling.
 
 Column layout and a loading snippet: [Reading results](../README.md#reading-results).
 Settings: [Step 4 — Score](../README.md#step-4--score). Implementation:

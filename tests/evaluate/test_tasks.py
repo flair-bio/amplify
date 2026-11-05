@@ -103,9 +103,10 @@ def test_sequence_label_validation_does_not_allow_token_ignore_index():
 
 
 def _calibration_label_rows(batch_size: int, seq_len: int) -> list[list[float]]:
-    """[mask idx, wt idx, 20 AA token ids, 20 homolog freqs] per row."""
+    """[mask idx, 20 AA token ids, 20 homolog freqs, 6 site fields] per row."""
     freqs = [0.05] * 20
-    return [[i % seq_len, i % 20, *range(20), *freqs] for i in range(batch_size)]
+    site = [1, 0, 0, 1, 0, 1]
+    return [[i % seq_len, *range(20), *freqs, *site] for i in range(batch_size)]
 
 
 @pytest.fixture(
@@ -152,7 +153,7 @@ def test_collate_labels_shape(task: TaskHandler):
     elif task.name == "pseudo_perplexity":
         assert collated.shape == (batch_size, seq_len)
     elif task.name == "calibration":
-        assert collated.shape == (batch_size, 42)
+        assert collated.shape == (batch_size, 47)
     elif task.is_ragged:
         assert collated.shape == (batch_size, seq_len)
     elif is_multilabel:
@@ -188,8 +189,7 @@ def test_extract_predictions_reduces_class_dimension(task: TaskHandler):
         logits = torch.randn(2, 4, 25)
         labels = torch.tensor(_calibration_label_rows(2, 4))
         preds = task.extract_predictions(logits, labels=labels)
-        assert preds.shape == (2, 2)  # [kl, predicted AA index]
-        assert (preds[:, 0] >= 0).all()
+        assert preds.shape == (2, 20)  # raw amino-acid logits
         return
     # sequence_regression's head emits a single scalar logit (num_labels=1);
     # every other task type emits per-class logits.
@@ -220,7 +220,7 @@ def test_split_batch_rows_is_row_aligned(task: TaskHandler):
         labels[0, 1] = 1
         labels[1, 2] = 2
     elif task.name == "calibration":
-        preds = torch.tensor([[0.5, 3.0], [1.2, 7.0]])
+        preds = torch.randn(2, 20)
         labels = torch.tensor(_calibration_label_rows(2, 3))
     elif task.is_ragged:
         preds = torch.tensor([[1, 2, -100], [3, 4, 5]])
@@ -267,10 +267,12 @@ def test_default_metrics_are_computable(task: TaskHandler):
         predictions = rng.normal(size=n).tolist()
         labels = rng.normal(size=n).tolist()
     elif task.name == "calibration":
+        # [kl, kl_fit, temperature, pred_idx] / [is_t, balanced, high_nt, fold, mask]
         predictions = [
-            [float(kl), int(p)] for kl, p in zip(rng.random(n), rng.integers(0, 20, n))
+            [kl, kl, 1.0, int(p)]
+            for kl, p in zip(rng.random(n), rng.integers(0, 20, n))
         ]
-        labels = [[0, 0], [1, 1], [2, 5], [3, 3], [4, 9], [5, 5]]  # T and NT rows
+        labels = [[i % 2, 1, 1 - i % 2, i % 5, 1] for i in range(n)]
     elif task.name == "sequence_multilabel_classification":
         num_labels = 3
         predictions = rng.integers(0, 2, size=(n, num_labels)).tolist()

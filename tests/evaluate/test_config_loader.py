@@ -251,7 +251,7 @@ def test_token_classification_uses_residue_scale_hpo():
 @pytest.mark.parametrize(
     "task,dataset",
     [
-        ("calibration", "human_calibration"),
+        ("calibration", "omicmsa_calibration"),
         ("pseudo_perplexity", "uniprot_protparams"),
     ],
 )
@@ -328,7 +328,7 @@ def test_dataset_default_matches_explicit_task_config(dataset):
             ["random_trunk"],
         ),
         ("pseudo_perplexity", "uniprot_protparams", ["random_trunk"]),
-        ("calibration", "human_calibration", ["random_trunk"]),
+        ("calibration", "omicmsa_calibration", ["random_trunk"]),
     ],
 )
 def test_task_control_defaults(task, dataset, controls):

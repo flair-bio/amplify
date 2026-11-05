@@ -1,36 +1,47 @@
-"""Calibration task: windowing, reference scoring, metrics, and sourcing."""
+"""Calibration task: windowing, temperature fitting, scoring, and sourcing."""
 
 from __future__ import annotations
 
-import sys
+import json
 
 import numpy as np
 import polars as pl
 import pytest
-import torch
 from datasets import Dataset, DatasetDict
+from scipy.special import softmax
 
-from modules.evaluate.scripts.dataset_sourcing import run_hhblits
 from modules.evaluate.scripts.dataset_sourcing.source_calibration import (
-    SourceCalibrationConfig,
+    CONSERVATION_EDGES,
+    assign_folds,
     build_calibration_frame,
-    read_a3m_profiles,
+    read_export,
 )
+from modules.evaluate.src.contracts.artifacts import EvaluationMetadata, PredictOutput
+from modules.evaluate.src.contracts.config import ScoreConfig
 from modules.evaluate.src.dataset.dataloader import tokenize_dataset
+from modules.evaluate.src.metrics.bootstrap import id_groups
+from modules.evaluate.src.metrics.calibration_metrics import (
+    crossfit_temperatures,
+    fit_temperature,
+    forward_kl,
+)
 from modules.evaluate.src.tasks import get_task
 from modules.evaluate.src.tasks.calibration import WINDOW_RESIDUES
-from modules.evaluate.src.utils.amino_acids import CANONICAL_AMINO_ACIDS, resolve_aa_token_ids
-from modules.evaluate.src.metrics.bootstrap import id_groups
+from modules.evaluate.src.utils.amino_acids import (
+    CANONICAL_AMINO_ACIDS,
+    resolve_aa_token_ids,
+)
 from tests.evaluate.conftest import LONG_SEQUENCE
 
 SEQUENCE = (LONG_SEQUENCE * 20)[:1200]
 POSITIONS = [5, 600, 1190]
+SITE = [1, 0, 0, 1, 0, 1]  # is_t, bin, fold, in_balanced, in_high_nt, mask
 
 
-def _profile(position: int, consensus: str) -> list[float]:
+def _site(position: int, consensus: str) -> list[float]:
     freqs = [0.0] * 20
     freqs[CANONICAL_AMINO_ACIDS.index(consensus)] = 1.0
-    return [float(position), *freqs]
+    return [float(position), *freqs, *SITE]
 
 
 def _tokenize(
@@ -42,7 +53,7 @@ def _tokenize(
                 {
                     "id": ["P1"],
                     "sequence": [SEQUENCE],
-                    "targets": [[_profile(p, SEQUENCE[p]) for p in positions]],
+                    "targets": [[_site(p, SEQUENCE[p]) for p in positions]],
                 }
             )
         }
@@ -58,6 +69,10 @@ def _tokenize(
     )["test"]
 
 
+def _consensus(label: list[float]) -> str:
+    return CANONICAL_AMINO_ACIDS[int(np.argmax(label[21:41]))]
+
+
 def test_windows_are_centred_and_clamped(protein_tokenizer):
     rows = _tokenize(protein_tokenizer, max_length=100_000)
     aa_ids = resolve_aa_token_ids(protein_tokenizer)
@@ -68,17 +83,18 @@ def test_windows_are_centred_and_clamped(protein_tokenizer):
     expected_starts = [0, 600 - WINDOW_RESIDUES // 2, len(SEQUENCE) - WINDOW_RESIDUES]
     for row, pos, start in zip(rows, POSITIONS, expected_starts):
         input_ids, label = row["input_ids"], row["targets"]
-        mask_idx, wt_idx = int(label[0]), int(label[1])
+        mask_idx = int(label[0])
         assert len(input_ids) == WINDOW_RESIDUES + 2
         assert input_ids[0] == protein_tokenizer.bos_token_id
         assert input_ids[-1] == protein_tokenizer.eos_token_id
         assert input_ids[mask_idx] == protein_tokenizer.mask_token_id
         assert mask_idx == 1 + pos - start
-        assert CANONICAL_AMINO_ACIDS[wt_idx] == SEQUENCE[pos]
         unmasked = list(input_ids)
         unmasked[mask_idx] = residue_ids[pos]
         assert unmasked[1:-1] == residue_ids[start : start + WINDOW_RESIDUES]
-        assert [int(v) for v in label[2:22]] == list(aa_ids)
+        assert [int(v) for v in label[1:21]] == list(aa_ids)
+        assert _consensus(label) == SEQUENCE[pos]
+        assert [int(v) for v in label[41:]] == SITE
 
 
 @pytest.mark.parametrize("random_truncate", [False, True])
@@ -96,67 +112,122 @@ def test_cropped_sequences_keep_only_in_window_positions(
     assert 8 <= len(rows) <= 9
     for row in rows:
         pos = int(row["id"].split(":")[1])
-        assert CANONICAL_AMINO_ACIDS[int(row["targets"][1])] == SEQUENCE[pos]
+        assert _consensus(row["targets"]) == SEQUENCE[pos]
     if not random_truncate:
         assert rows["id"] == [f"P1:{p}" for p in range(0, 62, 7)]
 
 
-def _reference_softmax_over_aa(logits: np.ndarray, aa_ids: list[int]) -> np.ndarray:
-    aa_logits = logits[aa_ids]
-    exp = np.exp(aa_logits - aa_logits.max())
-    return exp / exp.sum()
+def _profiles(logits: np.ndarray, temperature: float) -> np.ndarray:
+    return softmax(logits / temperature, axis=1)
 
 
-def _reference_kl(p: np.ndarray, q: np.ndarray, eps: float = 1e-10) -> float:
-    p = np.clip(p, eps, 1.0)
-    q = np.clip(q, eps, 1.0)
-    return float(np.sum(p * np.log(p / q)))
-
-
-def test_scoring_matches_reference_formulas():
-    task = get_task("calibration")
+def test_forward_kl_matches_direct_formula_with_zero_frequencies():
     rng = np.random.default_rng(0)
-    batch, seq_len, vocab = 4, 6, 33
-    logits = rng.normal(size=(batch, seq_len, vocab)).astype(np.float32)
-    aa_ids = rng.permutation(vocab)[:20].tolist()
-    freqs = rng.dirichlet(np.full(20, 0.3), size=batch)
-    freqs[0] = 0.0
-    freqs[0, 3] = 1.0  # exercise the zero-frequency clipping
-    labels = [[i + 1, i, *aa_ids, *freqs[i]] for i in range(batch)]
+    logits = rng.normal(size=(3, 20))
+    profiles = rng.dirichlet(np.full(20, 0.3), size=3)
+    profiles[0] = 0.0
+    profiles[0, 3] = 1.0
+    temperatures = np.array([1.0, 2.0, 0.5])
 
-    label_tensor = torch.tensor(labels, dtype=task.label_dtype)
-    preds = task.extract_predictions(torch.from_numpy(logits), labels=label_tensor)
-    rows = task.split_batch_rows(preds, label_tensor)
-
-    for i, (pred, compact_label) in enumerate(rows):
-        model_probs = _reference_softmax_over_aa(logits[i, i + 1], aa_ids)
-        homolog = freqs[i] / freqs[i].sum()
-        assert pred[0] == pytest.approx(_reference_kl(homolog, model_probs), rel=1e-4)
-        assert pred[1] == int(np.argmax(model_probs))
-        assert compact_label == [i, int(np.argmax(freqs[i]))]
-
-
-def test_metrics_split_target_and_non_target_positions():
-    task = get_task("calibration")
-    # labels are [wt_idx, consensus_idx]; predictions are [kl, pred_idx].
-    labels = [[0, 0], [1, 1], [2, 5], [3, 7]]
-    predictions = [[0.1, 0], [0.3, 4], [1.0, 5], [2.0, 3]]
-
-    scores = task.compute_metrics(predictions, labels, task.default_metrics())
-
-    assert scores == pytest.approx(
-        {
-            "kl": 0.85,
-            "kl_t": 0.2,
-            "kl_nt": 1.5,
-            "calibration": 100 * np.exp(-np.array([0.1, 0.3, 1.0, 2.0])).mean(),
-            "calibration_t": 100 * np.exp(-np.array([0.1, 0.3])).mean(),
-            "calibration_nt": 100 * np.exp(-np.array([1.0, 2.0])).mean(),
-            "accuracy_t": 0.5,
-            "accuracy_nt": 0.5,
-            "memorization_nt": 0.5,
-        }
+    model = softmax(logits / temperatures[:, None], axis=1)
+    support = profiles > 0
+    expected = [
+        np.sum(p[s] * np.log(p[s] / q[s])) for p, q, s in zip(profiles, model, support)
+    ]
+    np.testing.assert_allclose(forward_kl(logits, profiles, temperatures), expected)
+    np.testing.assert_allclose(
+        forward_kl(logits, _profiles(logits, 1.0), 1.0), 0, atol=1e-12
     )
+
+
+@pytest.mark.parametrize(
+    ("true_temperature", "expected", "bound"),
+    [
+        (2.0, 2.0, "none"),
+        (0.6, 0.6, "none"),
+        (20.0, 8.0, "upper"),
+        (0.1, 0.25, "lower"),
+    ],
+)
+def test_fit_temperature_recovers_the_profile_temperature(
+    true_temperature, expected, bound
+):
+    rng = np.random.default_rng(1)
+    logits = rng.normal(size=(36, 20))
+    strata = np.arange(36) % 18
+
+    temperature, hit = fit_temperature(
+        logits, _profiles(logits, true_temperature), strata
+    )
+
+    assert temperature == pytest.approx(expected, rel=1e-6)
+    assert hit == bound
+
+
+def test_crossfit_fits_on_other_folds_balanced_rows_only():
+    rng = np.random.default_rng(2)
+    logits = rng.normal(size=(60, 20))
+    folds = np.repeat([0, 1, 2], 20)
+    fit_rows = np.arange(60) % 4 != 0  # every 4th row is high-NT only
+    # Fold 0 profiles follow T=2, fold 1 T=0.5; fold 2's high-NT-only rows
+    # would pull the fit to T=8 if they were used.
+    temperature = np.select([folds == 0, folds == 1], [2.0, 0.5], 8.0)
+    temperature[(folds == 2) & fit_rows] = 2.0
+    profiles = softmax(logits / temperature[:, None], axis=1)
+
+    fitted = crossfit_temperatures(
+        logits, profiles, np.arange(60) % 18, folds, fit_rows
+    )
+
+    assert fitted[folds == 1] == pytest.approx(2.0, rel=1e-6)
+    assert np.unique(fitted[folds == 0]).size == 1
+    assert 0.5 < fitted[0] < 2.0
+
+
+def test_score_crossfits_trained_and_control_temperatures():
+    rng = np.random.default_rng(3)
+    n = 40
+    logits = rng.normal(size=(n, 20))
+    profiles = _profiles(logits, 2.0)
+    is_t = np.arange(n) % 2
+    in_balanced = (np.arange(n) % 5 != 0).astype(int)
+    in_high_nt = 1 - in_balanced
+    folds = np.arange(n) % 2
+    bins = np.arange(n) % 9
+    consensus_mask = 1 << profiles.argmax(1)
+    labels = np.column_stack(
+        [profiles, is_t, bins, folds, in_balanced, in_high_nt, consensus_mask]
+    )
+    ids = [f"P{i // 4}:{i}" for i in range(n)]
+    output = PredictOutput(
+        metadata=EvaluationMetadata(
+            model_name="toy", dataset_name="toy", task_type="calibration"
+        ),
+        predictions=pl.DataFrame(
+            {"id": ids, "prediction": logits.tolist(), "label": labels.tolist()}
+        ),
+        controls={
+            "random_trunk": pl.DataFrame(
+                {"id": ids, "prediction": (3 * logits).tolist()}
+            )
+        },
+        requested_controls=["random_trunk"],
+    )
+    task = get_task("calibration")
+
+    result = task.score(output, ScoreConfig(metrics=list(task.metrics)), seed=0)
+
+    trained = result.condition_scores["trained"]
+    control = result.condition_scores["random_trunk"]
+    t_rows = (is_t == 1) & (in_balanced == 1)
+    kl = forward_kl(logits, profiles, 1.0)
+    assert trained["kl_t"] == pytest.approx(kl[t_rows].mean())
+    assert trained["calibration_t"] == pytest.approx(100 * np.exp(-kl[t_rows].mean()))
+    assert trained["calibration_fit_high_nt"] == pytest.approx(100)
+    assert trained["temperature"] == pytest.approx(2.0)
+    assert control["temperature"] == pytest.approx(6.0)
+    assert control["calibration_fit_nt"] == pytest.approx(100)
+    assert trained["accuracy_t"] == control["accuracy_nt"] == 1.0
 
 
 def test_bootstrap_resamples_whole_proteins():
@@ -165,122 +236,90 @@ def test_bootstrap_resamples_whole_proteins():
     np.testing.assert_array_equal(groups, [0, 0, 1, 2])
 
 
-def test_build_calibration_frame_filters_and_groups():
-    proteome = pl.DataFrame(
-        {"id": ["P1", "P2", "P3"], "sequence": ["ACDE", "MKLV", "WYXA"]}
+def _write_subset(directory, sequences, sites):
+    directory.mkdir(parents=True)
+    pl.DataFrame(sequences, schema=["id", "sequence"], orient="row").write_csv(
+        directory / "sequences.csv"
     )
+    positions, support = [], []
+    for name, position, wt, profile, category, consensus, proportion in sites:
+        freqs = {aa: profile.get(aa, 0.0) for aa in CANONICAL_AMINO_ACIDS}
+        positions.append(
+            {"sequence_name": name, "position": position, "wt_aa": wt, **freqs}
+        )
+        support.append(
+            {
+                "sequence_name": name,
+                "position": position,
+                "category": category,
+                "consensus_aas": consensus,
+                "consensus_proportion": proportion,
+            }
+        )
+    pl.DataFrame(positions).write_csv(directory / "consensus_positions.csv")
+    pl.DataFrame(support).write_csv(directory / "position_support.csv")
 
-    def row(name, pos, wt, consensus, freq):
-        freqs = {aa: 0.0 for aa in CANONICAL_AMINO_ACIDS}
-        freqs[consensus] = freq
-        freqs["A" if consensus != "A" else "C"] += 1.0 - freq
-        return {"sequence_name": name, "position": pos, "wt_aa": wt, **freqs}
 
-    consensus = pl.DataFrame(
+@pytest.fixture
+def export_dir(tmp_path):
+    (tmp_path / "result.json").write_text(
+        json.dumps({"dataset": "toy", "selection": {"edges": CONSERVATION_EDGES}})
+    )
+    sequences = [("P1", "ACDE"), ("P2", "MKLV"), ("P3", "ACDE")]
+    _write_subset(
+        tmp_path / "balanced",
+        sequences,
         [
-            row("P1", 2, "D", "D", 0.9),
-            row("P1", 0, "A", "C", 0.8),
-            row("P1", 1, "C", "C", 0.5),  # below threshold
-            row("P2", 0, "M", "M", 0.9),
-            row("P2", 1, "A", "A", 0.9),  # wt mismatch: drop all of P2
-            row("P3", 2, "X", "A", 0.9),  # non-standard wt
-            row("P3", 3, "A", "A", 0.9),
-            row("P9", 0, "A", "A", 0.9),  # not in the proteome
-        ]
+            ("P1", 0, "A", {"A": 0.15, "C": 0.85}, "NT", "C", 0.85),
+            ("P2", 1, "K", {"K": 1.0}, "T", "K", 1.0),
+            ("P3", 2, "D", {"G": 0.5, "N": 0.5}, "NT", "G|N", 0.5),
+        ],
     )
-
-    frame = build_calibration_frame(proteome, consensus, 0.7)
-
-    assert frame["id"].to_list() == ["P1", "P3"]
-    assert frame["sequence"].to_list() == ["ACDE", "WYXA"]
-    p1_targets = frame["targets"][0].to_list()
-    assert [t[0] for t in p1_targets] == [0.0, 2.0]
-    assert all(len(t) == 21 for t in p1_targets)
-    assert p1_targets[0][1 + CANONICAL_AMINO_ACIDS.index("C")] == pytest.approx(0.8)
-    assert [t[0] for t in frame["targets"][1].to_list()] == [3.0]
-
-
-A3M = """>Q1 query
-ACDEF
->h1
-ACkkDEF
->h2
-AC-EW
->h3
-WX-EW
-"""
-
-
-def test_read_a3m_profiles_counts_query_and_homologs(tmp_path):
-    (tmp_path / "Q1.a3m").write_text(A3M)
-    (tmp_path / "Q2.align.a3m").write_text(">Q2\nMK\n>h1\nMK\n")
-
-    proteome, consensus = read_a3m_profiles(tmp_path, 0.7, min_homologs=2)
-
-    assert proteome.to_dicts() == [{"id": "Q1", "sequence": "ACDEF"}]
-    # Insertions are dropped, gaps and X are not counted, the query is.
-    # Column 4 (F/F/W/W) is below the threshold.
-    assert consensus["position"].to_list() == [0, 1, 2, 3]
-    assert consensus["wt_aa"].to_list() == ["A", "C", "D", "E"]
-    assert consensus["A"][0] == pytest.approx(0.75)
-    assert consensus["W"][0] == pytest.approx(0.25)
-    assert consensus["C"][1] == pytest.approx(1.0)
-    assert consensus["D"][2] == pytest.approx(1.0)
-
-    proteome, _ = read_a3m_profiles(tmp_path, 0.7, min_homologs=1)
-    assert proteome["id"].to_list() == ["Q1", "Q2"]
-
-
-def test_source_config_requires_one_input(tmp_path):
-    SourceCalibrationConfig(a3m_dir=tmp_path)
-    SourceCalibrationConfig(proteome_path=tmp_path, consensus_path=tmp_path)
-    for kwargs in (
-        {},
-        {"proteome_path": tmp_path},
-        {"a3m_dir": tmp_path, "proteome_path": tmp_path, "consensus_path": tmp_path},
-    ):
-        with pytest.raises(ValueError, match="a3m_dir"):
-            SourceCalibrationConfig(**kwargs)
-
-
-def test_run_hhblits_shards_resumes_and_feeds_sourcing(tmp_path):
-    fake = tmp_path / "hhblits"
-    calls = tmp_path / "calls.txt"
-    fake.write_text(
-        f"""#!{sys.executable}
-import sys
-args = sys.argv[1:]
-opt = lambda flag: args[args.index(flag) + 1]
-open({str(calls)!r}, "a").write(" ".join(args) + "\\n")
-query = open(opt("-i")).read()
-open(opt("-oa3m"), "w").write(query + ">hom\\n" + query.split()[-1] + "\\n")
-"""
+    _write_subset(
+        tmp_path / "high_nt_095",
+        sequences[:1],
+        [
+            ("P1", 0, "A", {"A": 0.15, "C": 0.85}, "NT", "C", 0.85),
+            ("P1", 3, "E", {"D": 0.96, "E": 0.04}, "NT", "D", 0.96),
+        ],
     )
-    fake.chmod(0o755)
-    fasta = tmp_path / "proteome.fasta"
-    fasta.write_text(">sp|P1|A_HUMAN x\nMKV\n>sp|P2|B_HUMAN\nAC\nDE\n>P3\nWY\n")
-    config = run_hhblits.RunHHblitsConfig(
-        fasta=str(fasta),
-        database=tmp_path / "db",
-        work_dir=tmp_path / "work",
-        hhblits_bin=str(fake),
-        shard_index=0,
-        shard_count=2,
-    )
-    a3m_dir = config.work_dir / "a3m"
-    a3m_dir.mkdir(parents=True)
-    (a3m_dir / "P3.a3m").write_text(">P3\nWY\n")  # already aligned
+    return tmp_path
 
-    run_hhblits.run(config)
 
-    # Shard 0 of 2 is P1 and P3; P3 exists, so only P1 is aligned.
-    assert sorted(p.name for p in a3m_dir.glob("*.a3m")) == ["P1.a3m", "P3.a3m"]
-    call = calls.read_text().splitlines()
-    assert len(call) == 1
-    assert f"-d {tmp_path / 'db'}" in call[0]
-    assert "-cpu 4 -id 99 -cov 50 -qid 50" in call[0]
+def test_sourcing_merges_subsets_into_site_targets(export_dir):
+    dataset, sequences, sites = read_export(export_dir)
+    folds = assign_folds(sequences)
+    frame = build_calibration_frame(sequences, sites, folds)
 
-    proteome, _ = read_a3m_profiles(a3m_dir, 0.7, min_homologs=1)
-    assert proteome.to_dicts() == [{"id": "P1", "sequence": "MKV"}]
+    assert dataset == "toy"
+    fold_of = dict(folds.iter_rows())
+    assert fold_of["P1"] == fold_of["P3"]  # identical sequences stay together
+    assert frame["id"].to_list() == ["P1", "P2", "P3"]
+    targets = {
+        (name, int(t[0])): t[21:]
+        for name, rows in zip(frame["id"], frame["targets"].to_list())
+        for t in rows
+    }
+    aa = CANONICAL_AMINO_ACIDS.index
+    # [is_t, bin, fold, in_balanced, in_high_nt, consensus_mask]
+    assert targets[("P1", 0)] == [0, 7, fold_of["P1"], 1, 1, 1 << aa("C")]
+    assert targets[("P1", 3)] == [0, 8, fold_of["P1"], 0, 1, 1 << aa("D")]
+    assert targets[("P2", 1)] == [1, 8, fold_of["P2"], 1, 0, 1 << aa("K")]
+    assert targets[("P3", 2)] == [
+        0,
+        4,
+        fold_of["P3"],
+        1,
+        0,
+        (1 << aa("G")) | (1 << aa("N")),
+    ]
+    p2 = frame["targets"][1].to_list()[0]
+    assert p2[1 + aa("K")] == 1.0
 
-    assert run_hhblits.read_fasta(fasta)["P2"] == "ACDE"
+
+def test_sourcing_rejects_wt_mismatch(export_dir):
+    path = export_dir / "balanced" / "consensus_positions.csv"
+    path.write_text(path.read_text().replace("P2,1,K", "P2,1,M"))
+
+    with pytest.raises(ValueError, match="wt_aa"):
+        read_export(export_dir)

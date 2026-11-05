@@ -1,29 +1,42 @@
 """Zero-shot calibration of MLM predictions against homolog amino-acid profiles.
 
-Labels list ``[position, f_A, ..., f_Y]`` per conserved position; each position
-is masked inside a residue window centred on it.
+Labels list ``[position, f_A, ..., f_Y, is_t, bin, fold, in_balanced,
+in_high_nt, consensus_mask]`` per site; each site is masked inside a residue
+window centred on it. Scoring fits one temperature per condition by
+cross-fitting over the folds.
 """
 
 from __future__ import annotations
 
+import logging
+from dataclasses import replace
+from functools import partial
 from typing import Any, ClassVar
 
+import numpy as np
+import polars as pl
 import torch
 from transformers import AutoModelForMaskedLM
 
-from modules.evaluate.src.metrics import metrics
+from modules.evaluate.src.contracts.artifacts import PredictOutput, ScoreOutput
+from modules.evaluate.src.contracts.config import ScoreConfig
+from modules.evaluate.src.metrics import calibration_metrics
+from modules.evaluate.src.metrics.calibration_metrics import COHORTS
 from modules.evaluate.src.tasks.base import FlatMetricsTask, MetricFn
 from modules.evaluate.src.tasks.registry import register_task
 from modules.evaluate.src.utils.amino_acids import resolve_aa_token_ids
 
+logger = logging.getLogger(__name__)
+
 NUM_AA = 20
 WINDOW_RESIDUES = 512
-KL_EPS = 1e-10
+# Site fields after the 20 profile frequencies.
+IS_T, BIN, FOLD, IN_BALANCED, IN_HIGH_NT, CONSENSUS_MASK = range(NUM_AA, NUM_AA + 6)
 
 
 @register_task
 class CalibrationTask(FlatMetricsTask):
-    """Mask each conserved residue and compare the MLM to its homolog profile."""
+    """Mask each site and compare the MLM to its homolog profile."""
 
     evaluation_modes = frozenset({"evaluate_as_is"})
     supports_packing = False
@@ -38,27 +51,29 @@ class CalibrationTask(FlatMetricsTask):
     accepted_label_formats = frozenset({"consensus_profile"})
 
     metrics: ClassVar[dict[str, MetricFn]] = {
-        "kl": metrics.calibration_kl,
-        "kl_t": metrics.calibration_kl_t,
-        "kl_nt": metrics.calibration_kl_nt,
-        "calibration": metrics.calibration_score,
-        "calibration_t": metrics.calibration_score_t,
-        "calibration_nt": metrics.calibration_score_nt,
-        "accuracy_t": metrics.calibration_accuracy_t,
-        "accuracy_nt": metrics.calibration_accuracy_nt,
-        "memorization_nt": metrics.calibration_memorization_nt,
+        **{
+            f"calibration_{c}": partial(calibration_metrics.cohort_score, cohort=c)
+            for c in COHORTS
+        },
+        **{
+            f"calibration_fit_{c}": partial(
+                calibration_metrics.cohort_score, cohort=c, fitted=True
+            )
+            for c in COHORTS
+        },
+        **{
+            f"kl_{c}": partial(calibration_metrics.cohort_kl, cohort=c) for c in COHORTS
+        },
+        **{
+            f"accuracy_{c}": partial(calibration_metrics.cohort_accuracy, cohort=c)
+            for c in COHORTS
+        },
+        "temperature": calibration_metrics.mean_temperature,
     }
-    default_metric_names = (
-        "kl",
-        "kl_t",
-        "kl_nt",
-        "calibration",
-        "calibration_t",
-        "calibration_nt",
-        "accuracy_t",
-        "accuracy_nt",
-        "memorization_nt",
-    )
+    default_metric_names = tuple(f"calibration_{c}" for c in COHORTS)
+    # Scores are computed against the true profiles before metrics run, so
+    # shuffling labels afterwards would only shuffle cohort membership.
+    supported_controls = FlatMetricsTask.supported_controls - {"scrambled_labels"}
 
     def build_model(
         self,
@@ -87,7 +102,7 @@ class CalibrationTask(FlatMetricsTask):
         example_index: int,
     ) -> list[list[float]]:
         # Re-express positions relative to the kept residues, keeping the
-        # original position for row ids: [local_pos, pos, f_A..f_Y].
+        # original position for row ids: [local_pos, pos, f_A..f_Y, site fields].
         return [
             [entry[0] - start, *entry]
             for entry in label
@@ -110,7 +125,6 @@ class CalibrationTask(FlatMetricsTask):
         if mask_token_id is None:
             raise ValueError("calibration requires a tokenizer mask token.")
         aa_ids = resolve_aa_token_ids(tokenizer)
-        aa_index = {token_id: i for i, token_id in enumerate(aa_ids)}
 
         leading = input_ids[:res_start]
         residues = input_ids[res_start:res_end]
@@ -118,20 +132,19 @@ class CalibrationTask(FlatMetricsTask):
         max_start = max(0, len(residues) - WINDOW_RESIDUES)
 
         rows: list[dict[str, Any]] = []
-        for local_pos, pos, *freqs in label:
+        for local_pos, pos, *site in label:
             local_pos = int(local_pos)
             start = min(max(0, local_pos - WINDOW_RESIDUES // 2), max_start)
             window = residues[start : start + WINDOW_RESIDUES]
             target = local_pos - start
-            wt_idx = aa_index[window[target]]
             window[target] = mask_token_id
             window_ids = leading + window + trailing
             rows.append(
                 {
                     "input_ids": window_ids,
                     "attention_mask": [1] * len(window_ids),
-                    # [mask index, wt index, 20 AA token ids, 20 homolog freqs]
-                    "label": [len(leading) + target, wt_idx, *aa_ids, *freqs],
+                    # [mask index, 20 AA token ids, 20 homolog freqs, site fields]
+                    "label": [len(leading) + target, *aa_ids, *site],
                     "id": f"{example_id}:{int(pos)}",
                 }
             )
@@ -140,32 +153,70 @@ class CalibrationTask(FlatMetricsTask):
     def extract_predictions(
         self, logits: torch.Tensor, *, labels: torch.Tensor | None = None
     ) -> torch.Tensor:
-        """Return ``[KL(p_homologs || p_model), predicted AA index]`` per row."""
+        """Return the 20 raw amino-acid logits at each masked position."""
         if labels is None:
             raise ValueError("calibration requires labels to locate masked tokens.")
 
         rows = torch.arange(labels.shape[0], device=logits.device)
         mask_idx = labels[:, 0].long()
-        aa_ids = labels[:, 2 : 2 + NUM_AA].long()
-        aa_logits = logits[rows, mask_idx].float().gather(1, aa_ids)
-        model_probs = aa_logits.softmax(dim=-1)
-
-        homolog = labels[:, 2 + NUM_AA :].float()
-        homolog = homolog / homolog.sum(dim=-1, keepdim=True)
-        p = homolog.clamp(KL_EPS, 1.0)
-        q = model_probs.clamp(KL_EPS, 1.0)
-        kl = (p * (p / q).log()).sum(dim=-1)
-        return torch.stack([kl, model_probs.argmax(dim=-1).float()], dim=-1)
+        aa_ids = labels[:, 1 : 1 + NUM_AA].long()
+        return logits[rows, mask_idx].float().gather(1, aa_ids)
 
     def split_batch_rows(
         self, predictions: torch.Tensor, labels: torch.Tensor
     ) -> list[tuple[Any, Any]]:
-        """Pair ``[kl, pred_idx]`` with ``[wt_idx, consensus_idx]``."""
-        wt_idx = labels[:, 1].long()
-        consensus_idx = labels[:, 2 + NUM_AA :].argmax(dim=-1)
-        compact_labels = torch.stack([wt_idx, consensus_idx], dim=-1)
-        return list(zip(predictions.cpu().tolist(), compact_labels.cpu().tolist()))
+        """Pair the AA logits with ``[f_A..f_Y, site fields]``."""
+        return list(
+            zip(predictions.cpu().tolist(), labels[:, 1 + NUM_AA :].cpu().tolist())
+        )
 
     def bootstrap_group_id(self, row_id: Any) -> Any:
         """Resample whole proteins: positions of one protein are correlated."""
         return row_id.rsplit(":", 1)[0]
+
+    def score(
+        self,
+        predictions: PredictOutput,
+        config: ScoreConfig,
+        *,
+        seed: int = 710019,
+    ) -> ScoreOutput:
+        """Cross-fit a temperature per condition, then score the KL rows.
+
+        Predictions become ``[kl, kl_fit, temperature, pred_idx]`` and labels
+        ``[is_t, in_balanced, in_high_nt, fold, consensus_mask]``.
+        """
+        labels = np.asarray(predictions.predictions["label"].to_list(), dtype=float)
+        profiles = labels[:, :NUM_AA] / labels[:, :NUM_AA].sum(1, keepdims=True)
+        strata = 2 * labels[:, BIN] + (1 - labels[:, IS_T])
+        folds = labels[:, FOLD]
+        fit_rows = labels[:, IN_BALANCED] == 1
+
+        def kl_rows(frame: pl.DataFrame, condition: str) -> pl.DataFrame:
+            logits = np.asarray(frame["prediction"].to_list(), dtype=float)
+            logger.info("Cross-fitting the %s temperature.", condition)
+            temperatures = calibration_metrics.crossfit_temperatures(
+                logits, profiles, strata, folds, fit_rows
+            )
+            rows = np.column_stack(
+                [
+                    calibration_metrics.forward_kl(logits, profiles, 1.0),
+                    calibration_metrics.forward_kl(logits, profiles, temperatures),
+                    temperatures,
+                    logits.argmax(1),
+                ]
+            )
+            return frame.with_columns(prediction=pl.Series(rows.tolist()))
+
+        compact = labels[:, [IS_T, IN_BALANCED, IN_HIGH_NT, FOLD, CONSENSUS_MASK]]
+        scored = replace(
+            predictions,
+            predictions=kl_rows(predictions.predictions, "trained").with_columns(
+                label=pl.Series(compact.tolist())
+            ),
+            controls={
+                name: kl_rows(frame, name)
+                for name, frame in predictions.controls.items()
+            },
+        )
+        return super().score(scored, config, seed=seed)
