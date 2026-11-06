@@ -758,6 +758,11 @@ match the amino-acid frequencies among the protein's homologs?
   with [`tasks/calibration.yaml`](../configs/tasks/calibration.yaml), which
   keeps full sequences (`max_length: 100000`) so the handler can centre its
   own window. Each site is a separate forward pass (22,254 in total).
+- **Baseline:** `human_residue` predicts the human residue at each site,
+  ignoring its homologs, with its own fitted temperature (T 47.4, NT 18.3,
+  high-NT 4.0). Generate it once with `--baselines` and
+  [`baselines/calibration.yaml`](../configs/baselines/calibration.yaml); see
+  [controls](controls.md#how-controls-flow-through-a-run).
 
 ---
 

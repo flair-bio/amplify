@@ -346,6 +346,36 @@ def build_amino_acid_frequency_baseline(
     return pl.DataFrame({"id": output_ids, "prediction": output_scores})
 
 
+def build_human_residue_baseline(
+    rows: list[dict[str, Any]], *, max_residues: int
+) -> pl.DataFrame:
+    """Predict each site's human residue, ignoring its homolog profile.
+
+    The human residue gets logit ln(19) and the others 0, i.e. half the mass at
+    T=1; the fitted temperature then picks the best mass.
+    """
+    logit = math.log(len(AMINO_ACIDS) - 1)
+    ids, labels, predictions = [], [], []
+    for row in rows:
+        sequence = row["sequence"].upper()
+        for position, *site in row["label"]:
+            position = int(position)
+            # Model runs keep the first max_residues residues.
+            if position >= max_residues:
+                continue
+            residue = sequence[position]
+            if residue not in AMINO_ACIDS:
+                raise ValueError(
+                    f"Unsupported human residue {residue!r} at {row['id']}:{position}."
+                )
+            ids.append(f"{row['id']}:{position}")
+            labels.append(site)
+            predictions.append([logit * (aa == residue) for aa in AMINO_ACIDS])
+    if not ids:
+        raise ValueError("Human-residue baseline requires scored sites.")
+    return pl.DataFrame({"id": ids, "label": labels, "prediction": predictions})
+
+
 def build_prediction_baseline(
     name: BaselineName,
     task_type: str,
