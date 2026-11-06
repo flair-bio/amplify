@@ -897,7 +897,7 @@ def test_invalid_training_targets_rejected(tmp_path, targets):
         run_baselines(config, dataset=data)
 
 
-def test_multi_target_baselines_score_each_property_and_resume(tmp_path, monkeypatch):
+def test_multi_target_baselines_score_each_target_and_resume(tmp_path, monkeypatch):
     data = DatasetDict(
         {
             "train": Dataset.from_dict(
@@ -930,10 +930,10 @@ def test_multi_target_baselines_score_each_property_and_resume(tmp_path, monkeyp
             "multi_target": {
                 "target_columns": ["alpha", "beta"],
                 "metric": "r2",
-                "target_key": "property",
-                "count_key": "n_properties",
-                "aggregation_name": "unweighted_property_mean",
-                "score_table_filename": "property_scores.parquet",
+                "target_key": "label_name",
+                "count_key": "n_labels",
+                "aggregation_name": "unweighted_label_mean",
+                "score_table_filename": "custom_scores.parquet",
             },
             "baselines": {"names": ["train_mean", "composition", "mmseqs_knn"]},
             "score": ScoreConfig(metrics=["mse"]),
@@ -955,16 +955,16 @@ def test_multi_target_baselines_score_each_property_and_resume(tmp_path, monkeyp
             config.workspace.dataset_root / "baselines" / name
         )
         assert {path.name for path in output_path.parent.iterdir()} == {
-            "property_scores.parquet",
+            "custom_scores.parquet",
             "summary.json",
             "run_manifest.json",
         }
-        property_table = pl.read_parquet(output_path)
-        assert property_table["property"].to_list() == ["alpha", "beta"]
+        target_table = pl.read_parquet(output_path)
+        assert target_table["label_name"].to_list() == ["alpha", "beta"]
         scalar_scores = []
-        for property_name, manifest_path in zip(
-            property_table["property"].to_list(),
-            property_table["manifest_path"].to_list(),
+        for target_name, manifest_path in zip(
+            target_table["label_name"].to_list(),
+            target_table["manifest_path"].to_list(),
             strict=True,
         ):
             manifest = json.loads(Path(manifest_path).read_text())
@@ -987,11 +987,11 @@ def test_multi_target_baselines_score_each_property_and_resume(tmp_path, monkeyp
                     Path(manifest_path).with_name("predictions.parquet")
                 )
                 expected = (
-                    [0.0, 2.0, 2.0] if property_name == "alpha" else [10.0, 20.0, 20.0]
+                    [0.0, 2.0, 2.0] if target_name == "alpha" else [10.0, 20.0, 20.0]
                 )
                 assert predictions["prediction"].to_list() == expected
                 assert predictions["fallback"].to_list() == [False, False, True]
-        assert property_table["r2"].to_list() == pytest.approx(scalar_scores)
+        assert target_table["r2"].to_list() == pytest.approx(scalar_scores)
         aggregate = json.loads(output_path.with_name("summary.json").read_text())
         assert aggregate["value"] == pytest.approx(sum(scalar_scores) / 2)
         aggregate_metadata = aggregate["metadata"].copy()
@@ -1000,21 +1000,21 @@ def test_multi_target_baselines_score_each_property_and_resume(tmp_path, monkeyp
 
     table_path = outputs["test"]["train_mean"]
     table = pl.read_parquet(table_path)
-    assert table["property"].to_list() == ["alpha", "beta"]
+    assert table["label_name"].to_list() == ["alpha", "beta"]
     assert table["r2"].to_list() == pytest.approx([-0.375, -0.01183431952662722])
     assert len(set(table["manifest_path"].to_list())) == 2
-    for property_name, manifest_path in zip(
-        table["property"].to_list(), table["manifest_path"].to_list(), strict=True
+    for target_name, manifest_path in zip(
+        table["label_name"].to_list(), table["manifest_path"].to_list(), strict=True
     ):
         scalar_manifest = json.loads(Path(manifest_path).read_text())
         assert (
-            scalar_manifest["run"]["config"]["prepare"]["label_column"] == property_name
+            scalar_manifest["run"]["config"]["prepare"]["label_column"] == target_name
         )
         assert scalar_manifest["score"]["scores"]["r2"] is not None
 
     summary_path = table_path.with_name("summary.json")
     summary = json.loads(summary_path.read_text())
-    assert summary["n_properties"] == 2
+    assert summary["n_labels"] == 2
     assert summary["metric"] == "r2"
     assert summary["value"] == pytest.approx(sum(table["r2"].to_list()) / 2)
     run_manifest = json.loads(table_path.with_name("run_manifest.json").read_text())
@@ -1124,12 +1124,12 @@ def test_baseline_cli_uses_data_subset_without_model_validation(tmp_path, monkey
 
 def test_baseline_cli_dispatches_multi_target_run(tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
-    config = load_baseline_config(
-        [
-            root / "config.yaml",
-            root / "datasets/uniprot_protparams.yaml",
-            root / "baselines/sequence_regression.yaml",
-        ]
+    base = _config(tmp_path, regression=True)
+    config = BaselineRunConfig.model_validate(
+        {
+            **base.model_dump(),
+            "multi_target": {"target_columns": ["first", "second"], "metric": "r2"},
+        }
     )
     from modules.evaluate.src import run_evaluate
 

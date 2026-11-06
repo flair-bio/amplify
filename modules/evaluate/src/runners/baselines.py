@@ -312,20 +312,20 @@ def run_multi_target_baselines(
         config_name=config.workspace.dataset_config_name,
         revision=config.workspace.dataset_revision,
     )
-    property_outputs: dict[str, dict[str, Path]] = {}
+    target_outputs: dict[str, dict[str, Path]] = {}
     mmseqs_neighbor_cache: dict[str, list[int | None]] = {}
-    for property_name in multi_target.target_columns:
-        property_config = config.model_copy(
+    for target_name in multi_target.target_columns:
+        target_config = config.model_copy(
             update={
                 "multi_target": None,
                 "prepare": config.prepare.model_copy(
-                    update={"label_column": property_name}
+                    update={"label_column": target_name}
                 ),
                 "score": scores_config,
             }
         )
         outputs = run_baselines(
-            property_config,
+            target_config,
             dataset=data,
             _mmseqs_neighbor_cache=mmseqs_neighbor_cache,
         )
@@ -333,31 +333,31 @@ def run_multi_target_baselines(
             raise ValueError(
                 "Multi-target baseline aggregation requires exactly one test output."
             )
-        property_outputs[property_name] = outputs["test"]
+        target_outputs[target_name] = outputs["test"]
 
     aggregate_outputs: dict[str, Path] = {}
     for name in config.baselines.names:
         rows = []
         values: list[float] = []
         target_identities = {}
-        for property_name in multi_target.target_columns:
+        for target_name in multi_target.target_columns:
             try:
-                prediction_path = property_outputs[property_name][name]
+                prediction_path = target_outputs[target_name][name]
             except KeyError as error:
                 raise ValueError(
-                    f"Missing {name} baseline output for property {property_name!r}."
+                    f"Missing {name} baseline output for target {target_name!r}."
                 ) from error
             manifest_path = prediction_path.with_name("run_manifest.json")
             manifest = json.loads(manifest_path.read_text())
             if manifest.get("status") != "complete":
                 raise ValueError(
-                    f"Incomplete {name} baseline run for {property_name!r}: "
+                    f"Incomplete {name} baseline run for {target_name!r}: "
                     f"{manifest_path}"
                 )
             target_identity = manifest.get("identity")
             if not isinstance(target_identity, dict):
                 raise TypeError(f"Invalid baseline identity: {manifest_path}")
-            target_identities[property_name] = target_identity
+            target_identities[target_name] = target_identity
             value = _baseline_metric_value(
                 manifest.get("score", {}).get("scores"), multi_target.metric
             )
@@ -368,12 +368,12 @@ def run_multi_target_baselines(
             ):
                 raise ValueError(
                     f"Invalid {multi_target.metric} for {name} baseline "
-                    f"and property {property_name!r}."
+                    f"and target {target_name!r}."
                 )
             values.append(float(value))
             rows.append(
                 {
-                    multi_target.target_key: property_name,
+                    multi_target.target_key: target_name,
                     multi_target.metric: values[-1],
                     "manifest_path": str(manifest_path),
                 }
@@ -452,7 +452,7 @@ def run_multi_target_baselines(
             )
         aggregate_outputs[name] = table_path
         logger.info(
-            "Multi-target baseline %s mean %s over %d properties: %.6g",
+            "Multi-target baseline %s mean %s over %d targets: %.6g",
             name,
             multi_target.metric,
             len(multi_target.target_columns),
