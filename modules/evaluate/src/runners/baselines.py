@@ -92,7 +92,7 @@ def run_baselines(
         )
         subset_results: dict[str, dict[str, Path]] = {}
         for index, (name, subset) in enumerate(subsets.items()):
-            subset_outputs = run_baselines(
+            subset_outputs = _run_baselines_for_test(
                 config.model_copy(
                     update={
                         "test_subsets": {},
@@ -107,6 +107,16 @@ def run_baselines(
             subset_results[f"tests/{name}"] = subset_outputs.pop("test")
             subset_results.update(subset_outputs)
         return subset_results
+    return _run_baselines_for_test(config, dataset, _mmseqs_neighbor_cache)
+
+
+def _run_baselines_for_test(
+    config: BaselineRunConfig,
+    dataset: DatasetDict | None,
+    _mmseqs_neighbor_cache: dict[str, list[int | None]] | None,
+) -> dict[str, dict[str, Path]]:
+    """Run baselines for one test dataset and its configured external tests."""
+    workspace, prepare = config.workspace, config.prepare
     if workspace.task_type == "contact_prediction":
         if config.external_test_sets:
             raise ValueError(

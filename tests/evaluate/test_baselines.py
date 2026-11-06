@@ -265,11 +265,21 @@ def test_identity_changes_with_data_and_protocol(tmp_path, change):
     )
 
 
-def test_external_baseline_keeps_source_training_prior(tmp_path, monkeypatch):
+@pytest.mark.parametrize("with_subsets", [False, True])
+def test_external_baseline_keeps_source_training_prior(
+    tmp_path, monkeypatch, with_subsets
+):
     config, data = _config(tmp_path), _data()
+    if with_subsets:
+        data["test"] = data["test"].add_column("cohort", ["a", "b", "b"])
     config = BaselineRunConfig.model_validate(
         {
             **config.model_dump(),
+            "test_subsets": (
+                {"a": {"cohort": "a"}, "b": {"cohort": "b"}}
+                if with_subsets
+                else {}
+            ),
             "external_test_sets": [
                 {"name": "heldout", "dataset_repo_id": "org/heldout"}
             ],
@@ -283,8 +293,12 @@ def test_external_baseline_keeps_source_training_prior(tmp_path, monkeypatch):
         }
     )
     config.external_test_sets[0].split = "holdout"
-    monkeypatch.setattr(dataloader, "load_raw_evaluation_dataset", lambda _: external)
+    loader = Mock(return_value=external)
+    monkeypatch.setattr(dataloader, "load_raw_evaluation_dataset", loader)
     paths = run_baselines(config, dataset=data)
+    loader.assert_called_once_with("org/heldout")
+    if with_subsets:
+        assert {"tests/a", "tests/b", "external/heldout"} == set(paths)
     frame = pl.read_parquet(paths["external/heldout"]["majority_class"])
     assert frame["prediction"].to_list() == [1]
     assert frame["id"].to_list() == ["external"]
