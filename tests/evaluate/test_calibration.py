@@ -17,7 +17,7 @@ from modules.evaluate.scripts.dataset_sourcing.source_calibration import (
     read_export,
 )
 from modules.evaluate.src.contracts.artifacts import EvaluationMetadata, PredictOutput
-from modules.evaluate.src.contracts.config import ScoreConfig
+from modules.evaluate.src.contracts.config import BaselineRunConfig, ScoreConfig
 from modules.evaluate.src.dataset.dataloader import tokenize_dataset
 from modules.evaluate.src.metrics.bootstrap import id_groups
 from modules.evaluate.src.metrics.calibration_metrics import (
@@ -25,6 +25,7 @@ from modules.evaluate.src.metrics.calibration_metrics import (
     fit_temperature,
     forward_kl,
 )
+from modules.evaluate.src.runners.baselines import run_baselines
 from modules.evaluate.src.tasks import get_task
 from modules.evaluate.src.tasks.calibration import WINDOW_RESIDUES
 from modules.evaluate.src.utils.amino_acids import (
@@ -233,6 +234,74 @@ def test_score_crossfits_trained_and_control_temperatures():
     assert control["temperature"] == pytest.approx(6.0)
     assert control["calibration_fit_nt"] == pytest.approx(100)
     assert trained["accuracy_t"] == control["accuracy_nt"] == 1.0
+
+
+def test_calibration_baselines_fit_their_temperature(tmp_path):
+    def site(position, residue, is_t, fold):
+        index = CANONICAL_AMINO_ACIDS.index(residue)
+        freqs = [0.2 / 19] * 20
+        freqs[index] = 0.8
+        return [position, *freqs, is_t, 8, fold, is_t, 1 - is_t, 1 << index]
+
+    sequences = ["ACDEFGHIKL", "MNPQRSTVWY"] * 5
+    data = DatasetDict(
+        {
+            "test": Dataset.from_dict(
+                {
+                    "id": [f"P{i}" for i in range(10)],
+                    "sequence": sequences,
+                    # T site matching the human residue, an NT site, and one
+                    # site past max_residues that model runs never reach.
+                    "targets": [
+                        [site(1, s[1], 1, i % 5), site(3, s[2], 0, i % 5)]
+                        + [site(9, s[9], 1, i % 5)]
+                        for i, s in enumerate(sequences)
+                    ],
+                }
+            )
+        }
+    )
+    config = BaselineRunConfig.model_validate(
+        {
+            "workspace": {
+                "dataset_name": "toy_calibration",
+                "task_type": "calibration",
+                "target_type": "categorical",
+                "label_format": "consensus_profile",
+                "base_path": str(tmp_path),
+            },
+            "prepare": {"max_length": 9},
+            "score": {
+                "metrics": [
+                    "calibration_t",
+                    "calibration_fit_t",
+                    "accuracy_t",
+                    "accuracy_high_nt",
+                    "temperature",
+                ]
+            },
+            "baselines": {"names": ["human_residue", "blosum62"]},
+        }
+    )
+
+    paths = run_baselines(config, dataset=data)["test"]
+    path = paths["human_residue"]
+
+    baseline = pl.read_parquet(path)
+    assert baseline["id"].to_list()[:2] == ["P0:1", "P0:3"]
+    assert baseline.height == 20
+    scores = json.loads((path.parent / "run_manifest.json").read_text())["score"]
+    scores = scores["scores"]
+    # A 0.8 human-residue profile is matched exactly at T = ln 19 / ln 76.
+    assert scores["temperature"] == pytest.approx(np.log(19) / np.log(76), rel=1e-3)
+    assert scores["calibration_fit_t"] == pytest.approx(100, rel=1e-4)
+    assert scores["calibration_t"] < 99
+    assert scores["accuracy_t"] == 1.0
+    assert scores["accuracy_high_nt"] == 0.0
+    blosum = pl.read_parquet(paths["blosum62"])
+    # P0:1 is C; its BLOSUM62 row is 9 on C and -4 on E, in half-bit units.
+    row = dict(zip(CANONICAL_AMINO_ACIDS, blosum["prediction"][0], strict=True))
+    assert row["C"] - row["E"] == pytest.approx(13 * np.log(2) / 2)
 
 
 def test_bootstrap_resamples_whole_proteins():

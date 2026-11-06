@@ -28,6 +28,10 @@ BASELINE_PROTOCOLS = {
     "amino_acid_frequency": "test-corpus-iid-aa-frequency-v1",
 }
 SEPARATION_PRIOR_PROTOCOL = "casp-original-sequence-separation-v1"
+CALIBRATION_PROTOCOLS = {
+    "human_residue": "human-residue-one-hot-logits-v1",
+    "blosum62": "human-residue-blosum62-row-logits-v1",
+}
 
 
 def identity_hash(payload: Any) -> str:
@@ -135,6 +139,25 @@ def unlabeled_sequence_rows(
     return rows
 
 
+def site_profile_rows(
+    dataset: Dataset, *, sequence_column: str, label_column: str, id_column: str
+) -> list[dict[str, Any]]:
+    """Keep each protein's sequence with its per-site profile labels."""
+    if not len(dataset):
+        raise ValueError("A shared baseline requires nonempty test data.")
+    columns = [sequence_column, label_column]
+    if id_column in dataset.column_names:
+        columns.append(id_column)
+    return [
+        {
+            "id": row.get(id_column, index),
+            "sequence": row[sequence_column],
+            "label": row[label_column],
+        }
+        for index, row in enumerate(dataset.select_columns(columns))
+    ]
+
+
 def baseline_context(
     workspace: DatasetWorkspaceConfig,
     dataset: DatasetDict,
@@ -225,6 +248,9 @@ def baseline_context(
     if workspace.task_type == "token_classification":
         fit["fit_policy"] = "all_labeled_training_residues"
         fit["protocols"] = {"majority_class": "all-train-valid-residue-majority-v1"}
+    if workspace.task_type == "calibration":
+        fit["fit_policy"] = "model_independent"
+        fit["protocols"] = CALIBRATION_PROTOCOLS
     return {
         "fit": fit,
         "test": {

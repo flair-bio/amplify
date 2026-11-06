@@ -346,6 +346,83 @@ def build_amino_acid_frequency_baseline(
     return pl.DataFrame({"id": output_ids, "prediction": output_scores})
 
 
+# BLOSUM62 in half-bit units (Henikoff & Henikoff, 1992), rows/columns in
+# BLOSUM62_ORDER.
+BLOSUM62_ORDER = "ARNDCQEGHILKMFPSTWYV"
+BLOSUM62_ROWS = """
+ 4 -1 -2 -2  0 -1 -1  0 -2 -1 -1 -1 -1 -2 -1  1  0 -3 -2  0
+-1  5  0 -2 -3  1  0 -2  0 -3 -2  2 -1 -3 -2 -1 -1 -3 -2 -3
+-2  0  6  1 -3  0  0  0  1 -3 -3  0 -2 -3 -2  1  0 -4 -2 -3
+-2 -2  1  6 -3  0  2 -1 -1 -3 -4 -1 -3 -3 -1  0 -1 -4 -3 -3
+ 0 -3 -3 -3  9 -3 -4 -3 -3 -1 -1 -3 -1 -2 -3 -1 -1 -2 -2 -1
+-1  1  0  0 -3  5  2 -2  0 -3 -2  1  0 -3 -1  0 -1 -2 -1 -2
+-1  0  0  2 -4  2  5 -2  0 -3 -3  1 -2 -3 -1  0 -1 -3 -2 -2
+ 0 -2  0 -1 -3 -2 -2  6 -2 -4 -4 -2 -3 -3 -2  0 -2 -2 -3 -3
+-2  0  1 -1 -3  0  0 -2  8 -3 -3 -1 -2 -1 -2 -1 -2 -2  2 -3
+-1 -3 -3 -3 -1 -3 -3 -4 -3  4  2 -3  1  0 -3 -2 -1 -3 -1  3
+-1 -2 -3 -4 -1 -2 -3 -4 -3  2  4 -2  2  0 -3 -2 -1 -2 -1  1
+-1  2  0 -1 -3  1  1 -2 -1 -3 -2  5 -1 -3 -1  0 -1 -3 -2 -2
+-1 -1 -2 -3 -1  0 -2 -3 -2  1  2 -1  5  0 -2 -1 -1 -1 -1  1
+-2 -3 -3 -3 -2 -3 -3 -3 -1  0  0 -3  0  6 -4 -2 -2  1  3 -1
+-1 -2 -2 -1 -3 -1 -1 -2 -2 -3 -3 -1 -2 -4  7 -1 -1 -4 -3 -2
+ 1 -1  1  0 -1  0  0  0 -1 -2 -2  0 -1 -2 -1  4  1 -3 -2 -2
+ 0 -1  0 -1 -1 -1 -1 -2 -2 -1 -1 -1 -1 -2 -1  1  5 -2 -2  0
+-3 -3 -4 -4 -2 -2 -3 -2 -2 -3 -2 -3 -1  1 -4 -3 -2 11  2 -3
+-2 -2 -2 -3 -2 -1 -2 -3  2 -1 -1 -2 -1  3 -3 -2 -2  2  7 -1
+ 0 -3 -3 -3 -1 -2 -2 -3 -3  3  1 -2  1 -1 -2 -2  0 -3 -1  4
+"""
+BLOSUM62 = {
+    residue: dict(zip(BLOSUM62_ORDER, map(int, row.split()), strict=True))
+    for residue, row in zip(
+        BLOSUM62_ORDER, BLOSUM62_ROWS.strip().splitlines(), strict=True
+    )
+}
+
+
+def calibration_baseline_logits(name: str) -> dict[str, list[float]]:
+    """Map each human residue to the baseline's 20 amino-acid logits.
+
+    ``human_residue`` gives the human residue logit ln 19 and the others 0
+    (half the mass at T=1); ``blosum62`` uses the residue's BLOSUM62 row,
+    converted to natural-log odds. The fitted temperature sets the sharpness.
+    """
+    if name == "human_residue":
+        logit = math.log(len(AMINO_ACIDS) - 1)
+        return {r: [logit * (aa == r) for aa in AMINO_ACIDS] for r in AMINO_ACIDS}
+    if name == "blosum62":
+        return {
+            r: [BLOSUM62[r][aa] * math.log(2) / 2 for aa in AMINO_ACIDS]
+            for r in AMINO_ACIDS
+        }
+    raise ValueError(f"baseline={name!r} is not a calibration baseline.")
+
+
+def build_calibration_baseline(
+    name: str, rows: list[dict[str, Any]], *, max_residues: int
+) -> pl.DataFrame:
+    """Predict each site from its human residue alone, ignoring the profile."""
+    logits = calibration_baseline_logits(name)
+    ids, labels, predictions = [], [], []
+    for row in rows:
+        sequence = row["sequence"].upper()
+        for position, *site in row["label"]:
+            position = int(position)
+            # Model runs keep the first max_residues residues.
+            if position >= max_residues:
+                continue
+            residue = sequence[position]
+            if residue not in logits:
+                raise ValueError(
+                    f"Unsupported human residue {residue!r} at {row['id']}:{position}."
+                )
+            ids.append(f"{row['id']}:{position}")
+            labels.append(site)
+            predictions.append(logits[residue])
+    if not ids:
+        raise ValueError("Calibration baselines require scored sites.")
+    return pl.DataFrame({"id": ids, "label": labels, "prediction": predictions})
+
+
 def build_prediction_baseline(
     name: BaselineName,
     task_type: str,

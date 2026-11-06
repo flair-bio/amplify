@@ -45,6 +45,8 @@ BaselineName = Literal[
     "mmseqs_knn",
     "amino_acid_frequency",
     "separation_prior",
+    "human_residue",
+    "blosum62",
 ]
 ControlCondition = Literal[
     "untrained",
