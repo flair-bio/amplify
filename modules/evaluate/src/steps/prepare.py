@@ -49,6 +49,7 @@ from modules.evaluate.src.dataset.contact import prepare_contact_dataset
 from modules.evaluate.src.dataset.dataloader import (
     DataLoaderConfig,
     build_dataloaders,
+    metric_groups_by_id,
     resolve_evaluation_data,
     resolve_external_data,
     tokenize_dataset,
@@ -120,6 +121,7 @@ class PrepareStep:
         dataset: DatasetDict | None = None,
         baseline_names: list[BaselineName] | None = None,
         head_type: str | None = None,
+        group_column: str | None = None,
     ) -> PreparedArtifacts:
         """Load task data and models, optionally replacing tokens with features.
 
@@ -222,6 +224,9 @@ class PrepareStep:
 
         # Let rank 0 populate the shared tokenization cache before other ranks use it
         logger.info("Tokenizing dataset...")
+        test_metric_groups = metric_groups_by_id(
+            dataset["test"], group_column, self.config.id_column
+        )
         with accelerator.main_process_first():
             dataset = tokenize_dataset(
                 dataset,
@@ -397,6 +402,8 @@ class PrepareStep:
             },
             split=self.config.split.name,
             baseline_context=shared_context,
+            test_metric_groups=test_metric_groups,
+            test_group_column=group_column,
             test_original_positions=(
                 _token_positions_by_id(dataset["test"], self.config)
                 if workspace.task_type == "token_classification"
@@ -462,6 +469,7 @@ class PrepareStep:
         seed: int,
         layerwise_config: LayerwiseConfig | None = None,
         dataset: DatasetDict | None = None,
+        group_column: str | None = None,
     ) -> PreparedArtifacts:
         """Return *prepared* with its test loaders swapped for an external set.
 
@@ -516,6 +524,9 @@ class PrepareStep:
         task.validate_num_labels(
             dataset, self.config.label_column, num_labels, external.name
         )
+        test_metric_groups = metric_groups_by_id(
+            dataset["test"], group_column, self.config.id_column
+        )
         with accelerator.main_process_first():
             dataset = tokenize_dataset(
                 dataset,
@@ -568,6 +579,8 @@ class PrepareStep:
                 test_dataloader=token_test_dataloader,
                 layerwise=layerwise,
                 baseline_context=shared_context,
+                test_metric_groups=test_metric_groups,
+                test_group_column=group_column,
                 test_original_positions=(
                     _token_positions_by_id(dataset["test"], self.config)
                     if workspace.task_type == "token_classification"
@@ -645,6 +658,8 @@ class PrepareStep:
             embedding=EmbeddingArtifacts(backend=external_backend),
             layerwise=layerwise,
             baseline_context=shared_context,
+            test_metric_groups=test_metric_groups,
+            test_group_column=group_column,
             test_original_positions=(
                 _token_positions_by_id(dataset["test"], self.config)
                 if workspace.task_type == "token_classification"
@@ -662,6 +677,7 @@ class PrepareStep:
         accelerator: Accelerator,
         seed: int,
         layerwise_config: LayerwiseConfig | None = None,
+        group_column: str | None = None,
     ) -> PreparedArtifacts:
         """Reuse the fitted predictor and controls on another selected test set."""
         if prepared.contact is not None:
@@ -697,6 +713,7 @@ class PrepareStep:
             seed=seed,
             layerwise_config=layerwise_config,
             dataset=DatasetDict({"test": dataset["test"]}),
+            group_column=group_column,
         )
 
     def _apply_embedding_cache(

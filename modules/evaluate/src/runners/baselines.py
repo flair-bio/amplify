@@ -42,6 +42,8 @@ from modules.evaluate.src.dataset.contact import (
     separation_prior_prediction_rows,
 )
 from modules.evaluate.src.dataset.dataloader import (
+    attach_metric_groups,
+    metric_groups_by_id,
     resolve_evaluation_data,
     resolve_external_data,
 )
@@ -205,7 +207,10 @@ def run_baselines(
         )
 
     outputs: dict[str, dict[str, Path]] = {}
-    for test_name, test_context, _, test_rows in tests:
+    for test_name, test_context, test_dataset, test_rows in tests:
+        metric_groups = metric_groups_by_id(
+            test_dataset["test"], config.score.group_column, prepare.id_column
+        )
         outputs[test_name] = {}
         for name in config.baselines.names:
             directory = artifact_directory(test_context, name)
@@ -239,6 +244,7 @@ def run_baselines(
                     config.seed,
                     run_config=config.model_dump(mode="json"),
                     test_name=test_name,
+                    metric_groups=metric_groups,
                 )
                 logger.info("Baseline predictions ready: %s", path)
                 outputs[test_name][name] = path
@@ -413,6 +419,7 @@ def _publish_standalone_scores(
     *,
     run_config: dict[str, Any],
     test_name: str,
+    metric_groups: dict[str, Any] | None = None,
 ) -> None:
     effective_score_config = _baseline_score_config(config)
     task = get_task(workspace.task_type, workspace.num_labels)
@@ -432,12 +439,14 @@ def _publish_standalone_scores(
     elif "label" not in artifact.columns:
         artifact = artifact.with_columns(pl.lit(0).alias("label"))
 
+    artifact = attach_metric_groups(artifact, metric_groups or {}, config.group_column)
     metadata = EvaluationMetadata(
         model_name="baselines",
         dataset_name=workspace.dataset_name,
         dataset_repo_id=workspace.dataset_repo_id,
         dataset_config_name=workspace.dataset_config_name,
         dataset_revision=workspace.dataset_revision,
+        group_column=config.group_column,
         task_type=workspace.task_type,
         split=str(context["test"]["split"]),
         seed=seed,
