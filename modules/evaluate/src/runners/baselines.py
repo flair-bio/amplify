@@ -303,6 +303,15 @@ def run_multi_target_baselines(
             update={"metrics": [*scores_config.metrics, multi_target.metric]}
         )
 
+    data = resolve_evaluation_data(
+        config.workspace.dataset_repo_id or config.workspace.dataset_name,
+        split=config.prepare.split,
+        seed=config.seed,
+        validation_fraction=config.prepare.validation_fraction,
+        dataset=dataset,
+        config_name=config.workspace.dataset_config_name,
+        revision=config.workspace.dataset_revision,
+    )
     property_outputs: dict[str, dict[str, Path]] = {}
     mmseqs_neighbor_cache: dict[str, list[int | None]] = {}
     for property_name in multi_target.target_columns:
@@ -317,7 +326,7 @@ def run_multi_target_baselines(
         )
         outputs = run_baselines(
             property_config,
-            dataset=dataset,
+            dataset=data,
             _mmseqs_neighbor_cache=mmseqs_neighbor_cache,
         )
         if set(outputs) != {"test"}:
@@ -329,6 +338,7 @@ def run_multi_target_baselines(
     aggregate_outputs: dict[str, Path] = {}
     for name in config.baselines.names:
         rows = []
+        values: list[float] = []
         target_identities = {}
         for property_name in multi_target.target_columns:
             try:
@@ -360,71 +370,79 @@ def run_multi_target_baselines(
                     f"Invalid {multi_target.metric} for {name} baseline "
                     f"and property {property_name!r}."
                 )
+            values.append(float(value))
             rows.append(
                 {
                     multi_target.target_key: property_name,
-                    multi_target.metric: float(value),
+                    multi_target.metric: values[-1],
                     "manifest_path": str(manifest_path),
                 }
             )
 
-        table = pl.DataFrame(rows)
+        metadata = EvaluationMetadata(
+            model_name="baselines",
+            dataset_name=config.workspace.dataset_name,
+            dataset_repo_id=config.workspace.dataset_repo_id,
+            dataset_config_name=config.workspace.dataset_config_name,
+            dataset_revision=config.workspace.dataset_revision,
+            group_column=config.score.group_column,
+            task_type=config.workspace.task_type,
+            split=config.prepare.split.name,
+            seed=config.seed,
+        )
         summary = {
             "metadata": {
-                "model_name": "baselines",
-                "dataset_name": config.workspace.dataset_name,
-                "dataset_repo_id": config.workspace.dataset_repo_id,
-                "dataset_config_name": config.workspace.dataset_config_name,
-                "dataset_revision": config.workspace.dataset_revision,
-                "task_type": config.workspace.task_type,
-                "split": config.prepare.split.name,
-                "seed": config.seed,
+                **metadata.model_dump(mode="json"),
                 "baseline": name,
             },
             "run_name": f"baselines-{name}",
             "metric": multi_target.metric,
             "aggregation": multi_target.aggregation_name,
             multi_target.count_key: len(multi_target.target_columns),
-            "value": math.fsum(table[multi_target.metric].to_list())
-            / len(multi_target.target_columns),
+            "value": math.fsum(values) / len(multi_target.target_columns),
         }
         identity = {
             "config": config.model_dump(mode="json"),
             "baseline": name,
             "targets": target_identities,
         }
-        output_root = (
-            config.workspace.dataset_root
-            / "baselines"
-            / "multi_target"
-            / name
-            / f"run-{identity_hash(identity)[:16]}"
-        )
-        table_path = output_root / multi_target.score_table_filename
-        manifest_path = output_root / "run_manifest.json"
-        with cache_lock(output_root.parent / f".{output_root.name}.lock"):
+        output_root = config.workspace.dataset_root / "baselines" / name
+        summary_root = output_root / f"summary-{identity_hash(identity)[:16]}"
+        table_path = summary_root / multi_target.score_table_filename
+        manifest_path = summary_root / "run_manifest.json"
+        with cache_lock(output_root / f".{summary_root.name}.lock"):
+            for path in (output_root, summary_root):
+                if path.is_symlink():
+                    raise ValueError(f"Refusing symlinked baseline output: {path}")
             if manifest_path.exists():
                 previous = json.loads(manifest_path.read_text())
-                if previous.get("evaluation", {}).get("config") != identity["config"]:
+                if previous.get("identity") != identity:
                     raise ValueError(
                         f"Incompatible multi-target baseline manifest: {manifest_path}"
                     )
+            elif summary_root.exists() and any(summary_root.iterdir()):
+                raise ValueError(
+                    f"Existing multi-target baseline output has no manifest: {summary_root}"
+                )
             write_json(
                 manifest_path,
                 {
                     "workspace": config.workspace.model_dump(mode="json"),
+                    "identity": identity,
                     "evaluation": {
                         "status": "running",
                         "config": identity["config"],
                     },
                 },
             )
+            table = pl.DataFrame(rows)
             write_parquet(table, table_path)
-            write_json(output_root / "summary.json", summary)
+            write_json(summary_root / "summary.json", summary)
             write_json(
                 manifest_path,
                 {
                     "workspace": config.workspace.model_dump(mode="json"),
+                    "identity": identity,
                     "evaluation": {
                         "status": "complete",
                         "config": identity["config"],

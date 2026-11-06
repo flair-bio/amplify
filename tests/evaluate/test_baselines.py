@@ -942,8 +942,61 @@ def test_multi_target_baselines_score_each_property_and_resume(tmp_path, monkeyp
 
     search = Mock(return_value=[0, 1, None])
     monkeypatch.setattr(runner, "_mmseqs_nearest_neighbors", search)
-    outputs = run_multi_target_baselines(config, dataset=data)
+    loader = Mock(return_value=data)
+    monkeypatch.setattr(dataloader, "load_evaluation_dataset", loader)
+    outputs = run_multi_target_baselines(config)
+    loader.assert_called_once()
     search.assert_called_once()
+
+    assert set(outputs["test"]) == set(config.baselines.names)
+    for name, output_path in outputs["test"].items():
+        assert output_path.parent.name.startswith("summary-")
+        assert output_path.parent.parent == (
+            config.workspace.dataset_root / "baselines" / name
+        )
+        assert {path.name for path in output_path.parent.iterdir()} == {
+            "property_scores.parquet",
+            "summary.json",
+            "run_manifest.json",
+        }
+        property_table = pl.read_parquet(output_path)
+        assert property_table["property"].to_list() == ["alpha", "beta"]
+        scalar_scores = []
+        for property_name, manifest_path in zip(
+            property_table["property"].to_list(),
+            property_table["manifest_path"].to_list(),
+            strict=True,
+        ):
+            manifest = json.loads(Path(manifest_path).read_text())
+            target_root = Path(manifest_path).parent
+            assert target_root.parent.parent == output_path.parent.parent
+            assert target_root.parent.name.startswith("fit-")
+            assert target_root.name.startswith("test-")
+            assert {path.name for path in target_root.iterdir()} == {
+                "predictions.parquet",
+                "scores.parquet",
+                "run_manifest.json",
+            }
+            assert manifest["status"] == "complete"
+            assert manifest["score"]["scores_path"] == str(
+                target_root / "scores.parquet"
+            )
+            scalar_scores.append(manifest["score"]["scores"]["r2"])
+            if name == "mmseqs_knn":
+                predictions = pl.read_parquet(
+                    Path(manifest_path).with_name("predictions.parquet")
+                )
+                expected = (
+                    [0.0, 2.0, 2.0] if property_name == "alpha" else [10.0, 20.0, 20.0]
+                )
+                assert predictions["prediction"].to_list() == expected
+                assert predictions["fallback"].to_list() == [False, False, True]
+        assert property_table["r2"].to_list() == pytest.approx(scalar_scores)
+        aggregate = json.loads(output_path.with_name("summary.json").read_text())
+        assert aggregate["value"] == pytest.approx(sum(scalar_scores) / 2)
+        aggregate_metadata = aggregate["metadata"].copy()
+        assert aggregate_metadata.pop("baseline") == name
+        assert EvaluationMetadata.model_validate(aggregate_metadata).seed == config.seed
 
     table_path = outputs["test"]["train_mean"]
     table = pl.read_parquet(table_path)
@@ -982,8 +1035,7 @@ def test_multi_target_baselines_score_each_property_and_resume(tmp_path, monkeyp
         }
     )
     changed_outputs = run_multi_target_baselines(config, dataset=changed_data)
-    changed_table_path = changed_outputs["test"]["train_mean"]
-    assert changed_table_path != table_path
+    assert changed_outputs["test"]["train_mean"] != table_path
     assert summary_path.read_text() == original_summary
 
     actual_write_json = runner.write_json
@@ -1003,6 +1055,11 @@ def test_multi_target_baselines_score_each_property_and_resume(tmp_path, monkeyp
     )
     assert interrupted_manifest["evaluation"]["status"] == "running"
     run_multi_target_baselines(config, dataset=data)
+    restored_manifest = json.loads(
+        table_path.with_name("run_manifest.json").read_text()
+    )
+    assert restored_manifest["evaluation"]["status"] == "complete"
+    assert restored_manifest["score"] == summary
 
     builder = Mock(
         side_effect=AssertionError("completed scalar baselines should resume")
@@ -1011,6 +1068,25 @@ def test_multi_target_baselines_score_each_property_and_resume(tmp_path, monkeyp
     assert run_multi_target_baselines(config, dataset=data) == outputs
     builder.assert_not_called()
     assert search.call_count == 2
+    loader.assert_called_once()
+
+
+def test_multi_target_baselines_allow_summary_target(tmp_path):
+    base = _config(tmp_path, regression=True)
+    config = BaselineRunConfig.model_validate(
+        {
+            **base.model_dump(),
+            "multi_target": {"target_columns": ["summary"], "metric": "r2"},
+        }
+    )
+    data = DatasetDict(
+        {
+            split: values.rename_column("targets", "summary")
+            for split, values in _data(regression=True).items()
+        }
+    )
+    table_path = run_multi_target_baselines(config, dataset=data)["test"]["train_mean"]
+    assert pl.read_parquet(table_path)["target"].to_list() == ["summary"]
 
 
 def test_baseline_cli_uses_data_subset_without_model_validation(tmp_path, monkeypatch):
