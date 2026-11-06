@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import polars as pl
 import pytest
@@ -36,7 +36,10 @@ from modules.evaluate.src.model.baselines import (
     build_sequence_baseline,
 )
 from modules.evaluate.src.runners import baselines as runner
-from modules.evaluate.src.runners.baselines import run_baselines
+from modules.evaluate.src.runners.baselines import (
+    run_baselines,
+    run_multi_target_baselines,
+)
 from modules.evaluate.src.steps.predict import PredictStep, persist_predictions
 from modules.evaluate.src.steps.score import ScoreStep
 
@@ -262,11 +265,19 @@ def test_identity_changes_with_data_and_protocol(tmp_path, change):
     )
 
 
-def test_external_baseline_keeps_source_training_prior(tmp_path, monkeypatch):
+@pytest.mark.parametrize("with_subsets", [False, True])
+def test_external_baseline_keeps_source_training_prior(
+    tmp_path, monkeypatch, with_subsets
+):
     config, data = _config(tmp_path), _data()
+    if with_subsets:
+        data["test"] = data["test"].add_column("cohort", ["a", "b", "b"])
     config = BaselineRunConfig.model_validate(
         {
             **config.model_dump(),
+            "test_subsets": (
+                {"a": {"cohort": "a"}, "b": {"cohort": "b"}} if with_subsets else {}
+            ),
             "external_test_sets": [
                 {"name": "heldout", "dataset_repo_id": "org/heldout"}
             ],
@@ -280,8 +291,12 @@ def test_external_baseline_keeps_source_training_prior(tmp_path, monkeypatch):
         }
     )
     config.external_test_sets[0].split = "holdout"
-    monkeypatch.setattr(dataloader, "load_raw_evaluation_dataset", lambda _: external)
+    loader = Mock(return_value=external)
+    monkeypatch.setattr(dataloader, "load_raw_evaluation_dataset", loader)
     paths = run_baselines(config, dataset=data)
+    loader.assert_called_once_with("org/heldout")
+    if with_subsets:
+        assert {"tests/a", "tests/b", "external/heldout"} == set(paths)
     frame = pl.read_parquet(paths["external/heldout"]["majority_class"])
     assert frame["prediction"].to_list() == [1]
     assert frame["id"].to_list() == ["external"]
@@ -767,43 +782,12 @@ def test_mmseqs_fallback_uses_training_prior_and_records_coverage(
         assert frame["prediction"][2] == data["train"]["targets"][2]
 
 
-def test_legacy_baseline_json_sidecars_are_consolidated(tmp_path, monkeypatch):
-    config, data = _config(tmp_path), _data()
-    path = run_baselines(config, dataset=data)["test"]["majority_class"]
-    directory = path.parent
-    manifest_path = directory / "run_manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    write_json = runner.write_json
-    write_json(
-        directory / "manifest.json",
-        {
-            "identity": manifest["identity"],
-            **manifest["artifact"],
-        },
-    )
-    write_json(
-        directory.parent / "fit_manifest.json",
-        {"baseline": "majority_class", "fit": manifest["identity"]["fit"]},
-    )
-    write_json(
-        directory / "scores.json",
-        {
-            "identity": manifest["identity"],
-            "config": manifest["score"]["config"],
-            "scores": manifest["score"]["scores"],
-        },
-    )
-    manifest_path.unlink()
-
-    builder = Mock(side_effect=AssertionError("legacy predictions should be reused"))
-    monkeypatch.setattr(runner, "build_sequence_baseline", builder)
-    run_baselines(config, dataset=data)
-    builder.assert_not_called()
-    consolidated = json.loads(manifest_path.read_text())
-    assert consolidated["status"] == "complete"
-    assert consolidated["score"]["scores"]
-    assert {file.name for file in directory.glob("*.json")} == {"run_manifest.json"}
-    assert not (directory.parent / "fit_manifest.json").exists()
+def test_scalar_baseline_requires_run_manifest(tmp_path):
+    config, data = _config(tmp_path, regression=True), _data(regression=True)
+    path = run_baselines(config, dataset=data)["test"]["train_mean"]
+    path.with_name("run_manifest.json").rename(path.with_name("manifest.json"))
+    with pytest.raises(FileNotFoundError, match="Missing shared baseline"):
+        load_baseline_artifact(_context(config, data), "train_mean")
 
 
 def test_mmseqs_protocol_change_preserves_other_baseline_paths(tmp_path):
@@ -894,6 +878,149 @@ def test_invalid_training_targets_rejected(tmp_path, targets):
         run_baselines(config, dataset=data)
 
 
+def test_multi_target_baselines_score_each_target_and_resume(tmp_path, monkeypatch):
+    data = DatasetDict(
+        {
+            "train": Dataset.from_dict(
+                {
+                    "sequence": ["AAA", "CCC", "DDD"],
+                    "alpha": [0.0, 2.0, 4.0],
+                    "beta": [10.0, 20.0, 30.0],
+                }
+            ),
+            "test": Dataset.from_dict(
+                {
+                    "sequence": ["ACE", "DFG", "HI"],
+                    "alpha": [1.0, 3.0, 5.0],
+                    "beta": [12.0, 25.0, 25.0],
+                }
+            ),
+        }
+    )
+    base_config = _config(tmp_path, regression=True)
+    config = BaselineRunConfig.model_validate(
+        {
+            **base_config.model_dump(),
+            "multi_target": {
+                "target_columns": ["alpha", "beta"],
+                "metric": "r2",
+                "target_key": "label_name",
+                "count_key": "n_labels",
+                "aggregation_name": "unweighted_label_mean",
+            },
+            "baselines": {"names": ["train_mean", "composition", "mmseqs_knn"]},
+            "score": ScoreConfig(metrics=["mse"]),
+        }
+    )
+
+    search = Mock(return_value=[0, 1, None])
+    monkeypatch.setattr(runner, "_mmseqs_nearest_neighbors", search)
+    loader = Mock(return_value=data)
+    monkeypatch.setattr(dataloader, "load_evaluation_dataset", loader)
+    outputs = run_multi_target_baselines(config)
+    loader.assert_called_once()
+    search.assert_called_once()
+
+    assert set(outputs["test"]) == set(config.baselines.names)
+    for name, output_path in outputs["test"].items():
+        assert output_path.name == "scores.parquet"
+        assert {path.name for path in output_path.parent.iterdir()} == {
+            "scores.parquet",
+            "run_manifest.json",
+        }
+        target_table = pl.read_parquet(output_path)
+        assert target_table["label_name"].to_list() == [
+            "alpha",
+            "beta",
+            "unweighted_label_mean",
+        ]
+        paths = [Path(path) for path in target_table["manifest_path"].to_list()[:-1]]
+        manifests = [json.loads(path.read_text()) for path in paths]
+        assert [
+            manifest["run"]["config"]["prepare"]["label_column"]
+            for manifest in manifests
+        ] == ["alpha", "beta"]
+        scalar_scores = [manifest["score"]["scores"]["r2"] for manifest in manifests]
+        if name == "mmseqs_knn":
+            predictions = [
+                pl.read_parquet(path.with_name("predictions.parquet")) for path in paths
+            ]
+            assert [p["prediction"].to_list() for p in predictions] == [
+                [0.0, 2.0, 2.0],
+                [10.0, 20.0, 20.0],
+            ]
+            assert all(
+                p["fallback"].to_list() == [False, False, True] for p in predictions
+            )
+        assert target_table["r2"].to_list() == pytest.approx(
+            [*scalar_scores, sum(scalar_scores) / 2]
+        )
+        assert target_table["manifest_path"][-1] is None
+        aggregate = json.loads(output_path.with_name("run_manifest.json").read_text())[
+            "score"
+        ]
+        assert aggregate["value"] == pytest.approx(sum(scalar_scores) / 2)
+        assert aggregate["metadata"]["baseline"] == name
+
+    table_path = outputs["test"]["train_mean"]
+    table = pl.read_parquet(table_path)
+    assert table["r2"].to_list()[:2] == pytest.approx([-0.375, -0.01183431952662722])
+
+    manifest_path = table_path.with_name("run_manifest.json")
+    run_manifest = json.loads(manifest_path.read_text())
+    summary = run_manifest["score"]
+    assert summary["n_labels"] == 2
+    assert summary["metric"] == "r2"
+    assert run_manifest["evaluation"]["status"] == "complete"
+
+    original_manifest = manifest_path.read_text()
+    changed_data = DatasetDict(
+        {
+            "train": data["train"].map(lambda row: {"alpha": row["alpha"] + 5.0}),
+            "test": data["test"],
+        }
+    )
+    changed_outputs = run_multi_target_baselines(config, dataset=changed_data)
+    assert changed_outputs["test"]["train_mean"] != table_path
+    assert manifest_path.read_text() == original_manifest
+
+    actual_write_parquet = runner.write_parquet
+
+    def fail_summary_write(table, path):
+        if path.parent.name.startswith("summary-"):
+            raise RuntimeError("simulated aggregate publication interruption")
+        return actual_write_parquet(table, path)
+
+    with (
+        patch.object(
+            runner,
+            "write_parquet",
+            side_effect=fail_summary_write,
+        ),
+        pytest.raises(RuntimeError, match="publication interruption"),
+    ):
+        run_multi_target_baselines(config, dataset=data)
+    interrupted_manifest = json.loads(
+        table_path.with_name("run_manifest.json").read_text()
+    )
+    assert interrupted_manifest["evaluation"]["status"] == "running"
+    run_multi_target_baselines(config, dataset=data)
+    restored_manifest = json.loads(
+        table_path.with_name("run_manifest.json").read_text()
+    )
+    assert restored_manifest["evaluation"]["status"] == "complete"
+    assert restored_manifest["score"] == summary
+
+    builder = Mock(
+        side_effect=AssertionError("completed scalar baselines should resume")
+    )
+    monkeypatch.setattr(runner, "build_sequence_baseline", builder)
+    assert run_multi_target_baselines(config, dataset=data) == outputs
+    builder.assert_not_called()
+    assert search.call_count == 2
+    loader.assert_called_once()
+
+
 def test_baseline_cli_uses_data_subset_without_model_validation(tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
     config = load_baseline_config(
@@ -918,6 +1045,32 @@ def test_baseline_cli_uses_data_subset_without_model_validation(tmp_path, monkey
     monkeypatch.setattr(run_evaluate, "load_baseline_config", lambda *args: config)
     run = Mock(return_value={})
     monkeypatch.setattr(run_evaluate, "run_baselines", run)
+    monkeypatch.setattr(
+        run_evaluate,
+        "Accelerator",
+        Mock(side_effect=AssertionError("baseline CLI must not create an accelerator")),
+    )
+    run_evaluate.main()
+    run.assert_called_once_with(config)
+
+
+def test_baseline_cli_dispatches_multi_target_run(tmp_path, monkeypatch):
+    root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
+    base = _config(tmp_path, regression=True)
+    config = BaselineRunConfig.model_validate(
+        {
+            **base.model_dump(),
+            "multi_target": {"target_columns": ["first", "second"], "metric": "r2"},
+        }
+    )
+    from modules.evaluate.src import run_evaluate
+
+    monkeypatch.setattr(
+        "sys.argv", ["run_evaluate.py", "--baselines", str(root / "config.yaml")]
+    )
+    monkeypatch.setattr(run_evaluate, "load_baseline_config", lambda *args: config)
+    run = Mock(return_value={})
+    monkeypatch.setattr(run_evaluate, "run_multi_target_baselines", run)
     monkeypatch.setattr(
         run_evaluate,
         "Accelerator",

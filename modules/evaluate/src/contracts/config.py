@@ -946,7 +946,7 @@ class MultiTargetConfig(BaseModel):
     target_key: str = "target"
     count_key: str = "n_targets"
     aggregation_name: str = "unweighted_target_mean"
-    score_table_filename: str = "target_scores.parquet"
+    score_table_filename: str = "scores.parquet"
 
     @model_validator(mode="after")
     def _validate_targets(self) -> MultiTargetConfig:
@@ -1018,6 +1018,7 @@ class BaselineRunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     workspace: DatasetWorkspaceConfig
+    multi_target: MultiTargetConfig | None = None
     prepare: PrepareConfig = Field(
         default_factory=lambda: PrepareConfig.model_validate({})
     )
@@ -1056,6 +1057,11 @@ class BaselineRunConfig(BaseModel):
         if len(set(names)) != len(names):
             raise ValueError("external_test_sets names must be unique.")
         task = get_task(self.workspace.task_type)
+        if (
+            self.multi_target is not None
+            and self.workspace.task_type != "sequence_regression"
+        ):
+            raise ValueError("Multi-target baselines require sequence_regression.")
         task.validate_dataset_config(
             self.workspace.target_type,
             self.workspace.label_format,

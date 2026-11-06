@@ -44,7 +44,6 @@ multi_target:
   target_key: property
   count_key: n_properties
   aggregation_name: unweighted_property_mean
-  score_table_filename: property_scores.parquet
 
 steps:
   tune:

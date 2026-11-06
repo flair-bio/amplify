@@ -436,6 +436,30 @@ def test_task_control_defaults(task, dataset, controls):
         assert baseline.baselines.names == expected_baselines
 
 
+def test_baseline_loader_preserves_dataset_multi_target_config(tmp_path):
+    overlay = tmp_path / "multi_target.yaml"
+    overlay.write_text(
+        "multi_target:\n"
+        "  target_columns: [first_target, second_target]\n"
+        "  metric: r2\n"
+        "  target_key: label_name\n"
+        "  score_table_filename: custom_scores.parquet\n"
+    )
+    baseline = load_baseline_config(
+        [
+            CONFIGS / "config.yaml",
+            CONFIGS / "datasets/stability_prediction.yaml",
+            CONFIGS / "baselines/sequence_regression.yaml",
+            overlay,
+        ]
+    )
+    assert baseline.multi_target is not None
+    assert baseline.multi_target.target_columns == ["first_target", "second_target"]
+    assert baseline.multi_target.metric == "r2"
+    assert baseline.multi_target.target_key == "label_name"
+    assert baseline.multi_target.score_table_filename == "custom_scores.parquet"
+
+
 @pytest.mark.parametrize("task_first", [True, False])
 @pytest.mark.parametrize(
     "dataset,task",

@@ -75,6 +75,11 @@ def load_baseline_config(
     return BaselineRunConfig.model_validate(
         {
             "workspace": workspace,
+            "multi_target": (
+                raw.get("multi_target")
+                if workspace.get("task_type") == "sequence_regression"
+                else None
+            ),
             "prepare": raw.get("steps", {}).get("prepare", {}),
             "score": raw.get("steps", {}).get("score", {}),
             "baselines": raw.get("baselines", {}),

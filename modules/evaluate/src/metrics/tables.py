@@ -143,10 +143,13 @@ def aggregate_task_scores(
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", run_name) or seed < 0:
         raise ValueError("A safe run name and nonnegative seed are required.")
     manifests = {
-        prop: model_root / f"{run_name}-{prop}" / f"seed_{seed}" / "run_manifest.json"
-        for prop in target_columns
+        target: model_root
+        / f"{run_name}-{target}"
+        / f"seed_{seed}"
+        / "run_manifest.json"
+        for target in target_columns
     }
-    missing = [prop for prop, path in manifests.items() if not path.is_file()]
+    missing = [target for target, path in manifests.items() if not path.is_file()]
     if missing:
         raise FileNotFoundError(
             f"Missing aggregate-task target runs: {', '.join(missing)}"
@@ -154,18 +157,19 @@ def aggregate_task_scores(
 
     reference_config = reference_metadata = None
     rows = []
-    for prop, path in manifests.items():
+    values: list[float] = []
+    for target, path in manifests.items():
         manifest = json.loads(path.read_text())
         evaluation = manifest["evaluation"]
         if evaluation["status"] != "complete":
-            raise ValueError(f"Aggregate-task target run is incomplete: {prop}")
+            raise ValueError(f"Aggregate-task target run is incomplete: {target}")
         config = evaluation["config"]
         metadata = manifest["score"]["metadata"]
         workspace = config["workspace"]
         if (
             workspace["dataset_name"] != dataset_name
             or workspace["task_type"] != "sequence_regression"
-            or config["steps"]["prepare"]["label_column"] != prop
+            or config["steps"]["prepare"]["label_column"] != target
             or config["seed"] != seed
             or metadata["seed"] != seed
             or metadata["dataset_name"] != workspace["dataset_name"]
@@ -173,10 +177,10 @@ def aggregate_task_scores(
             or metadata["model_name"] != workspace["model_name"]
             or metadata.get("test_subset") is not None
             or metadata.get("layer_index") is not None
-            or f"{metadata['variant']}-{workspace['run_id']}" != f"{run_name}-{prop}"
+            or f"{metadata['variant']}-{workspace['run_id']}" != f"{run_name}-{target}"
         ):
             raise ValueError(
-                f"Aggregate-task target run has inconsistent identity: {prop}"
+                f"Aggregate-task target run has inconsistent identity: {target}"
             )
 
         del workspace["run_id"]
@@ -185,7 +189,7 @@ def aggregate_task_scores(
             reference_config, reference_metadata = config, metadata
         elif config != reference_config or metadata != reference_metadata:
             raise ValueError(
-                f"Aggregate-task target runs use different protocols: {prop}"
+                f"Aggregate-task target runs use different protocols: {target}"
             )
         value = manifest["score"]["scores"][metric]
         if (
@@ -194,19 +198,22 @@ def aggregate_task_scores(
             or not math.isfinite(value)
         ):
             raise ValueError(
-                f"Aggregate-task target has nonfinite or invalid {metric}: {prop}"
+                f"Aggregate-task target has nonfinite or invalid {metric}: {target}"
             )
+        values.append(float(value))
         rows.append(
-            {target_key: prop, metric: float(value), "manifest_path": str(path)}
+            {target_key: target, metric: values[-1], "manifest_path": str(path)}
         )
 
-    table = pl.DataFrame(rows)
     summary = {
         "metadata": reference_metadata,
         "run_name": run_name,
         "metric": metric,
         "aggregation": aggregation_name,
         count_key: len(target_columns),
-        "value": math.fsum(table[metric].to_list()) / len(target_columns),
+        "value": math.fsum(values) / len(target_columns),
     }
-    return table, summary
+    rows.append(
+        {target_key: aggregation_name, metric: summary["value"], "manifest_path": None}
+    )
+    return pl.DataFrame(rows), summary

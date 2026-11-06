@@ -405,9 +405,10 @@ def load_baseline_artifact(
 ) -> tuple[pl.DataFrame, Path]:
     directory = artifact_directory(context, name)
     manifest_path = directory / "run_manifest.json"
-    legacy_manifest_path = directory / "manifest.json"
-    if not manifest_path.exists() and legacy_manifest_path.exists():
-        manifest_path = legacy_manifest_path
+    if context["fit"]["task_type"] == "contact_prediction":
+        legacy_manifest_path = directory / "manifest.json"
+        if not manifest_path.exists() and legacy_manifest_path.exists():
+            manifest_path = legacy_manifest_path
     if not manifest_path.exists():
         raise FileNotFoundError(
             f"Missing shared baseline '{name}' at {directory}. "
@@ -418,7 +419,11 @@ def load_baseline_artifact(
     if manifest.get("identity") != artifact_identity(context, name):
         raise ValueError(f"Incompatible baseline manifest: {manifest_path}")
     path = directory / "predictions.parquet"
-    artifact_metadata = manifest.get("artifact", manifest)
+    artifact_metadata = (
+        manifest.get("artifact", manifest)
+        if context["fit"]["task_type"] == "contact_prediction"
+        else manifest["artifact"]
+    )
     if hashlib.sha256(path.read_bytes()).hexdigest() != artifact_metadata.get("sha256"):
         raise ValueError(f"Corrupt baseline predictions: {path}")
     frame = pl.read_parquet(path)
