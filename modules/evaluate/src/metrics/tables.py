@@ -157,6 +157,7 @@ def aggregate_task_scores(
 
     reference_config = reference_metadata = None
     rows = []
+    values: list[float] = []
     for target, path in manifests.items():
         manifest = json.loads(path.read_text())
         evaluation = manifest["evaluation"]
@@ -199,17 +200,20 @@ def aggregate_task_scores(
             raise ValueError(
                 f"Aggregate-task target has nonfinite or invalid {metric}: {target}"
             )
+        values.append(float(value))
         rows.append(
-            {target_key: target, metric: float(value), "manifest_path": str(path)}
+            {target_key: target, metric: values[-1], "manifest_path": str(path)}
         )
 
-    table = pl.DataFrame(rows)
     summary = {
         "metadata": reference_metadata,
         "run_name": run_name,
         "metric": metric,
         "aggregation": aggregation_name,
         count_key: len(target_columns),
-        "value": math.fsum(table[metric].to_list()) / len(target_columns),
+        "value": math.fsum(values) / len(target_columns),
     }
-    return table, summary
+    rows.append(
+        {target_key: aggregation_name, metric: summary["value"], "manifest_path": None}
+    )
+    return pl.DataFrame(rows), summary

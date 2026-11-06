@@ -276,9 +276,7 @@ def test_external_baseline_keeps_source_training_prior(
         {
             **config.model_dump(),
             "test_subsets": (
-                {"a": {"cohort": "a"}, "b": {"cohort": "b"}}
-                if with_subsets
-                else {}
+                {"a": {"cohort": "a"}, "b": {"cohort": "b"}} if with_subsets else {}
             ),
             "external_test_sets": [
                 {"name": "heldout", "dataset_repo_id": "org/heldout"}
@@ -940,7 +938,6 @@ def test_multi_target_baselines_score_each_target_and_resume(tmp_path, monkeypat
                 "target_key": "label_name",
                 "count_key": "n_labels",
                 "aggregation_name": "unweighted_label_mean",
-                "score_table_filename": "custom_scores.parquet",
             },
             "baselines": {"names": ["train_mean", "composition", "mmseqs_knn"]},
             "score": ScoreConfig(metrics=["mse"]),
@@ -957,55 +954,57 @@ def test_multi_target_baselines_score_each_target_and_resume(tmp_path, monkeypat
 
     assert set(outputs["test"]) == set(config.baselines.names)
     for name, output_path in outputs["test"].items():
-        assert output_path.parent.name.startswith("summary-")
-        assert output_path.parent.parent == (
-            config.workspace.dataset_root / "baselines" / name
-        )
-        assert output_path.name == "custom_scores.parquet"
+        assert output_path.name == "scores.parquet"
+        assert {path.name for path in output_path.parent.iterdir()} == {
+            "scores.parquet",
+            "run_manifest.json",
+        }
         target_table = pl.read_parquet(output_path)
-        assert target_table["label_name"].to_list() == ["alpha", "beta"]
-        scalar_scores = []
-        for target_name, manifest_path in zip(
-            target_table["label_name"].to_list(),
-            target_table["manifest_path"].to_list(),
-            strict=True,
-        ):
-            manifest = json.loads(Path(manifest_path).read_text())
-            target_root = Path(manifest_path).parent
-            assert target_root.parent.parent == output_path.parent.parent
-            assert target_root.parent.name.startswith("fit-")
-            assert target_root.name.startswith("test-")
-            assert manifest["run"]["config"]["prepare"]["label_column"] == target_name
-            scalar_scores.append(manifest["score"]["scores"]["r2"])
-            if name == "mmseqs_knn":
-                predictions = pl.read_parquet(
-                    Path(manifest_path).with_name("predictions.parquet")
-                )
-                expected = (
-                    [0.0, 2.0, 2.0] if target_name == "alpha" else [10.0, 20.0, 20.0]
-                )
-                assert predictions["prediction"].to_list() == expected
-                assert predictions["fallback"].to_list() == [False, False, True]
-        assert target_table["r2"].to_list() == pytest.approx(scalar_scores)
-        aggregate = json.loads(output_path.with_name("summary.json").read_text())
+        assert target_table["label_name"].to_list() == [
+            "alpha",
+            "beta",
+            "unweighted_label_mean",
+        ]
+        paths = [Path(path) for path in target_table["manifest_path"].to_list()[:-1]]
+        manifests = [json.loads(path.read_text()) for path in paths]
+        assert [
+            manifest["run"]["config"]["prepare"]["label_column"]
+            for manifest in manifests
+        ] == ["alpha", "beta"]
+        scalar_scores = [manifest["score"]["scores"]["r2"] for manifest in manifests]
+        if name == "mmseqs_knn":
+            predictions = [
+                pl.read_parquet(path.with_name("predictions.parquet")) for path in paths
+            ]
+            assert [p["prediction"].to_list() for p in predictions] == [
+                [0.0, 2.0, 2.0],
+                [10.0, 20.0, 20.0],
+            ]
+            assert all(
+                p["fallback"].to_list() == [False, False, True] for p in predictions
+            )
+        assert target_table["r2"].to_list() == pytest.approx(
+            [*scalar_scores, sum(scalar_scores) / 2]
+        )
+        assert target_table["manifest_path"][-1] is None
+        aggregate = json.loads(output_path.with_name("run_manifest.json").read_text())[
+            "score"
+        ]
         assert aggregate["value"] == pytest.approx(sum(scalar_scores) / 2)
         assert aggregate["metadata"]["baseline"] == name
 
     table_path = outputs["test"]["train_mean"]
     table = pl.read_parquet(table_path)
-    assert table["r2"].to_list() == pytest.approx([-0.375, -0.01183431952662722])
-    assert len(set(table["manifest_path"].to_list())) == 2
+    assert table["r2"].to_list()[:2] == pytest.approx([-0.375, -0.01183431952662722])
 
-    summary_path = table_path.with_name("summary.json")
-    summary = json.loads(summary_path.read_text())
+    manifest_path = table_path.with_name("run_manifest.json")
+    run_manifest = json.loads(manifest_path.read_text())
+    summary = run_manifest["score"]
     assert summary["n_labels"] == 2
     assert summary["metric"] == "r2"
-    assert summary["value"] == pytest.approx(sum(table["r2"].to_list()) / 2)
-    run_manifest = json.loads(table_path.with_name("run_manifest.json").read_text())
     assert run_manifest["evaluation"]["status"] == "complete"
-    assert run_manifest["score"] == summary
 
-    original_summary = summary_path.read_text()
+    original_manifest = manifest_path.read_text()
     changed_data = DatasetDict(
         {
             "train": data["train"].map(lambda row: {"alpha": row["alpha"] + 5.0}),
@@ -1014,17 +1013,21 @@ def test_multi_target_baselines_score_each_target_and_resume(tmp_path, monkeypat
     )
     changed_outputs = run_multi_target_baselines(config, dataset=changed_data)
     assert changed_outputs["test"]["train_mean"] != table_path
-    assert summary_path.read_text() == original_summary
+    assert manifest_path.read_text() == original_manifest
 
-    actual_write_json = runner.write_json
+    actual_write_parquet = runner.write_parquet
 
-    def fail_summary_write(path, payload):
-        if path.name == "summary.json":
+    def fail_summary_write(table, path):
+        if path.parent.name.startswith("summary-"):
             raise RuntimeError("simulated aggregate publication interruption")
-        return actual_write_json(path, payload)
+        return actual_write_parquet(table, path)
 
     with (
-        patch.object(runner, "write_json", side_effect=fail_summary_write),
+        patch.object(
+            runner,
+            "write_parquet",
+            side_effect=fail_summary_write,
+        ),
         pytest.raises(RuntimeError, match="publication interruption"),
     ):
         run_multi_target_baselines(config, dataset=data)

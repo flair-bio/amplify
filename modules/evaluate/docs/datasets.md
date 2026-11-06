@@ -703,15 +703,17 @@ only when their saved configuration matches. Matching incomplete runs are
 restarted from scratch; incompatible runs fail rather than being silently reused.
 `--overwrite` reruns all properties under the existing output-protection rules.
 
-The runner writes `property_scores.parquet` and `summary.json` under
+The runner writes `scores.parquet` and `run_manifest.json` under
 `<model_root>/<variant>-<run_id>-summary/seed_<seed>/` only after all properties
-complete. Negative R² values are retained; targets are never pooled.
+complete. The last row of `scores.parquet` contains the unweighted mean, labelled
+`unweighted_property_mean` with a null manifest path. The manifest also records
+the summary. Negative R² values are retained; targets are never pooled.
 Missing, nonfinite, or incompatible results prevent publication of a partial mean.
 Regression evaluation of `uniprot_protparams` always runs the complete property
 suite; selecting an individual property is not supported. The suite requires
 ordinary regression probes, without layerwise or additional test sets.
-Baseline-only and non-regression evaluations continue to use their existing
-paths.
+Baseline-only runs also aggregate all properties in `scores.parquet` and their
+run manifest; non-regression evaluations continue to use their existing paths.
 
 ### Pseudo-perplexity: UniProt UR100P test set
 

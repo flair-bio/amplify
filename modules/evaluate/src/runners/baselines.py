@@ -22,6 +22,7 @@ from modules.evaluate.src.contracts.artifacts import (
 from modules.evaluate.src.contracts.config import (
     BaselineName,
     BaselineRunConfig,
+    MultiTargetConfig,
     ScoreConfig,
 )
 from modules.evaluate.src.dataset.baseline_data import (
@@ -345,130 +346,138 @@ def run_multi_target_baselines(
             )
         target_outputs[target_name] = outputs["test"]
 
-    aggregate_outputs: dict[str, Path] = {}
-    for name in config.baselines.names:
-        rows = []
-        values: list[float] = []
-        target_identities = {}
-        for target_name in multi_target.target_columns:
-            try:
-                prediction_path = target_outputs[target_name][name]
-            except KeyError as error:
-                raise ValueError(
-                    f"Missing {name} baseline output for target {target_name!r}."
-                ) from error
-            manifest_path = prediction_path.with_name("run_manifest.json")
-            manifest = json.loads(manifest_path.read_text())
-            if manifest.get("status") != "complete":
-                raise ValueError(
-                    f"Incomplete {name} baseline run for {target_name!r}: "
-                    f"{manifest_path}"
-                )
-            target_identity = manifest.get("identity")
-            if not isinstance(target_identity, dict):
-                raise TypeError(f"Invalid baseline identity: {manifest_path}")
-            target_identities[target_name] = target_identity
-            value = _baseline_metric_value(
-                manifest.get("score", {}).get("scores"), multi_target.metric
+    return {
+        "test": {
+            name: _publish_multi_target_summary(
+                config, multi_target, name, target_outputs
             )
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(value)
-            ):
-                raise ValueError(
-                    f"Invalid {multi_target.metric} for {name} baseline "
-                    f"and target {target_name!r}."
-                )
-            values.append(float(value))
-            rows.append(
-                {
-                    multi_target.target_key: target_name,
-                    multi_target.metric: values[-1],
-                    "manifest_path": str(manifest_path),
-                }
-            )
+            for name in config.baselines.names
+        }
+    }
 
-        metadata = EvaluationMetadata(
-            model_name="baselines",
-            dataset_name=config.workspace.dataset_name,
-            dataset_repo_id=config.workspace.dataset_repo_id,
-            dataset_config_name=config.workspace.dataset_config_name,
-            dataset_revision=config.workspace.dataset_revision,
-            group_column=config.score.group_column,
-            task_type=config.workspace.task_type,
-            split=config.prepare.split.name,
-            seed=config.seed,
+
+def _publish_multi_target_summary(
+    config: BaselineRunConfig,
+    multi_target: MultiTargetConfig,
+    name: BaselineName,
+    target_outputs: dict[str, dict[str, Path]],
+) -> Path:
+    """Aggregate and publish one baseline's scores across targets."""
+    rows = []
+    values: list[float] = []
+    target_identities = {}
+    for target_name in multi_target.target_columns:
+        try:
+            prediction_path = target_outputs[target_name][name]
+        except KeyError as error:
+            raise ValueError(
+                f"Missing {name} baseline output for target {target_name!r}."
+            ) from error
+        manifest_path = prediction_path.with_name("run_manifest.json")
+        manifest = json.loads(manifest_path.read_text())
+        if manifest.get("status") != "complete":
+            raise ValueError(
+                f"Incomplete {name} baseline run for {target_name!r}: {manifest_path}"
+            )
+        target_identity = manifest.get("identity")
+        if not isinstance(target_identity, dict):
+            raise TypeError(f"Invalid baseline identity: {manifest_path}")
+        target_identities[target_name] = target_identity
+        value = _baseline_metric_value(
+            manifest.get("score", {}).get("scores"), multi_target.metric
         )
-        summary = {
-            "metadata": {
-                **metadata.model_dump(mode="json"),
-                "baseline": name,
-            },
-            "run_name": f"baselines-{name}",
-            "metric": multi_target.metric,
-            "aggregation": multi_target.aggregation_name,
-            multi_target.count_key: len(multi_target.target_columns),
-            "value": math.fsum(values) / len(multi_target.target_columns),
-        }
-        identity = {
-            "config": config.model_dump(mode="json"),
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise ValueError(
+                f"Invalid {multi_target.metric} for {name} baseline "
+                f"and target {target_name!r}."
+            )
+        values.append(float(value))
+        rows.append(
+            {
+                multi_target.target_key: target_name,
+                multi_target.metric: values[-1],
+                "manifest_path": str(manifest_path),
+            }
+        )
+
+    metadata = EvaluationMetadata(
+        model_name="baselines",
+        dataset_name=config.workspace.dataset_name,
+        dataset_repo_id=config.workspace.dataset_repo_id,
+        dataset_config_name=config.workspace.dataset_config_name,
+        dataset_revision=config.workspace.dataset_revision,
+        group_column=config.score.group_column,
+        task_type=config.workspace.task_type,
+        split=config.prepare.split.name,
+        seed=config.seed,
+    )
+    summary = {
+        "metadata": {
+            **metadata.model_dump(mode="json"),
             "baseline": name,
-            "targets": target_identities,
+        },
+        "run_name": f"baselines-{name}",
+        "metric": multi_target.metric,
+        "aggregation": multi_target.aggregation_name,
+        multi_target.count_key: len(multi_target.target_columns),
+        "value": math.fsum(values) / len(multi_target.target_columns),
+    }
+    rows.append(
+        {
+            multi_target.target_key: multi_target.aggregation_name,
+            multi_target.metric: summary["value"],
+            "manifest_path": None,
         }
-        output_root = config.workspace.dataset_root / "baselines" / name
-        summary_root = output_root / f"summary-{identity_hash(identity)[:16]}"
-        table_path = summary_root / multi_target.score_table_filename
-        manifest_path = summary_root / "run_manifest.json"
-        with cache_lock(output_root / f".{summary_root.name}.lock"):
-            for path in (output_root, summary_root):
-                if path.is_symlink():
-                    raise ValueError(f"Refusing symlinked baseline output: {path}")
-            if manifest_path.exists():
-                previous = json.loads(manifest_path.read_text())
-                if previous.get("identity") != identity:
-                    raise ValueError(
-                        f"Incompatible multi-target baseline manifest: {manifest_path}"
-                    )
-            elif summary_root.exists() and any(summary_root.iterdir()):
+    )
+    identity = {
+        "config": config.model_dump(mode="json"),
+        "baseline": name,
+        "targets": target_identities,
+    }
+    output_root = config.workspace.dataset_root / "baselines" / name
+    summary_root = output_root / f"summary-{identity_hash(identity)[:16]}"
+    table_path = summary_root / multi_target.score_table_filename
+    manifest_path = summary_root / "run_manifest.json"
+    with cache_lock(output_root / f".{summary_root.name}.lock"):
+        for path in (output_root, summary_root):
+            if path.is_symlink():
+                raise ValueError(f"Refusing symlinked baseline output: {path}")
+        if manifest_path.exists():
+            previous = json.loads(manifest_path.read_text())
+            if previous.get("identity") != identity:
                 raise ValueError(
-                    f"Existing multi-target baseline output has no manifest: {summary_root}"
+                    f"Incompatible multi-target baseline manifest: {manifest_path}"
                 )
-            write_json(
-                manifest_path,
-                {
-                    "workspace": config.workspace.model_dump(mode="json"),
-                    "identity": identity,
-                    "evaluation": {
-                        "status": "running",
-                        "config": identity["config"],
-                    },
-                },
+        elif summary_root.exists() and any(summary_root.iterdir()):
+            raise ValueError(
+                f"Existing multi-target baseline output has no manifest: {summary_root}"
             )
-            table = pl.DataFrame(rows)
-            write_parquet(table, table_path)
-            write_json(summary_root / "summary.json", summary)
-            write_json(
-                manifest_path,
-                {
-                    "workspace": config.workspace.model_dump(mode="json"),
-                    "identity": identity,
-                    "evaluation": {
-                        "status": "complete",
-                        "config": identity["config"],
-                    },
-                    "score": summary,
-                },
-            )
-        aggregate_outputs[name] = table_path
-        logger.info(
-            "Multi-target baseline %s mean %s over %d targets: %.6g",
-            name,
-            multi_target.metric,
-            len(multi_target.target_columns),
-            summary["value"],
-        )
-    return {"test": aggregate_outputs}
+        summary_manifest = {
+            "workspace": config.workspace.model_dump(mode="json"),
+            "identity": identity,
+            "evaluation": {
+                "status": "running",
+                "config": identity["config"],
+            },
+        }
+        write_json(manifest_path, summary_manifest)
+        table = pl.DataFrame(rows)
+        write_parquet(table, table_path)
+        summary_manifest["evaluation"]["status"] = "complete"
+        summary_manifest["score"] = summary
+        write_json(manifest_path, summary_manifest)
+    logger.info(
+        "Multi-target baseline %s mean %s over %d targets: %.6g",
+        name,
+        multi_target.metric,
+        len(multi_target.target_columns),
+        summary["value"],
+    )
+    return table_path
 
 
 def _baseline_metric_value(scores: Any, metric: str) -> Any:

@@ -21,7 +21,7 @@ from modules.evaluate.src.dataset.workspace import (
 )
 from modules.evaluate.src.metrics.tables import aggregate_task_scores
 from modules.evaluate.src.runners.pipeline import run_pipeline
-from modules.evaluate.src.utils.io import update_run_manifest, write_json, write_parquet
+from modules.evaluate.src.utils.io import update_run_manifest, write_parquet
 from modules.evaluate.src.utils.seed import seed_everything
 
 logger = logging.getLogger(__name__)
@@ -165,7 +165,6 @@ def run_multi_target_evaluation(
             write_parquet(
                 table, summary_workspace.run_root / multi_target.score_table_filename
             )
-            write_json(summary_workspace.run_root / "summary.json", summary)
             update_run_manifest(summary_workspace.run_manifest_path, "score", summary)
             update_run_manifest(
                 summary_workspace.run_manifest_path,

@@ -946,7 +946,7 @@ class MultiTargetConfig(BaseModel):
     target_key: str = "target"
     count_key: str = "n_targets"
     aggregation_name: str = "unweighted_target_mean"
-    score_table_filename: str = "target_scores.parquet"
+    score_table_filename: str = "scores.parquet"
 
     @model_validator(mode="after")
     def _validate_targets(self) -> MultiTargetConfig:
