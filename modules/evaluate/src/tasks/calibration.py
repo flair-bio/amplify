@@ -89,7 +89,7 @@ class CalibrationTask(FlatMetricsTask):
         "scrambled_labels",
         "untrained",
     }
-    dataset_baselines = frozenset({"human_residue"})
+    dataset_baselines = frozenset({"human_residue", "blosum62"})
 
     def build_model(
         self,

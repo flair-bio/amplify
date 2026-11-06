@@ -236,7 +236,7 @@ def test_score_crossfits_trained_and_control_temperatures():
     assert trained["accuracy_t"] == control["accuracy_nt"] == 1.0
 
 
-def test_human_residue_baseline_fits_its_temperature(tmp_path):
+def test_calibration_baselines_fit_their_temperature(tmp_path):
     def site(position, residue, is_t, fold):
         index = CANONICAL_AMINO_ACIDS.index(residue)
         freqs = [0.2 / 19] * 20
@@ -280,11 +280,12 @@ def test_human_residue_baseline_fits_its_temperature(tmp_path):
                     "temperature",
                 ]
             },
-            "baselines": {"names": ["human_residue"]},
+            "baselines": {"names": ["human_residue", "blosum62"]},
         }
     )
 
-    path = run_baselines(config, dataset=data)["test"]["human_residue"]
+    paths = run_baselines(config, dataset=data)["test"]
+    path = paths["human_residue"]
 
     baseline = pl.read_parquet(path)
     assert baseline["id"].to_list()[:2] == ["P0:1", "P0:3"]
@@ -297,6 +298,10 @@ def test_human_residue_baseline_fits_its_temperature(tmp_path):
     assert scores["calibration_t"] < 99
     assert scores["accuracy_t"] == 1.0
     assert scores["accuracy_high_nt"] == 0.0
+    blosum = pl.read_parquet(paths["blosum62"])
+    # P0:1 is C; its BLOSUM62 row is 9 on C and -4 on E, in half-bit units.
+    row = dict(zip(CANONICAL_AMINO_ACIDS, blosum["prediction"][0], strict=True))
+    assert row["C"] - row["E"] == pytest.approx(13 * np.log(2) / 2)
 
 
 def test_bootstrap_resamples_whole_proteins():

@@ -46,6 +46,7 @@ BaselineName = Literal[
     "amino_acid_frequency",
     "separation_prior",
     "human_residue",
+    "blosum62",
 ]
 ControlCondition = Literal[
     "untrained",

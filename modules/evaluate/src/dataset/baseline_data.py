@@ -28,7 +28,10 @@ BASELINE_PROTOCOLS = {
     "amino_acid_frequency": "test-corpus-iid-aa-frequency-v1",
 }
 SEPARATION_PRIOR_PROTOCOL = "casp-original-sequence-separation-v1"
-HUMAN_RESIDUE_PROTOCOL = "human-residue-one-hot-logits-v1"
+CALIBRATION_PROTOCOLS = {
+    "human_residue": "human-residue-one-hot-logits-v1",
+    "blosum62": "human-residue-blosum62-row-logits-v1",
+}
 
 
 def identity_hash(payload: Any) -> str:
@@ -247,7 +250,7 @@ def baseline_context(
         fit["protocols"] = {"majority_class": "all-train-valid-residue-majority-v1"}
     if workspace.task_type == "calibration":
         fit["fit_policy"] = "model_independent"
-        fit["protocols"] = {"human_residue": HUMAN_RESIDUE_PROTOCOL}
+        fit["protocols"] = CALIBRATION_PROTOCOLS
     return {
         "fit": fit,
         "test": {

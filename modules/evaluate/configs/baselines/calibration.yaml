@@ -1,2 +1,2 @@
 baselines:
-  names: [human_residue]
+  names: [human_residue, blosum62]

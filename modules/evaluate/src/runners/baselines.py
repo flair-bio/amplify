@@ -48,7 +48,7 @@ from modules.evaluate.src.dataset.dataloader import (
 from modules.evaluate.src.dataset.subsets import select_test_subsets
 from modules.evaluate.src.model.baselines import (
     build_amino_acid_frequency_baseline,
-    build_human_residue_baseline,
+    build_calibration_baseline,
     build_sequence_baseline,
 )
 from modules.evaluate.src.tasks import get_task
@@ -372,8 +372,10 @@ def _publish_baseline(
             frame = build_amino_acid_frequency_baseline(
                 test_rows, max_residues=max_residues
             )
-        elif name == "human_residue":
-            frame = build_human_residue_baseline(test_rows, max_residues=max_residues)
+        elif task_type == "calibration":
+            frame = build_calibration_baseline(
+                name, test_rows, max_residues=max_residues
+            )
         else:
             frame = build_sequence_baseline(
                 name, task_type, train_rows, test_rows, num_labels, seed=seed

@@ -34,13 +34,14 @@ steps.predict.controls → Predict: build each control's predictions
 - Pseudo-perplexity's `amino_acid_frequency` baseline is also generated with
   `--baselines`; it estimates an IID residue prior from the test sequences
   without labels because the benchmark is test-only.
-- Calibration's `human_residue` baseline is also generated with `--baselines`
-  via `configs/baselines/calibration.yaml`. At each site it gives the human
-  residue logit ln 19 and the other 19 amino acids 0 (half the mass at T=1),
-  never looking at the homolog profile, and is scored like a model, with its
-  own cross-fitted temperature. It scores high on T sites by construction and
-  near zero on high-NT sites, so a model must beat it on NT to show it learned
-  more than the human sequence.
+- Calibration's `human_residue` and `blosum62` baselines are also generated
+  with `--baselines` via `configs/baselines/calibration.yaml`. Both predict a
+  site from its human residue alone, never looking at the homolog profile:
+  `human_residue` gives that residue logit ln 19 and the others 0 (half the
+  mass at T=1); `blosum62` uses the residue's BLOSUM62 row as natural-log
+  odds. Each is scored like a model, with its own cross-fitted temperature. A
+  model must beat them on NT to show it uses more than the human residue and
+  generic substitution rates.
 - CASP supports the per-model `random_trunk` control and the model-agnostic
   `separation_prior` baseline. The latter is generated once with `--baselines`
   and reused by every predictor. Bilinear and attention controls fit their own
@@ -208,7 +209,7 @@ Each task config ships a control preset; override it with `steps.predict.control
 | `token_classification` | `random_trunk`; `baselines/token_classification.yaml`: `majority_class` |
 | `contact_prediction` | `random_trunk`; `baselines/contact_prediction.yaml`: `separation_prior` |
 | `pseudo_perplexity` | `random_trunk`; `baselines/pseudo_perplexity.yaml`: `amino_acid_frequency` |
-| `calibration` | `random_trunk`; `baselines/calibration.yaml`: `human_residue` |
+| `calibration` | `random_trunk`; `baselines/calibration.yaml`: `human_residue`, `blosum62` |
 
 `random_trunk` is the per-model default. Other controls remain available by
 explicit override where supported. Shared sequence, token and CASP contact
