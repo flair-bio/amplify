@@ -30,6 +30,7 @@ from modules.evaluate.src.contracts.config import (
     BaselineName,
     PredictConfig,
 )
+from modules.evaluate.src.dataset.dataloader import attach_metric_groups
 from modules.evaluate.src.dataset.embeddings import find_embedding_dataset
 from modules.evaluate.src.dataset.workspace import (
     EvaluationWorkspace,
@@ -159,6 +160,7 @@ class PredictStep:
                 dataset_repo_id=workspace.dataset_repo_id,
                 dataset_config_name=workspace.config.dataset_config_name,
                 dataset_revision=workspace.config.dataset_revision,
+                group_column=prepared.test_group_column,
                 task_type=workspace.task_type,
                 split=prepared.split,
                 test_subset=workspace.test_subset,
@@ -180,6 +182,11 @@ class PredictStep:
             predictions_df = pl.DataFrame(data)
             predictions_df = self._add_token_positions(
                 predictions_df, prepared.test_original_positions
+            )
+            predictions_df = attach_metric_groups(
+                predictions_df,
+                prepared.test_metric_groups,
+                prepared.test_group_column,
             )
             if sequence_by_id is not None:
                 # Feature batches contain no tokens; recover sequences by
@@ -257,6 +264,7 @@ class PredictStep:
             dataset_repo_id=workspace.dataset_repo_id,
             dataset_config_name=workspace.config.dataset_config_name,
             dataset_revision=workspace.config.dataset_revision,
+            group_column=prepared.test_group_column,
             task_type=workspace.task_type,
             split=prepared.split,
             test_subset=workspace.test_subset,
@@ -395,6 +403,11 @@ class PredictStep:
         predictions_df = pl.DataFrame(prediction_data)
         predictions_df = self._add_token_positions(
             predictions_df, prepared.test_original_positions
+        )
+        predictions_df = attach_metric_groups(
+            predictions_df,
+            prepared.test_metric_groups,
+            prepared.test_group_column,
         )
 
         if using_embeddings and self.config.store_sequences:

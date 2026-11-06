@@ -102,7 +102,7 @@ metrics.
 | UESolDS | `solubility_prediction` | `sequence_classification` | Accuracy | Accuracy, F1 |
 | HMD-ARG | `antibiotic_resistance` | `sequence_classification` | Macro-F1 | Macro-F1, accuracy |
 | FLIP / Meltome Atlas | `meltome_mixed`, `meltome_human` | `sequence_regression` | Spearman | Spearman, MSE |
-| Biomap-research | `stability_prediction` | `sequence_regression` | Pooled Spearman (cluster average pending) | Pooled Spearman, MSE |
+| Biomap-research | `stability_prediction` | `sequence_regression` | Pooled Spearman | Equal-weight cluster Spearman and MSE |
 | Reprocessed BioMap SSP | `ssp_q3`, `ssp_q8` | `token_classification` | Accuracy | Accuracy, F1 |
 | CASP14-16 | `contact_prediction_casp` | `contact_prediction` | Fixed protocol; no HPO | AUC, P@L, P@L/2, P@L/5, ROC-AUC |
 | UniProt GO | `GO_mf`, `GO_bp`, `GO_cc` | `sequence_multilabel_classification` | Protein-centric Fmax | Fmax, F1 |
@@ -256,6 +256,16 @@ clump into insoluble aggregates?
 **Question:** how well does this small designed protein resist being cut up
 by proteases?
 
+- **Scoring:** `steps.score.group_column: cluster_id` opts into test grouping;
+  set it to `null` for pooled test metrics, with or without cluster annotations.
+  Every test metric is computed within each supplied `cluster_id`
+  and averaged equally across clusters where that metric is defined. Spearman
+  excludes singleton clusters and constant predictions or targets; MSE includes
+  those clusters. If no cluster is valid for a metric, its score is NaN.
+  Bootstrap and paired comparisons
+  use whole clusters. Validation tuning remains pooled Spearman because only
+  test has cluster annotations. Rerun preparation and prediction for older
+  artifacts without `cluster_id`.
 - **Readout:** one stability score per sequence; higher means more resistant
   than an unfolded chain would be. Data from Rocklin et al.: de novo designed
   mini-proteins (about 40 residues) and their mutants, as packaged by TAPE.
@@ -743,8 +753,8 @@ match the amino-acid frequencies among the protein's homologs?
   temperature), `kl_{t,nt,high_nt}`, `accuracy_{t,nt,high_nt}` (the argmax is
   the consensus) and `temperature` (mean of the per-fold fits). Per
   conservation bin, `calibration[_fit]_{t,nt}_bin{0..8}` give the balanced
-  cohort scores (bin 0 is `[0, 0.2)`, bin 8 is `[0.9, 1]`). The core three are
-  reported by default.
+  cohort scores (bin 0 is `[0, 0.2)`, bin 8 is `[0.9, 1]`). The three fitted
+  scores, `calibration_fit_{t,nt,high_nt}`, are reported by default.
 - **Temperature:** proteins are split into 5 folds (identical sequences
   together). For each fold, one temperature in `[0.25, 8]` is fitted on the
   balanced sites of the other four folds, minimizing the mean KL with equal
@@ -758,6 +768,11 @@ match the amino-acid frequencies among the protein's homologs?
   with [`tasks/calibration.yaml`](../configs/tasks/calibration.yaml), which
   keeps full sequences (`max_length: 100000`) so the handler can centre its
   own window. Each site is a separate forward pass (22,254 in total).
+- **Baselines:** `human_residue` (the human residue only; fitted T 47.4, NT
+  18.3, high-NT 4.0) and `blosum62` (its BLOSUM62 row; fitted T 51.1, NT 23.6,
+  high-NT 5.0). Neither uses the homologs. Generate them once with
+  `--baselines` and [`baselines/calibration.yaml`](../configs/baselines/calibration.yaml);
+  see [controls](controls.md#how-controls-flow-through-a-run).
 
 ---
 

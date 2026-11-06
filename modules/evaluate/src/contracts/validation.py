@@ -23,6 +23,7 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
     ``model_validator(mode="after")`` function directly (see config.py)."""
     steps = config.steps
     task = get_task(config.workspace.task_type)
+    steps.score.validate_task(config.workspace.task_type)
     task.validate_config(config)
     if task.fixed_protocol:
         return config

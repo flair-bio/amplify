@@ -35,6 +35,7 @@ from modules.evaluate.src.dataset.baseline_data import (
     mmseqs_coverage,
     preprocessing_identity,
     sequence_rows,
+    site_profile_rows,
     unlabeled_sequence_rows,
 )
 from modules.evaluate.src.dataset.contact import (
@@ -43,6 +44,8 @@ from modules.evaluate.src.dataset.contact import (
     separation_prior_prediction_rows,
 )
 from modules.evaluate.src.dataset.dataloader import (
+    attach_metric_groups,
+    metric_groups_by_id,
     resolve_evaluation_data,
     resolve_external_data,
 )
@@ -50,6 +53,7 @@ from modules.evaluate.src.dataset.subsets import select_test_subsets
 from modules.evaluate.src.model.baselines import (
     _mmseqs_nearest_neighbors,
     build_amino_acid_frequency_baseline,
+    build_calibration_baseline,
     build_sequence_baseline,
 )
 from modules.evaluate.src.tasks import get_task
@@ -145,16 +149,28 @@ def run_baselines(
         "task_type": workspace.task_type,
         "num_labels": workspace.num_labels,
     }
-    if workspace.task_type == "pseudo_perplexity":
-        train_rows: list[dict[str, Any]] = []
-        test_rows = unlabeled_sequence_rows(
-            data["test"],
-            sequence_column=prepare.sequence_column,
-            id_column=prepare.id_column,
-        )
-    else:
-        train_rows = sequence_rows(data["train"], **row_options)
-        test_rows = sequence_rows(data["test"], **row_options)
+
+    def test_split_rows(test: Any) -> list[dict[str, Any]]:
+        if workspace.task_type == "pseudo_perplexity":
+            return unlabeled_sequence_rows(
+                test,
+                sequence_column=prepare.sequence_column,
+                id_column=prepare.id_column,
+            )
+        if workspace.task_type == "calibration":
+            return site_profile_rows(
+                test,
+                sequence_column=prepare.sequence_column,
+                label_column=prepare.label_column,
+                id_column=prepare.id_column,
+            )
+        return sequence_rows(test, **row_options)
+
+    test_only = workspace.task_type in {"pseudo_perplexity", "calibration"}
+    train_rows: list[dict[str, Any]] = (
+        [] if test_only else sequence_rows(data["train"], **row_options)
+    )
+    test_rows = test_split_rows(data["test"])
     tests: list[tuple[str, dict[str, Any], DatasetDict, list[dict[str, Any]]]] = [
         ("test", context, data, test_rows)
     ]
@@ -187,15 +203,7 @@ def run_baselines(
                 seed=config.seed,
             ),
         )
-        external_rows = (
-            unlabeled_sequence_rows(
-                external_data["test"],
-                sequence_column=prepare.sequence_column,
-                id_column=prepare.id_column,
-            )
-            if workspace.task_type == "pseudo_perplexity"
-            else sequence_rows(external_data["test"], **row_options)
-        )
+        external_rows = test_split_rows(external_data["test"])
         tests.append(
             (
                 f"external/{external.name}",
@@ -206,7 +214,10 @@ def run_baselines(
         )
 
     outputs: dict[str, dict[str, Path]] = {}
-    for test_name, test_context, _, test_rows in tests:
+    for test_name, test_context, test_dataset, test_rows in tests:
+        metric_groups = metric_groups_by_id(
+            test_dataset["test"], config.score.group_column, prepare.id_column
+        )
         outputs[test_name] = {}
         for name in config.baselines.names:
             directory = artifact_directory(test_context, name)
@@ -258,6 +269,7 @@ def run_baselines(
                     config.seed,
                     run_config=config.model_dump(mode="json"),
                     test_name=test_name,
+                    metric_groups=metric_groups,
                 )
                 logger.info("Baseline predictions ready: %s", path)
                 outputs[test_name][name] = path
@@ -569,6 +581,10 @@ def _publish_baseline(
             frame = build_amino_acid_frequency_baseline(
                 test_rows, max_residues=max_residues
             )
+        elif task_type == "calibration":
+            frame = build_calibration_baseline(
+                name, test_rows, max_residues=max_residues
+            )
         elif mmseqs_neighbors is None:
             frame = build_sequence_baseline(
                 name,
@@ -621,6 +637,7 @@ def _publish_standalone_scores(
     *,
     run_config: dict[str, Any],
     test_name: str,
+    metric_groups: dict[str, Any] | None = None,
 ) -> None:
     effective_score_config = _baseline_score_config(config)
     task = get_task(workspace.task_type, workspace.num_labels)
@@ -640,12 +657,14 @@ def _publish_standalone_scores(
     elif "label" not in artifact.columns:
         artifact = artifact.with_columns(pl.lit(0).alias("label"))
 
+    artifact = attach_metric_groups(artifact, metric_groups or {}, config.group_column)
     metadata = EvaluationMetadata(
         model_name="baselines",
         dataset_name=workspace.dataset_name,
         dataset_repo_id=workspace.dataset_repo_id,
         dataset_config_name=workspace.dataset_config_name,
         dataset_revision=workspace.dataset_revision,
+        group_column=config.group_column,
         task_type=workspace.task_type,
         split=str(context["test"]["split"]),
         seed=seed,

@@ -35,6 +35,32 @@ from modules.evaluate.src.dataset.embeddings import find_embedding_dataset
 from .conftest import ModelFamily, build_raw_dataset_dict, build_tiny_model
 
 
+def test_metric_groups_follow_original_prediction_ids():
+    import polars as pl
+    from modules.evaluate.src.dataset.dataloader import attach_metric_groups, metric_groups_by_id
+    dataset = DatasetDict(
+        test=Dataset.from_dict(
+            {
+                "id": ["original-a", "original-b"],
+                "cluster_id": [10, 20],
+            }
+        )
+    )
+    clusters = metric_groups_by_id(dataset["test"], "cluster_id")
+    predictions = pl.DataFrame(
+        {
+            "id": ["original-b", "original-a"],
+            "prediction": [0.0, 1.0],
+            "label": [1.0, 0.0],
+        }
+    )
+    annotated = attach_metric_groups(predictions, clusters, "cluster_id")
+    assert annotated["cluster_id"].to_list() == [20, 10]
+    assert annotated["id"].to_list() == predictions["id"].to_list()
+    with pytest.raises(ValueError, match="test IDs"):
+        attach_metric_groups(predictions.head(1), clusters, "cluster_id")
+
+
 def _make_workspace(tmp_path, task_type, num_labels=2):
     target_type = "continuous" if task_type == "sequence_regression" else "categorical"
     label_format = (

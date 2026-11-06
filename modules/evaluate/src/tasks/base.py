@@ -595,6 +595,13 @@ class TaskHandler(ABC):
 class FlatMetricsTask(TaskHandler, abstract=True):
     """Tasks scored from aligned prediction and label rows."""
 
+    def prepare_scoring(
+        self, predictions: PredictOutput, config: ScoreConfig
+    ) -> tuple[FlatMetricsTask, PredictOutput]:
+        """Resolve scoring units without changing persisted prediction rows."""
+        config.validate_task(self.name)
+        return self, predictions
+
     def score(
         self,
         predictions: PredictOutput,
