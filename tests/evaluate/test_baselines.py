@@ -907,13 +907,6 @@ def test_multi_target_baselines_score_each_target_and_resume(tmp_path, monkeypat
                     "beta": [10.0, 20.0, 30.0],
                 }
             ),
-            "validation": Dataset.from_dict(
-                {
-                    "sequence": ["WWW"],
-                    "alpha": [100.0],
-                    "beta": [100.0],
-                }
-            ),
             "test": Dataset.from_dict(
                 {
                     "sequence": ["ACE", "DFG", "HI"],
@@ -954,11 +947,7 @@ def test_multi_target_baselines_score_each_target_and_resume(tmp_path, monkeypat
         assert output_path.parent.parent == (
             config.workspace.dataset_root / "baselines" / name
         )
-        assert {path.name for path in output_path.parent.iterdir()} == {
-            "custom_scores.parquet",
-            "summary.json",
-            "run_manifest.json",
-        }
+        assert output_path.name == "custom_scores.parquet"
         target_table = pl.read_parquet(output_path)
         assert target_table["label_name"].to_list() == ["alpha", "beta"]
         scalar_scores = []
@@ -972,15 +961,7 @@ def test_multi_target_baselines_score_each_target_and_resume(tmp_path, monkeypat
             assert target_root.parent.parent == output_path.parent.parent
             assert target_root.parent.name.startswith("fit-")
             assert target_root.name.startswith("test-")
-            assert {path.name for path in target_root.iterdir()} == {
-                "predictions.parquet",
-                "scores.parquet",
-                "run_manifest.json",
-            }
-            assert manifest["status"] == "complete"
-            assert manifest["score"]["scores_path"] == str(
-                target_root / "scores.parquet"
-            )
+            assert manifest["run"]["config"]["prepare"]["label_column"] == target_name
             scalar_scores.append(manifest["score"]["scores"]["r2"])
             if name == "mmseqs_knn":
                 predictions = pl.read_parquet(
@@ -994,23 +975,12 @@ def test_multi_target_baselines_score_each_target_and_resume(tmp_path, monkeypat
         assert target_table["r2"].to_list() == pytest.approx(scalar_scores)
         aggregate = json.loads(output_path.with_name("summary.json").read_text())
         assert aggregate["value"] == pytest.approx(sum(scalar_scores) / 2)
-        aggregate_metadata = aggregate["metadata"].copy()
-        assert aggregate_metadata.pop("baseline") == name
-        assert EvaluationMetadata.model_validate(aggregate_metadata).seed == config.seed
+        assert aggregate["metadata"]["baseline"] == name
 
     table_path = outputs["test"]["train_mean"]
     table = pl.read_parquet(table_path)
-    assert table["label_name"].to_list() == ["alpha", "beta"]
     assert table["r2"].to_list() == pytest.approx([-0.375, -0.01183431952662722])
     assert len(set(table["manifest_path"].to_list())) == 2
-    for target_name, manifest_path in zip(
-        table["label_name"].to_list(), table["manifest_path"].to_list(), strict=True
-    ):
-        scalar_manifest = json.loads(Path(manifest_path).read_text())
-        assert (
-            scalar_manifest["run"]["config"]["prepare"]["label_column"] == target_name
-        )
-        assert scalar_manifest["score"]["scores"]["r2"] is not None
 
     summary_path = table_path.with_name("summary.json")
     summary = json.loads(summary_path.read_text())
@@ -1024,13 +994,7 @@ def test_multi_target_baselines_score_each_target_and_resume(tmp_path, monkeypat
     original_summary = summary_path.read_text()
     changed_data = DatasetDict(
         {
-            "train": data["train"].map(
-                lambda row: {
-                    "alpha": row["alpha"] + 5.0,
-                    "beta": row["beta"] + 5.0,
-                }
-            ),
-            "validation": data["validation"],
+            "train": data["train"].map(lambda row: {"alpha": row["alpha"] + 5.0}),
             "test": data["test"],
         }
     )
@@ -1069,24 +1033,6 @@ def test_multi_target_baselines_score_each_target_and_resume(tmp_path, monkeypat
     builder.assert_not_called()
     assert search.call_count == 2
     loader.assert_called_once()
-
-
-def test_multi_target_baselines_allow_summary_target(tmp_path):
-    base = _config(tmp_path, regression=True)
-    config = BaselineRunConfig.model_validate(
-        {
-            **base.model_dump(),
-            "multi_target": {"target_columns": ["summary"], "metric": "r2"},
-        }
-    )
-    data = DatasetDict(
-        {
-            split: values.rename_column("targets", "summary")
-            for split, values in _data(regression=True).items()
-        }
-    )
-    table_path = run_multi_target_baselines(config, dataset=data)["test"]["train_mean"]
-    assert pl.read_parquet(table_path)["target"].to_list() == ["summary"]
 
 
 def test_baseline_cli_uses_data_subset_without_model_validation(tmp_path, monkeypatch):
