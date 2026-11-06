@@ -794,6 +794,11 @@ class ScoreConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     metrics: list[str] | None = None
+    group_column: str | None = Field(
+        None,
+        min_length=1,
+        description="Test groups for equal-weight regression metrics.",
+    )
     metric_aggregation: Literal["micro", "macro", "weighted", "samples"] = "weighted"
 
     # Bootstrap confidence intervals / control comparisons are optional
@@ -809,6 +814,19 @@ class ScoreConfig(BaseModel):
     # Tidy score-table filename (see ``build_long_df``), written on every run.
     # ``long_filename`` is retained as a config key for compatibility.
     long_filename: str = "scores.parquet"
+
+    @field_validator("group_column")
+    @classmethod
+    def _validate_group_column(cls, value: str | None) -> str | None:
+        if value is not None and (
+            not value.strip() or value in {"id", "prediction", "label", "probability"}
+        ):
+            raise ValueError("group_column must name a non-reserved source column.")
+        return value
+
+    def validate_task(self, task_type: str) -> None:
+        if self.group_column is not None and task_type != "sequence_regression":
+            raise ValueError("score.group_column is supported for sequence_regression.")
 
     @model_validator(mode="after")
     def _warn_if_resamples_too_low_for_significance(self) -> ScoreConfig:
@@ -1027,6 +1045,7 @@ class BaselineRunConfig(BaseModel):
     def validate_baselines(self) -> BaselineRunConfig:
         from modules.evaluate.src.tasks import get_task
 
+        self.score.validate_task(self.workspace.task_type)
         self.baselines.validate_task(self.workspace.task_type)
         if not self.baselines.names:
             raise ValueError(

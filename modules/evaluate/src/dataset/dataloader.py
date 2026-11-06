@@ -14,13 +14,16 @@ them to fit the job's CPU allocation.
 
 from __future__ import annotations
 
+import json
 import logging
+import math
 import random
 import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import polars as pl
 import torch
 from datasets import Dataset, DatasetDict, load_dataset  # type: ignore[attr-defined]
 from pydantic import BaseModel, ConfigDict, Field
@@ -36,6 +39,46 @@ from modules.evaluate.src.dataset.contact import prepare_contact_dataset
 from modules.evaluate.src.tasks import TaskType, get_task
 
 logger = logging.getLogger(__name__)
+
+
+def metric_groups_by_id(
+    dataset: Dataset, group_column: str | None, id_column: str = "id"
+) -> dict[str, Any]:
+    """Retain test metric groups before tokenization removes source metadata."""
+    if group_column is None:
+        return {}
+    if group_column not in dataset.column_names:
+        raise ValueError(
+            f"Test data must contain metric group column '{group_column}'."
+        )
+    groups = {}
+    for identifier, group in zip(
+        dataset[id_column], dataset[group_column], strict=True
+    ):
+        key = json.dumps(identifier, allow_nan=False)
+        if identifier is None or key in groups:
+            raise ValueError("Grouped metrics require non-null, unique original IDs.")
+        if group is None or (isinstance(group, float) and not math.isfinite(group)):
+            raise ValueError("Metric group IDs must be non-null and finite.")
+        groups[key] = group
+    return groups
+
+
+def attach_metric_groups(
+    predictions: pl.DataFrame,
+    groups_by_id: dict[str, Any],
+    group_column: str | None,
+) -> pl.DataFrame:
+    """Attach source metric groups to predictions in their inference order."""
+    if group_column is None:
+        return predictions
+    keys = [json.dumps(identifier, allow_nan=False) for identifier in predictions["id"]]
+    if len(set(keys)) != len(keys) or set(keys) != set(groups_by_id):
+        raise ValueError("Grouped predictions do not match prepared test IDs.")
+    return predictions.with_columns(
+        pl.Series(group_column, [groups_by_id[key] for key in keys])
+    )
+
 
 # Default mega-batch sizing for LengthGroupedSampler, mirroring
 # transformers.trainer_pt_utils.get_length_grouped_indices.

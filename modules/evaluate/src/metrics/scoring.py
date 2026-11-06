@@ -6,6 +6,7 @@ Tasks choose the scientific protocol; the score step publishes returned results.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -49,6 +50,13 @@ def score_flat(
     seed: int,
 ) -> ScoreOutput:
     """Score aligned rows and, when requested, resample their task-defined units."""
+    predict_result = replace(
+        predict_result,
+        metadata=predict_result.metadata.model_copy(
+            update={"group_column": config.group_column}
+        ),
+    )
+    task, predict_result = task.prepare_scoring(predict_result, config)
     if predict_result.predictions.is_empty():
         raise ValueError(
             "ScoreStep requires PredictOutput.predictions to be "
@@ -339,6 +347,25 @@ def compare_layer_scores(
     """Compare layers with the deepest reference using paired resampling."""
     if len(layer_predictions) < 2:
         return None
+    reference = max(layer_predictions)
+    reference_output = layer_predictions[reference]
+    reference_ids = reference_output.predictions["id"].to_list()
+    prepared_layers = {}
+    for layer, output in layer_predictions.items():
+        if output.predictions["id"].to_list() != reference_ids:
+            raise ValueError(
+                f"Layer {layer} predictions are not row-aligned with layer {reference}."
+            )
+        group_column = config.group_column
+        if group_column is not None and not output.predictions[group_column].equals(
+            reference_output.predictions[group_column]
+        ):
+            raise ValueError(
+                "Layer predictions use different metric group assignments."
+            )
+        scoring_task, prepared_layers[layer] = task.prepare_scoring(output, config)
+    task = scoring_task
+    layer_predictions = prepared_layers
     metric_names = config.metrics or task.default_metrics()
     average = config.metric_aggregation
     reference = max(layer_predictions)

@@ -24,6 +24,7 @@ from .conftest import build_raw_dataset_dict
         ("sequence_classification", "tune_probe", "mlp", True, "accuracy"),
         ("sequence_classification", "finetune", "mlp", False, "accuracy"),
         ("sequence_regression", "tune_probe", "sklearn_linear", True, "mse"),
+        ("sequence_regression", "tune_probe", "sklearn_linear", True, "spearmanr"),
         (
             "sequence_multilabel_classification",
             "tune_probe",
@@ -66,6 +67,11 @@ def test_task_pipeline_roundtrip(
         dataset = DatasetDict({"test": data})
     else:
         dataset = build_raw_dataset_dict(task)
+    group_column = "cluster_id" if metric == "spearmanr" else None
+    if group_column is not None:
+        dataset["test"] = dataset["test"].add_column(
+            "id", ["original-0", "original-1", "original-2", "original-3"],
+        ).add_column(group_column, [0, 0, 1, 1])
     label_format = {
         "token_classification": "per_token",
         "sequence_multilabel_classification": "multilabel",
@@ -112,7 +118,8 @@ def test_task_pipeline_roundtrip(
                     "hyperparameter_search": {"enabled": False},
                 },
                 "predict": {"controls": ["random_trunk"]},
-                "score": {"metrics": [metric], "bootstrap_enabled": False},
+                "score": {"metrics": [metric], "bootstrap_enabled": False,
+                          "group_column": group_column},
             },
         }
     )
@@ -126,6 +133,9 @@ def test_task_pipeline_roundtrip(
     assert prediction.metadata.head_type == (None if mode == "evaluate_as_is" else head)
     assert metric in result.scores[None].scores
     assert np.isfinite(result.scores[None].scores[metric])
+    if group_column is not None:
+        assert prediction.predictions[group_column].to_list() == [0, 0, 1, 1]
+        assert result.scores[None].config["group_column"] == group_column
     if task == "sequence_classification":
         assert set(result.scores[None].condition_scores) == {
             "trained",

@@ -102,7 +102,7 @@ metrics.
 | UESolDS | `solubility_prediction` | `sequence_classification` | Accuracy | Accuracy, F1 |
 | HMD-ARG | `antibiotic_resistance` | `sequence_classification` | Macro-F1 | Macro-F1, accuracy |
 | FLIP / Meltome Atlas | `meltome_mixed`, `meltome_human` | `sequence_regression` | Spearman | Spearman, MSE |
-| Biomap-research | `stability_prediction` | `sequence_regression` | Pooled Spearman (cluster average pending) | Pooled Spearman, MSE |
+| Biomap-research | `stability_prediction` | `sequence_regression` | Pooled Spearman | Equal-weight cluster Spearman and MSE |
 | Reprocessed BioMap SSP | `ssp_q3`, `ssp_q8` | `token_classification` | Accuracy | Accuracy, F1 |
 | CASP14-16 | `contact_prediction_casp` | `contact_prediction` | Fixed protocol; no HPO | AUC, P@L, P@L/2, P@L/5, ROC-AUC |
 | UniProt GO | `GO_mf`, `GO_bp`, `GO_cc` | `sequence_multilabel_classification` | Protein-centric Fmax | Fmax, F1 |
@@ -256,6 +256,16 @@ clump into insoluble aggregates?
 **Question:** how well does this small designed protein resist being cut up
 by proteases?
 
+- **Scoring:** `steps.score.group_column: cluster_id` opts into test grouping;
+  set it to `null` for pooled test metrics, with or without cluster annotations.
+  Every test metric is computed within each supplied `cluster_id`
+  and averaged equally across clusters where that metric is defined. Spearman
+  excludes singleton clusters and constant predictions or targets; MSE includes
+  those clusters. If no cluster is valid for a metric, its score is NaN.
+  Bootstrap and paired comparisons
+  use whole clusters. Validation tuning remains pooled Spearman because only
+  test has cluster annotations. Rerun preparation and prediction for older
+  artifacts without `cluster_id`.
 - **Readout:** one stability score per sequence; higher means more resistant
   than an unfolded chain would be. Data from Rocklin et al.: de novo designed
   mini-proteins (about 40 residues) and their mutants, as packaged by TAPE.

@@ -113,6 +113,8 @@ class PreparedArtifacts:
 
     baseline_context: dict[str, Any] | None = None
     test_original_positions: dict[str, list[int]] = field(default_factory=dict)
+    test_metric_groups: dict[str, Any] = field(default_factory=dict)
+    test_group_column: str | None = None
     features: dict[str, PreparedFeatures] = field(default_factory=dict)
     input_identity: dict[str, Any] = field(default_factory=dict)
 
@@ -179,6 +181,7 @@ class EvaluationMetadata(BaseModel):
     dataset_repo_id: str | None = None
     dataset_config_name: str | None = None
     dataset_revision: str | None = None
+    group_column: str | None = None
 
     # Which steps.tune.head.head_type produced these predictions (e.g.
     # "mlp"/"sklearn_linear"/"knn"/"random_forest"/"xgboost"/"torch_linear"),

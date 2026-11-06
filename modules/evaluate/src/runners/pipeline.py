@@ -164,6 +164,7 @@ def _execute_steps(
         layerwise_config=config.steps.layerwise,
         dataset=dataset,
         head_type=config.steps.tune.head.head_type,
+        group_column=config.steps.score.group_column,
     )
 
     mode = config.steps.mode
@@ -225,6 +226,7 @@ def _execute_steps(
                     accelerator=accelerator,
                     seed=config.seed,
                     layerwise_config=config.steps.layerwise,
+                    group_column=config.steps.score.group_column,
                 )
             )
             result.test_subsets[name] = _predict_and_score(
@@ -275,6 +277,7 @@ def _evaluate_external_tests(
             accelerator=accelerator,
             seed=config.seed,
             layerwise_config=config.steps.layerwise,
+            group_column=config.steps.score.group_column,
         )
         external_workspace = _external_workspace(workspace, external)
         external_workspace.setup_directories()

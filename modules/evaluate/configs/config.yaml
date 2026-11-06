@@ -117,6 +117,7 @@ steps:
     controls: [random_trunk] # model/input/label ablations only
     baselines: [] # optional inline prediction baselines
   score:
+    group_column: null # optional source column for equal-weight grouped test metrics; null keeps pooled scoring
     metrics: null # task overlays declare reported metrics explicitly
     metric_aggregation: macro # one of micro, macro, weighted, samples
     bootstrap_enabled: true

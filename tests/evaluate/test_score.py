@@ -43,6 +43,167 @@ from modules.evaluate.src.metrics.tables import build_long_df, upsert_long_df
 from .conftest import ModelFamily, build_raw_dataset_dict, build_tiny_model
 
 
+def test_grouped_regression_metrics_and_cluster_resampling():
+    metric_names = ["spearmanr", "mse", "mae", "r2", "pearsonr"]
+    predictions = [0.0, 1.0, 2.0, 3.0, 20.0, 10.0]
+    labels = [0.0, 1.0, 2.0, 3.0, 10.0, 20.0]
+    output = PredictOutput(
+        metadata=EvaluationMetadata(
+            model_name="toy",
+            dataset_name="toy_grouped",
+            task_type="sequence_regression",
+        ),
+        predictions=pl.DataFrame(
+            {
+                "id": [f"original-{i}" for i in range(6)],
+                "prediction": predictions,
+                "label": labels,
+                "parent_design": [0, 0, 0, 0, 1, 1],
+            }
+        ),
+        controls={
+            "random_trunk": pl.DataFrame(
+                {
+                    "id": [f"original-{i}" for i in reversed(range(6))],
+                    "prediction": list(reversed(labels)),
+                }
+            ),
+        },
+    )
+    result = get_task("sequence_regression").score(
+        output,
+        ScoreConfig(
+            metrics=metric_names,
+            group_column="parent_design",
+            bootstrap_enabled=True,
+            n_samples=12,
+            n_permutations=12,
+        ),
+        seed=123,
+    )
+    expected_scores = {
+        "spearmanr": 0.0, "mse": 50.0, "mae": 5.0, "r2": -1.0, "pearsonr": 0.0,
+    }
+    assert result.scores == pytest.approx(
+        {name: expected_scores[name] for name in metric_names}
+    )
+    assert result.condition_scores["random_trunk"] == pytest.approx(
+        {
+            name: 1.0 if name in {"spearmanr", "r2", "pearsonr"} else 0.0
+            for name in metric_names
+        }
+    )
+    rng = np.random.default_rng(123)
+    draws = [rng.integers(0, 2, size=2) for _ in range(12)]
+    per_cluster = {
+        "spearmanr": [1.0, -1.0],
+        "mse": [0.0, 100.0],
+        "mae": [0.0, 10.0],
+        "r2": [1.0, -3.0],
+        "pearsonr": [1.0, -1.0],
+    }
+    for name in metric_names:
+        expected = [np.mean(np.array(per_cluster[name])[indices]) for indices in draws]
+        assert result.resamples[name].to_list() == pytest.approx(expected)
+    assert output.predictions["id"].to_list() == [f"original-{i}" for i in range(6)]
+
+
+@pytest.mark.parametrize("all_undefined", [False, True])
+def test_grouped_regression_excludes_undefined_metrics_independently(all_undefined):
+    labels = [0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 3.0, 3.0, 10.0]
+    predictions = [
+        0.0,
+        0.0 if all_undefined else 1.0,
+        0.0 if all_undefined else 2.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        11.0,
+    ]
+    output = PredictOutput(
+        metadata=EvaluationMetadata(
+            model_name="toy",
+            dataset_name="toy_grouped",
+            task_type="sequence_regression",
+        ),
+        predictions=pl.DataFrame(
+            {
+                "id": list(range(9)),
+                "prediction": predictions,
+                "label": labels,
+                "cluster_id": [0, 0, 0, 1, 1, 1, 2, 2, 3],
+            }
+        ),
+    )
+    result = get_task("sequence_regression").score(
+        output,
+        ScoreConfig(metrics=["spearmanr", "pearsonr", "r2", "mse"], group_column="cluster_id"),
+        seed=123,
+    )
+    if all_undefined:
+        assert math.isnan(result.scores["spearmanr"])
+        assert math.isnan(result.scores["pearsonr"])
+    else:
+        assert result.scores["spearmanr"] == pytest.approx(1.0)
+        assert result.scores["pearsonr"] == pytest.approx(1.0)
+    assert result.scores["r2"] == pytest.approx(-1.0 if all_undefined else -1 / 6)
+    assert result.scores["mse"] == pytest.approx(
+        np.mean([
+            np.mean((np.array(predictions[start:end]) - np.array(labels[start:end])) ** 2)
+            for start, end in [(0, 3), (3, 6), (6, 8), (8, 9)]
+        ])
+    )
+
+
+@pytest.mark.parametrize("clusters", [None, [0, None], [0.0, float("nan")]])
+def test_grouped_regression_requires_complete_annotations(clusters):
+    rows = {"id": [0, 1], "prediction": [0.0, 1.0], "label": [0.0, 1.0]}
+    if clusters is not None:
+        rows["cluster_id"] = clusters
+    output = PredictOutput(
+        metadata=EvaluationMetadata(
+            model_name="toy",
+            dataset_name="toy_grouped",
+            task_type="sequence_regression",
+        ),
+        predictions=pl.DataFrame(rows),
+    )
+    with pytest.raises(ValueError, match="[Gg]roup"):
+        get_task("sequence_regression").score(
+            output, ScoreConfig(metrics=["spearmanr"], group_column="cluster_id")
+        )
+
+
+def test_regression_without_grouping_keeps_pooled_metrics():
+    from scipy.stats import spearmanr
+
+    predictions, labels = (
+        [0.0, 1.0, 2.0, 3.0, 20.0, 10.0],
+        [0.0, 1.0, 2.0, 3.0, 10.0, 20.0],
+    )
+    task = get_task("sequence_regression")
+    output = PredictOutput(
+        metadata=EvaluationMetadata(
+            model_name="toy",
+            dataset_name="toy",
+            task_type=task.name,
+        ),
+        predictions=pl.DataFrame(
+            {
+                "id": list(range(6)),
+                "prediction": predictions,
+                "label": labels,
+                "cluster_id": [0, 0, 0, 0, 1, 1],
+            }
+        ),
+    )
+    assert task.score(output, ScoreConfig(metrics=["spearmanr", "mse"])).scores == pytest.approx(
+        {"spearmanr": spearmanr(predictions, labels).statistic, "mse": 200 / 6}
+    )
+
+
 def test_task_scoring_reuses_controls_without_publishing(monkeypatch):
     from modules.evaluate.src.metrics import scoring
 
@@ -51,7 +212,9 @@ def test_task_scoring_reuses_controls_without_publishing(monkeypatch):
     predictions = [0, 0, 1, 1, 1, 0]
     output = PredictOutput(
         metadata=EvaluationMetadata(
-            model_name="toy", dataset_name="toy", task_type=task.name,
+            model_name="toy",
+            dataset_name="toy",
+            task_type=task.name,
         ),
         predictions=pl.DataFrame(
             {"id": list(range(len(labels))), "prediction": predictions, "label": labels}
@@ -1309,6 +1472,7 @@ class TestScoreStepLongDf:
                 "dataset_repo_id": None,
                 "dataset_config_name": None,
                 "dataset_revision": None,
+                "group_column": None,
                 "task_type": None,
                 "split": None,
                 "test_subset": None,
