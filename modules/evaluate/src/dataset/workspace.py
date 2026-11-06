@@ -309,25 +309,7 @@ class EvaluationWorkspace:
                 if not sibling.exists():
                     continue
                 previous = json.loads(sibling.read_text()).get("experiment", {})
-                previous_identity = previous.get(kind)
-                if kind == "config" and isinstance(previous_identity, dict):
-                    # The aggregate table filename does not affect the experiment.
-                    def without_score_filename(value: dict[str, Any]) -> dict[str, Any]:
-                        value = value.copy()
-                        multi_target = value.get("multi_target")
-                        if isinstance(multi_target, dict):
-                            value["multi_target"] = {
-                                key: item
-                                for key, item in multi_target.items()
-                                if key != "score_table_filename"
-                            }
-                        return value
-
-                    previous_identity = without_score_filename(previous_identity)
-                    current_identity = without_score_filename(identity)
-                else:
-                    current_identity = identity
-                if kind in previous and previous_identity != current_identity:
+                if kind in previous and previous[kind] != identity:
                     raise ValueError(
                         f"Experiment {kind} differs across seeds; choose a new run_id"
                     )

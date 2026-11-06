@@ -142,12 +142,6 @@ def test_multi_target_model_publishes_scores_and_manifest_and_resumes(
     assert manifest["evaluation"]["status"] == "complete"
     assert manifest["score"] == summary
 
-    manifest["experiment"]["config"]["multi_target"]["score_table_filename"] = (
-        "property_scores.parquet"
-    )
-    workspace.run_manifest_path.write_text(json.dumps(manifest))
-    (workspace.run_root / "property_scores.parquet").touch()
-    (workspace.run_root / "summary.json").touch()
     assert (
         runner.run_multi_target_evaluation(
             config, accelerator, multi_target=multi_target

@@ -782,43 +782,12 @@ def test_mmseqs_fallback_uses_training_prior_and_records_coverage(
         assert frame["prediction"][2] == data["train"]["targets"][2]
 
 
-def test_legacy_baseline_json_sidecars_are_consolidated(tmp_path, monkeypatch):
-    config, data = _config(tmp_path), _data()
-    path = run_baselines(config, dataset=data)["test"]["majority_class"]
-    directory = path.parent
-    manifest_path = directory / "run_manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    write_json = runner.write_json
-    write_json(
-        directory / "manifest.json",
-        {
-            "identity": manifest["identity"],
-            **manifest["artifact"],
-        },
-    )
-    write_json(
-        directory.parent / "fit_manifest.json",
-        {"baseline": "majority_class", "fit": manifest["identity"]["fit"]},
-    )
-    write_json(
-        directory / "scores.json",
-        {
-            "identity": manifest["identity"],
-            "config": manifest["score"]["config"],
-            "scores": manifest["score"]["scores"],
-        },
-    )
-    manifest_path.unlink()
-
-    builder = Mock(side_effect=AssertionError("legacy predictions should be reused"))
-    monkeypatch.setattr(runner, "build_sequence_baseline", builder)
-    run_baselines(config, dataset=data)
-    builder.assert_not_called()
-    consolidated = json.loads(manifest_path.read_text())
-    assert consolidated["status"] == "complete"
-    assert consolidated["score"]["scores"]
-    assert {file.name for file in directory.glob("*.json")} == {"run_manifest.json"}
-    assert not (directory.parent / "fit_manifest.json").exists()
+def test_scalar_baseline_requires_run_manifest(tmp_path):
+    config, data = _config(tmp_path, regression=True), _data(regression=True)
+    path = run_baselines(config, dataset=data)["test"]["train_mean"]
+    path.with_name("run_manifest.json").rename(path.with_name("manifest.json"))
+    with pytest.raises(FileNotFoundError, match="Missing shared baseline"):
+        load_baseline_artifact(_context(config, data), "train_mean")
 
 
 def test_mmseqs_protocol_change_preserves_other_baseline_paths(tmp_path):

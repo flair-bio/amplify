@@ -234,9 +234,6 @@ def _run_baselines_for_test(
             directory = artifact_directory(test_context, name)
             directory.mkdir(parents=True, exist_ok=True)
             with cache_lock(directory.parent / ".lock"):
-                _upgrade_legacy_baseline(
-                    directory, test_context, name, config, test_name
-                )
                 mmseqs_neighbors = None
                 if (
                     name == "mmseqs_knn"
@@ -383,9 +380,8 @@ def _publish_multi_target_summary(
         if not isinstance(target_identity, dict):
             raise TypeError(f"Invalid baseline identity: {manifest_path}")
         target_identities[target_name] = target_identity
-        value = _baseline_metric_value(
-            manifest.get("score", {}).get("scores"), multi_target.metric
-        )
+        scores = manifest.get("score", {}).get("scores")
+        value = scores.get(multi_target.metric) if isinstance(scores, dict) else None
         if (
             isinstance(value, bool)
             or not isinstance(value, (int, float))
@@ -480,16 +476,6 @@ def _publish_multi_target_summary(
     return table_path
 
 
-def _baseline_metric_value(scores: Any, metric: str) -> Any:
-    if isinstance(scores, dict):
-        return scores.get(metric)
-    if isinstance(scores, list):
-        for row in scores:
-            if isinstance(row, dict) and row.get("metric") == metric:
-                return row.get("value")
-    return None
-
-
 def _run_contact_baselines(
     config: BaselineRunConfig, dataset: DatasetDict | None
 ) -> dict[str, dict[str, Path]]:
@@ -570,7 +556,6 @@ def _run_contact_baselines(
                     },
                 },
             )
-            _remove_legacy_sidecars(directory)
             outputs["test"][name] = path
     return outputs
 
