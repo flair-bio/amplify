@@ -24,6 +24,14 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
     steps = config.steps
     task = get_task(config.workspace.task_type)
     steps.score.validate_task(config.workspace.task_type)
+    if (
+        steps.tune.hyperparameter_search.group_column is not None
+        and config.workspace.task_type != "sequence_regression"
+    ):
+        raise ValueError(
+            "tune.hyperparameter_search.group_column is supported for "
+            "sequence_regression only."
+        )
     task.validate_config(config)
     if task.fixed_protocol:
         return config

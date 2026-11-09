@@ -31,6 +31,15 @@ def _base_config_dict() -> dict:
     }
 
 
+def test_hpo_grouping_rejects_non_regression_tasks():
+    payload = _base_config_dict()
+    payload["steps"] = {
+        "tune": {"hyperparameter_search": {"group_column": "cluster_id"}}
+    }
+    with pytest.raises(ValueError, match="group_column.*sequence_regression"):
+        EvaluationConfig.model_validate(payload)
+
+
 class TestExternalTestSets:
     @staticmethod
     def _payload(**extra):

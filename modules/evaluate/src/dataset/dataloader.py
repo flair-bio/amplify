@@ -44,13 +44,15 @@ logger = logging.getLogger(__name__)
 def metric_groups_by_id(
     dataset: Dataset, group_column: str | None, id_column: str = "id"
 ) -> dict[str, Any]:
-    """Retain test metric groups before tokenization removes source metadata."""
+    """Retain metric groups by example ID before tokenization drops source metadata."""
     if group_column is None:
         return {}
     if group_column not in dataset.column_names:
         raise ValueError(
-            f"Test data must contain metric group column '{group_column}'."
+            f"Grouped-metric data must contain metric group column '{group_column}'."
         )
+    if id_column not in dataset.column_names:
+        raise ValueError(f"Grouped metrics require the source ID column '{id_column}'.")
     groups = {}
     for identifier, group in zip(
         dataset[id_column], dataset[group_column], strict=True
@@ -64,6 +66,16 @@ def metric_groups_by_id(
     return groups
 
 
+def metric_groups_for_ids(
+    ids: list[Any], groups_by_id: dict[str, Any], split_name: str
+) -> list[Any]:
+    """Resolve grouped metrics in the same order as inferred examples."""
+    keys = [json.dumps(identifier, allow_nan=False) for identifier in ids]
+    if len(set(keys)) != len(keys) or set(keys) != set(groups_by_id):
+        raise ValueError(f"Grouped predictions do not match prepared {split_name} IDs.")
+    return [groups_by_id[key] for key in keys]
+
+
 def attach_metric_groups(
     predictions: pl.DataFrame,
     groups_by_id: dict[str, Any],
@@ -72,11 +84,11 @@ def attach_metric_groups(
     """Attach source metric groups to predictions in their inference order."""
     if group_column is None:
         return predictions
-    keys = [json.dumps(identifier, allow_nan=False) for identifier in predictions["id"]]
-    if len(set(keys)) != len(keys) or set(keys) != set(groups_by_id):
-        raise ValueError("Grouped predictions do not match prepared test IDs.")
     return predictions.with_columns(
-        pl.Series(group_column, [groups_by_id[key] for key in keys])
+        pl.Series(
+            group_column,
+            metric_groups_for_ids(predictions["id"].to_list(), groups_by_id, "test"),
+        )
     )
 
 

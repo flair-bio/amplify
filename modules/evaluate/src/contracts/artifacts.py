@@ -113,6 +113,7 @@ class PreparedArtifacts:
 
     baseline_context: dict[str, Any] | None = None
     test_original_positions: dict[str, list[int]] = field(default_factory=dict)
+    validation_metric_groups: dict[str, Any] | None = None
     test_metric_groups: dict[str, Any] = field(default_factory=dict)
     test_group_column: str | None = None
     features: dict[str, PreparedFeatures] = field(default_factory=dict)

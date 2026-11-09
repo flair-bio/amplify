@@ -7,11 +7,12 @@ workspace:
   label_format: scalar
   num_labels: null
 
-# Validation uses pooled Spearman; test uses an equal-weight mean across clusters.
+# HPO and test scoring use an equal-weight mean across clusters.
 steps:
   tune:
     hyperparameter_search:
       metric: spearmanr
+      group_column: cluster_id
       direction: maximize
   score:
     group_column: cluster_id  # Set null for pooled test metrics.

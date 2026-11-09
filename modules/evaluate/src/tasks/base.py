@@ -595,6 +595,17 @@ class TaskHandler(ABC):
 class FlatMetricsTask(TaskHandler, abstract=True):
     """Tasks scored from aligned prediction and label rows."""
 
+    def compute_grouped_metrics(
+        self,
+        predictions: Sequence,
+        labels: Sequence,
+        group_ids: Sequence,
+        metric_names: Sequence[str],
+        average: str = "weighted",
+    ) -> dict[str, float]:
+        """Compute validation metrics over task-defined groups."""
+        raise ValueError(f"Grouped metrics are not supported for task '{self.name}'.")
+
     def prepare_scoring(
         self, predictions: PredictOutput, config: ScoreConfig
     ) -> tuple[FlatMetricsTask, PredictOutput]:

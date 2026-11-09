@@ -46,6 +46,7 @@ class ClassicalProbeTrainer:
         average: str = "weighted",
         num_labels: int | None = None,
         is_main_process: bool = True,
+        group_ids: list[Any] | None = None,
     ) -> tuple[BaseEstimator, dict[str, Any], float]:
         """Fit and validate candidates, returning the training-only winner.
 
@@ -114,15 +115,24 @@ class ClassicalProbeTrainer:
                 if hasattr(estimator, "predict_proba")
                 else None
             )
-            score = task.compute_metrics(
-                predictions.tolist(),
-                val_y.tolist(),
-                [metric_name],
-                average=average,
-                probabilities=(
-                    probabilities.tolist() if probabilities is not None else None
-                ),
-            )[metric_name]
+            if group_ids is None:
+                score = task.compute_metrics(
+                    predictions.tolist(),
+                    val_y.tolist(),
+                    [metric_name],
+                    average=average,
+                    probabilities=(
+                        probabilities.tolist() if probabilities is not None else None
+                    ),
+                )[metric_name]
+            else:
+                score = task.compute_grouped_metrics(
+                    predictions.tolist(),
+                    val_y.tolist(),
+                    group_ids,
+                    [metric_name],
+                    average=average,
+                )[metric_name]
             improved = (
                 score > best_score if direction == "maximize" else score < best_score
             )

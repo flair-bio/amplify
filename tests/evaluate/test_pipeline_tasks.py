@@ -9,6 +9,7 @@ from transformers import EsmForMaskedLM
 from modules.evaluate.src.contracts.config import EvaluationConfig
 from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.runners.pipeline import run_pipeline
+from modules.evaluate.src.tasks.sequence_regression import SequenceRegressionTask
 from modules.evaluate.src.utils.amino_acids import CANONICAL_AMINO_ACIDS
 from modules.pretrain.src.model.modeling_amplify import (
     AMPLIFYForMaskedLM,
@@ -38,7 +39,7 @@ from .conftest import build_raw_dataset_dict
     ],
 )
 def test_task_pipeline_roundtrip(
-    tmp_path, model_family, task, mode, head, cached, metric
+    tmp_path, monkeypatch, model_family, task, mode, head, cached, metric
 ):
     auto_map = register_amplify_auto_classes()
     kwargs = dict(model_family.config_kwargs)
@@ -68,10 +69,22 @@ def test_task_pipeline_roundtrip(
     else:
         dataset = build_raw_dataset_dict(task)
     group_column = "cluster_id" if metric == "spearmanr" else None
+    validation_group_column = "validation_family" if group_column is not None else None
+    validation_groups_seen = []
     if group_column is not None:
         dataset["test"] = dataset["test"].add_column(
             "id", ["original-0", "original-1", "original-2", "original-3"],
         ).add_column(group_column, [0, 0, 1, 1])
+        dataset["validation"] = dataset["validation"].add_column(
+            "id", ["val-0", "val-1", "val-2", "val-3"],
+        ).add_column(validation_group_column, [10, 10, 20, 20])
+        compute_grouped = SequenceRegressionTask.compute_grouped_metrics
+
+        def record_grouped(self, predictions, labels, group_ids, *args, **kwargs):
+            validation_groups_seen.append(group_ids)
+            return compute_grouped(self, predictions, labels, group_ids, *args, **kwargs)
+
+        monkeypatch.setattr(SequenceRegressionTask, "compute_grouped_metrics", record_grouped)
     label_format = {
         "token_classification": "per_token",
         "sequence_multilabel_classification": "multilabel",
@@ -115,7 +128,10 @@ def test_task_pipeline_roundtrip(
                 "tune": {
                     "head": {"head_type": head, "hidden_size": 8},
                     "max_epochs": 1,
-                    "hyperparameter_search": {"enabled": False},
+                    "hyperparameter_search": {
+                        "enabled": False,
+                        "group_column": validation_group_column,
+                    },
                 },
                 "predict": {"controls": ["random_trunk"]},
                 "score": {"metrics": [metric], "bootstrap_enabled": False,
@@ -136,6 +152,8 @@ def test_task_pipeline_roundtrip(
     if group_column is not None:
         assert prediction.predictions[group_column].to_list() == [0, 0, 1, 1]
         assert result.scores[None].config["group_column"] == group_column
+        assert validation_groups_seen
+        assert all(groups == [10, 10, 20, 20] for groups in validation_groups_seen)
     if task == "sequence_classification":
         assert set(result.scores[None].condition_scores) == {
             "trained",

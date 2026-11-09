@@ -16,6 +16,7 @@ from torch import nn
 
 from modules.evaluate.src.contracts.artifacts import PreparedArtifacts
 from modules.evaluate.src.contracts.config import EvaluationWorkspaceConfig
+from modules.evaluate.src.dataset.dataloader import metric_groups_for_ids
 from modules.evaluate.src.dataset.embeddings import find_embedding_dataset
 from modules.evaluate.src.model.inference import run_inference
 from modules.evaluate.src.tasks.registry import get_flat_task
@@ -76,9 +77,14 @@ class TorchProbeTrainer:
                 "(no 'validation' split in the dataset)."
             )
         task = get_flat_task(workspace.task_type, workspace.num_labels)
+        validation_groups = prepared.validation_metric_groups
         if cached_val is None:
             cached_val = self._cached_embedding_split(prepared.val_dataloader)
         if cached_val is not None:
+            embedding_dataset = find_embedding_dataset(prepared.val_dataloader)
+            if embedding_dataset is None:
+                raise ValueError("Cached validation features have no aligned IDs.")
+            validation_ids = embedding_dataset.ids
             predictions_tensors: list[torch.Tensor] = []
             probabilities_tensors: list[torch.Tensor] = []
             with torch.inference_mode():
@@ -107,7 +113,7 @@ class TorchProbeTrainer:
                 else None
             )
         else:
-            _, predictions, labels, probabilities, _ = run_inference(
+            validation_ids, predictions, labels, probabilities, _ = run_inference(
                 prepared.model,
                 prepared.val_dataloader,
                 workspace.task_type,
@@ -130,6 +136,17 @@ class TorchProbeTrainer:
             valid = np.asarray(metric_labels) != IGNORE_INDEX
             metric_predictions = np.asarray(metric_predictions)[valid]
             metric_labels = np.asarray(metric_labels)[valid]
+        if validation_groups is not None:
+            group_ids = metric_groups_for_ids(
+                validation_ids, validation_groups, "validation"
+            )
+            return task.compute_grouped_metrics(
+                metric_predictions,
+                metric_labels,
+                group_ids,
+                [metric_name],
+                average=self.config.metric_aggregation,
+            )[metric_name]
         return task.compute_metrics(
             predictions=metric_predictions,
             labels=metric_labels,

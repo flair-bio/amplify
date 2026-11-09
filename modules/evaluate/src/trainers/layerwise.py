@@ -13,6 +13,7 @@ from accelerate import Accelerator
 from torch import nn
 
 from modules.evaluate.src.contracts.artifacts import PreparedArtifacts
+from modules.evaluate.src.dataset.dataloader import metric_groups_for_ids
 from modules.evaluate.src.model.layerwise import (
     LayerwiseProbeModel,
     run_layerwise_conditions,
@@ -75,6 +76,7 @@ class LayerwiseProbeTrainer:
         val_loader: Any | None,
         accelerator: Accelerator,
         seed: int,
+        validation_metric_groups: dict[str, Any] | None = None,
     ) -> dict[int, dict[str, float]]:
         """Fit standardized heads and return per-layer validation selections."""
         inner = accelerator.unwrap_model(model)
@@ -94,6 +96,7 @@ class LayerwiseProbeTrainer:
             accelerator,
             metric,
             self.resolve_direction(metric),
+            validation_metric_groups,
         )
         for layer, (score, epoch) in results.items():
             logger.info(
@@ -150,6 +153,7 @@ class LayerwiseProbeTrainer:
                 token_loaders["validation"],
                 accelerator,
                 seed,
+                prepared.validation_metric_groups,
             )
         else:
             accelerator.unwrap_model(model).fit_standardization(
@@ -166,6 +170,7 @@ class LayerwiseProbeTrainer:
         accelerator: Accelerator,
         metric: str,
         direction: Literal["maximize", "minimize"],
+        validation_metric_groups: dict[str, Any] | None,
     ) -> dict[int, tuple[float, int]]:
         """Train with one shared optimizer while tracking stopped heads independently."""
         inner = accelerator.unwrap_model(model)
@@ -247,13 +252,27 @@ class LayerwiseProbeTrainer:
                 for layer, rows in results.items():
                     if stopped(layer):
                         continue
-                    score = task.compute_metrics(
-                        task.flatten_for_metrics(rows.predictions),
-                        task.flatten_for_metrics(rows.labels),
-                        [metric],
-                        average=self.config.metric_aggregation,
-                        probabilities=rows.probabilities,
-                    )[metric]
+                    metric_predictions = task.flatten_for_metrics(rows.predictions)
+                    metric_labels = task.flatten_for_metrics(rows.labels)
+                    if validation_metric_groups is not None:
+                        group_ids = metric_groups_for_ids(
+                            rows.ids, validation_metric_groups, "validation"
+                        )
+                        score = task.compute_grouped_metrics(
+                            metric_predictions,
+                            metric_labels,
+                            group_ids,
+                            [metric],
+                            average=self.config.metric_aggregation,
+                        )[metric]
+                    else:
+                        score = task.compute_metrics(
+                            metric_predictions,
+                            metric_labels,
+                            [metric],
+                            average=self.config.metric_aggregation,
+                            probabilities=rows.probabilities,
+                        )[metric]
                     previous = best[layer][0] if layer in best else None
                     if improves(score, previous, direction):
                         best[layer] = (score, epoch + 1)
