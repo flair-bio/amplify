@@ -98,6 +98,7 @@ steps:
       enabled: true # default cached-MLP protocol; alternatives override incompatible dimensions
       n_trials: 100
       metric: null # task overlays set the selection metric explicitly
+      group_column: null # optional validation groups for equal-weight regression selection; independent of score.group_column
       direction: null # task overlays set the optimization direction explicitly
       search_pattern: bohb # one of bohb (Optuna TPE + median pruning), random, grid
       search_space:

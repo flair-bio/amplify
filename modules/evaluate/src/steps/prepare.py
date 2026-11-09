@@ -122,6 +122,7 @@ class PrepareStep:
         baseline_names: list[BaselineName] | None = None,
         head_type: str | None = None,
         group_column: str | None = None,
+        validation_group_column: str | None = None,
     ) -> PreparedArtifacts:
         """Load task data and models, optionally replacing tokens with features.
 
@@ -226,6 +227,13 @@ class PrepareStep:
         logger.info("Tokenizing dataset...")
         test_metric_groups = metric_groups_by_id(
             dataset["test"], group_column, self.config.id_column
+        )
+        validation_metric_groups = (
+            metric_groups_by_id(
+                dataset["validation"], validation_group_column, self.config.id_column
+            )
+            if validation_group_column is not None and "validation" in dataset
+            else None
         )
         with accelerator.main_process_first():
             dataset = tokenize_dataset(
@@ -402,6 +410,7 @@ class PrepareStep:
             },
             split=self.config.split.name,
             baseline_context=shared_context,
+            validation_metric_groups=validation_metric_groups,
             test_metric_groups=test_metric_groups,
             test_group_column=group_column,
             test_original_positions=(

@@ -61,6 +61,46 @@ def test_metric_groups_follow_original_prediction_ids():
         attach_metric_groups(predictions.head(1), clusters, "cluster_id")
 
 
+@pytest.mark.parametrize(
+    "validation_group_column,group_column",
+    [("validation_family", None), (None, "cluster_id")],
+)
+def test_prepare_retains_independent_metric_groups(
+    monkeypatch, tmp_path, model_family, validation_group_column, group_column
+):
+    raw = build_raw_dataset_dict("sequence_regression")
+    for split, column in (
+        ("validation", validation_group_column), ("test", group_column)
+    ):
+        if column is not None:
+            raw[split] = raw[split].add_column(
+                "id", [f"{split}-{index}" for index in range(len(raw[split]))]
+            ).add_column(column, [10, 10, 20, 20])
+
+    prepared = _run_prepare(
+        monkeypatch,
+        tmp_path,
+        "sequence_regression",
+        model_family,
+        dataset=raw,
+        group_column=group_column,
+        validation_group_column=validation_group_column,
+    )
+
+    if validation_group_column is None:
+        assert prepared.validation_metric_groups is None
+    else:
+        assert prepared.validation_metric_groups == {
+            f'"validation-{index}"': group
+            for index, group in enumerate([10, 10, 20, 20])
+        }
+    assert prepared.test_group_column == group_column
+    assert prepared.test_metric_groups == (
+        {f'"test-{index}"': group for index, group in enumerate([10, 10, 20, 20])}
+        if group_column is not None else {}
+    )
+
+
 def _make_workspace(tmp_path, task_type, num_labels=2):
     target_type = "continuous" if task_type == "sequence_regression" else "categorical"
     label_format = (
@@ -97,6 +137,8 @@ def _run_prepare(
     external_dataset=None,
     dataset=None,
     baseline_names=None,
+    group_column=None,
+    validation_group_column=None,
     **config_kwargs,
 ):
     AcceleratorState._reset_state(reset_partial_state=True)
@@ -153,6 +195,8 @@ def _run_prepare(
         layerwise_config=layerwise_config,
         dataset=dataset,
         baseline_names=baseline_names,
+        group_column=group_column,
+        validation_group_column=validation_group_column,
     )
     if external is None:
         return prepared

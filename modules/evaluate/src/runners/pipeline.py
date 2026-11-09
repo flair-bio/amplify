@@ -165,6 +165,7 @@ def _execute_steps(
         dataset=dataset,
         head_type=config.steps.tune.head.head_type,
         group_column=config.steps.score.group_column,
+        validation_group_column=config.steps.tune.hyperparameter_search.group_column,
     )
 
     mode = config.steps.mode

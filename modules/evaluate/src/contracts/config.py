@@ -75,6 +75,14 @@ TestSubsets = dict[
 ]
 
 
+def validate_metric_group_column(value: str | None) -> str | None:
+    if value is not None and (
+        not value.strip() or value in {"id", "prediction", "label", "probability"}
+    ):
+        raise ValueError("group_column must name a non-reserved source column.")
+    return value
+
+
 def validate_test_subsets(value: TestSubsets | None) -> TestSubsets:
     if value is None:
         return {}
@@ -561,10 +569,24 @@ class HyperparameterSearchConfig(BaseModel):
     n_trials: int = 5
     direction: Literal["maximize", "minimize"] | None = None
     metric: str | None = None
+    group_column: str | None = Field(
+        None,
+        min_length=1,
+        description=(
+            "Validation source column for equal-weight grouped regression metrics "
+            "during HPO, early stopping, and model selection; null keeps pooled "
+            "validation metrics, independently of score.group_column."
+        ),
+    )
     search_pattern: Literal["bohb", "random", "grid"] = "bohb"
     search_space: HyperparameterSearchSpaceConfig = Field(
         default_factory=HyperparameterSearchSpaceConfig
     )
+
+    @field_validator("group_column")
+    @classmethod
+    def _validate_group_column(cls, value: str | None) -> str | None:
+        return validate_metric_group_column(value)
 
 
 class TuneConfig(BaseModel):
@@ -818,11 +840,7 @@ class ScoreConfig(BaseModel):
     @field_validator("group_column")
     @classmethod
     def _validate_group_column(cls, value: str | None) -> str | None:
-        if value is not None and (
-            not value.strip() or value in {"id", "prediction", "label", "probability"}
-        ):
-            raise ValueError("group_column must name a non-reserved source column.")
-        return value
+        return validate_metric_group_column(value)
 
     def validate_task(self, task_type: str) -> None:
         if self.group_column is not None and task_type != "sequence_regression":

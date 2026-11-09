@@ -100,6 +100,37 @@ class SequenceRegressionTask(FlatMetricsTask):
             predictions, predictions=grouped(frame), controls=controls
         )
 
+    def compute_grouped_metrics(
+        self,
+        predictions: Sequence,
+        labels: Sequence,
+        group_ids: Sequence,
+        metric_names: Sequence[str],
+        average: str = "weighted",
+    ) -> dict[str, float]:
+        if len(predictions) != len(labels) or len(predictions) != len(group_ids):
+            raise ValueError(
+                "Grouped regression predictions, labels, and group IDs must align."
+            )
+        if len(predictions) == 0:
+            raise ValueError("Cannot compute grouped metrics from empty predictions.")
+        frame = pl.DataFrame(
+            {
+                "group": group_ids,
+                "prediction": predictions,
+                "label": labels,
+            }
+        )
+        grouped = frame.group_by("group", maintain_order=True).agg(
+            "prediction", "label"
+        )
+        return _ClusteredRegressionScoring().compute_metrics(
+            grouped["prediction"].to_list(),
+            grouped["label"].to_list(),
+            metric_names,
+            average,
+        )
+
     def collate_labels(
         self, labels: list[Any], batch_size: int, seq_len: int
     ) -> torch.Tensor:

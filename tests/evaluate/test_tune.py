@@ -162,6 +162,69 @@ def test_validation_fmax_collects_sigmoid_probabilities(monkeypatch, tmp_path, c
     assert score == pytest.approx(1.0)
 
 
+def test_validation_hpo_uses_grouped_regression_metric(monkeypatch, tmp_path):
+    ids = ["a1", "a2", "b1", "b2"]
+    predictions = [0.0, 1.0, 2.0, 3.0]
+    labels = [0.0, 1.0, 3.0, 2.0]
+    loader = [{"input_ids": torch.tensor([0]), "labels": 0.0}]
+    prepared = PreparedArtifacts(
+        model=nn.Linear(1, 1),
+        tokenizer=None,
+        train_dataloader=None,
+        val_dataloader=loader,
+        test_dataloader=None,
+        validation_metric_groups={
+            json.dumps(identifier): group
+            for identifier, group in zip(ids, ["a", "a", "b", "b"], strict=True)
+        },
+    )
+    monkeypatch.setattr(
+        "modules.evaluate.src.trainers.torch.run_inference",
+        lambda *args, **kwargs: (ids, predictions, labels, None, None),
+    )
+
+    step = PredictorSelection(TuneConfig(metric_aggregation="macro"))
+    score = step._torch_trainer.evaluate_validation(
+        _make_workspace(tmp_path, "sequence_regression"),
+        prepared,
+        Accelerator(cpu=True),
+        "spearmanr",
+    )
+
+    assert score == pytest.approx(0.0)
+
+
+def test_classical_hpo_uses_grouped_regression_metric(monkeypatch):
+    from modules.evaluate.src.trainers.classical import ClassicalProbeTrainer
+
+    class Estimator:
+        def fit(self, features, labels):
+            return self
+
+        def predict(self, features):
+            return features[:, 0]
+
+    monkeypatch.setattr(
+        "modules.evaluate.src.trainers.classical.heads.build_estimator",
+        lambda *args, **kwargs: Estimator(),
+    )
+    _, _, score = ClassicalProbeTrainer.fit_candidates(
+        head_type="sklearn_linear",
+        task_type="sequence_regression",
+        train_X=np.zeros((2, 1)),
+        train_y=np.zeros(2),
+        val_X=np.array([[0.0], [1.0], [2.0], [3.0]]),
+        val_y=np.array([0.0, 1.0, 3.0, 2.0]),
+        search_space={},
+        default_hyperparameters={},
+        metric_name="spearmanr",
+        direction="maximize",
+        group_ids=["a", "a", "b", "b"],
+    )
+
+    assert score == pytest.approx(0.0)
+
+
 def test_classical_selection_uses_fixed_class_macro_f1(monkeypatch):
     from modules.evaluate.src.model.heads import sweep_classical_head
 

@@ -256,6 +256,11 @@ clump into insoluble aggregates?
 **Question:** how well does this small designed protein resist being cut up
 by proteases?
 
+- **Selection:** `steps.tune.hyperparameter_search.group_column: cluster_id`
+  selects models using validation Spearman averaged equally across clusters.
+  This applies to HPO, early stopping, and classical-head selection.
+  Set it to `null` for pooled validation metrics, independently of test scoring.
+  The validation data must contain the configured group column and unique IDs.
 - **Scoring:** `steps.score.group_column: cluster_id` opts into test grouping;
   set it to `null` for pooled test metrics, with or without cluster annotations.
   Every test metric is computed within each supplied `cluster_id`
@@ -263,9 +268,8 @@ by proteases?
   excludes singleton clusters and constant predictions or targets; MSE includes
   those clusters. If no cluster is valid for a metric, its score is NaN.
   Bootstrap and paired comparisons
-  use whole clusters. Validation tuning remains pooled Spearman because only
-  test has cluster annotations. Rerun preparation and prediction for older
-  artifacts without `cluster_id`.
+  use whole clusters. Rerun preparation and prediction for older artifacts
+  without `cluster_id`.
 - **Readout:** one stability score per sequence; higher means more resistant
   than an unfolded chain would be. Data from Rocklin et al.: de novo designed
   mini-proteins (about 40 residues) and their mutants, as packaged by TAPE.

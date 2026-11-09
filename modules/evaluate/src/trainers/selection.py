@@ -27,6 +27,7 @@ from modules.evaluate.src.contracts.config import (
     EvaluationWorkspaceConfig,
     TuneConfig,
 )
+from modules.evaluate.src.dataset.dataloader import metric_groups_for_ids
 from modules.evaluate.src.dataset.embeddings import (
     EmbeddingDataset,
     find_embedding_dataset,
@@ -390,6 +391,7 @@ class PredictorSelection:
             prepared.val_dataloader,
             accelerator,
             seed,
+            prepared.validation_metric_groups,
         )
         self.layer_selections = selections
         return prepared
@@ -485,8 +487,20 @@ class PredictorSelection:
             or search_config.enabled
         )
         val_X = val_y = None
+        val_group_ids = None
         if prepared.val_dataloader is not None:
             val_X, val_y = self._gather_embeddings(prepared.val_dataloader, accelerator)
+            if prepared.validation_metric_groups is not None:
+                validation_dataset = find_embedding_dataset(prepared.val_dataloader)
+                if validation_dataset is None:
+                    raise ValueError(
+                        "Grouped classical HPO requires cached validation IDs."
+                    )
+                val_group_ids = metric_groups_for_ids(
+                    validation_dataset.ids,
+                    prepared.validation_metric_groups,
+                    "validation",
+                )
         elif search_requested:
             raise ValueError(
                 "Classical probe hyperparameter search requires a validation "
@@ -522,6 +536,7 @@ class PredictorSelection:
                     average=self.config.metric_aggregation,
                     num_labels=workspace.num_labels,
                     is_main_process=accelerator.is_main_process,
+                    group_ids=val_group_ids,
                 )
             )
             logger.info(
@@ -565,6 +580,7 @@ class PredictorSelection:
                     average=self.config.metric_aggregation,
                     num_labels=workspace.num_labels,
                     is_main_process=accelerator.is_main_process,
+                    group_ids=val_group_ids,
                 )[2]
                 for extra_seed in self.config.variance_seeds
             ]
