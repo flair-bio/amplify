@@ -12,7 +12,7 @@ import torch
 from torch import nn
 from transformers import AutoConfig, AutoModel, PreTrainedTokenizerBase
 
-from modules.evaluate.src.model.adapters import contact_positions
+from modules.evaluate.src.model.adapters import contact_position_ids, contact_positions
 
 if TYPE_CHECKING:
     from modules.evaluate.src.dataset.contact import ContactChain
@@ -54,7 +54,11 @@ class ContactPredictionModel(nn.Module):
             "input_ids": torch.tensor([tokens.input_ids], device=device),
             "attention_mask": torch.tensor([tokens.attention_mask], device=device),
         }
-        positions = torch.tensor([tokens.position_ids], device=device)
+        positions = contact_position_ids(
+            self.trunk,
+            torch.tensor([tokens.position_ids], device=device),
+            record_id=chain.record_id,
+        )
         if "position_ids" in inspect.signature(self.trunk.forward).parameters:
             inputs["position_ids"] = positions
         self.trunk.eval()
@@ -134,14 +138,22 @@ def build_contact_model(
     return ContactPredictionModel(load_contact_trunk(model_id))
 
 
-def load_contact_trunk(model_id: str) -> Any:
+def load_contact_config(model_id: str) -> Any:
     config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    if config.model_type == "esmc":
+        # The esm wrapper lacks position_ids and the HF attention-hook API.
+        config = AutoConfig.from_pretrained(model_id, trust_remote_code=False)
+    return config
+
+
+def load_contact_trunk(model_id: str) -> Any:
+    config = load_contact_config(model_id)
     # Masked-LM ESM checkpoints have no pooler; it is unused for residue features.
     kwargs: dict[str, Any] = (
         {"add_pooling_layer": False} if config.model_type == "esm" else {}
     )
     return AutoModel.from_pretrained(
-        model_id, config=config, trust_remote_code=True, **kwargs
+        model_id, config=config, trust_remote_code=config.model_type != "esmc", **kwargs
     )
 
 

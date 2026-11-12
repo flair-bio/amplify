@@ -82,6 +82,12 @@ evaluate = [
     "xgboost",
 ]
 
+esmc = [
+    "flair-plm[evaluate]",
+    "esm>=3.4.3",
+    "transformers>=5.16.0",
+]
+
 # Heavy GPU Compute Tools (Hardware specific)
 compute = [
     "flash-attn-4[cu13]>=4.0.0b31; sys_platform == 'linux'",

@@ -11,7 +11,12 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import AutoModelForMaskedLM, PreTrainedTokenizerBase
 
-from modules.evaluate.src.model.adapters import contact_positions, masked_lm_logits
+from modules.evaluate.src.model.adapters import (
+    contact_position_ids,
+    contact_positions,
+    masked_lm_logits,
+)
+from modules.evaluate.src.model.contact_model import load_contact_config
 from modules.evaluate.src.utils.amino_acids import resolve_aa_token_ids
 
 if TYPE_CHECKING:
@@ -102,8 +107,10 @@ class ContactJacobianModel(nn.Module):
         tokens = tokenize_contact_chain(chain, tokenizer)
         device = next(self.trunk.parameters()).device
         input_ids = torch.tensor([tokens.input_ids], dtype=torch.long, device=device)
-        position_ids = torch.tensor(
-            [tokens.position_ids], dtype=torch.long, device=device
+        position_ids = contact_position_ids(
+            self.trunk,
+            torch.tensor([tokens.position_ids], dtype=torch.long, device=device),
+            record_id=chain.record_id,
         )
         residue_ids = torch.tensor(
             tokens.residue_token_indices, dtype=torch.long, device=device
@@ -202,5 +209,8 @@ def build_contact_jacobian_model(
     *,
     mutant_batch_size: int = MUTANT_BATCH_SIZE,
 ) -> ContactJacobianModel:
-    trunk = AutoModelForMaskedLM.from_pretrained(model_id, trust_remote_code=True)
+    config = load_contact_config(model_id)
+    trunk = AutoModelForMaskedLM.from_pretrained(
+        model_id, config=config, trust_remote_code=config.model_type != "esmc"
+    )
     return ContactJacobianModel(trunk, tokenizer, mutant_batch_size=mutant_batch_size)

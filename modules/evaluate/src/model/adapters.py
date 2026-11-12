@@ -11,6 +11,33 @@ import torch
 from torch import nn
 
 
+def absolute_position_limit(config: Any) -> int | None:
+    """ESM-1b reserves the padding row and starts real positions above it."""
+    if (
+        getattr(config, "model_type", None) == "esm"
+        and getattr(config, "position_embedding_type", None) == "absolute"
+    ):
+        return int(config.max_position_embeddings) - int(config.pad_token_id) - 1
+    return None
+
+
+def contact_position_ids(
+    model: Any, positions: torch.Tensor, *, record_id: str
+) -> torch.Tensor:
+    """Translate original zero-based coordinates to the backbone convention."""
+    limit = absolute_position_limit(getattr(model, "config", None))
+    if limit is None:
+        return positions
+    if int(positions.max()) >= limit:
+        raise ValueError(
+            f"{record_id}: full-chain contact input needs "
+            f"{int(positions.max()) + 1} original-coordinate token positions, "
+            f"but this absolute-position ESM backbone supports {limit}. "
+            "Full-chain contact prediction cannot truncate or window the chain."
+        )
+    return positions + int(model.config.pad_token_id) + 1
+
+
 def masked_lm_logits(model: nn.Module, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
     """Autocast a supported encoder, then run its public MLM head in FP32."""
     device = inputs["input_ids"].device

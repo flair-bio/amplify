@@ -16,7 +16,7 @@ from sklearn.linear_model import LogisticRegression
 from torch import nn
 from transformers import PreTrainedTokenizerBase
 
-from modules.evaluate.src.model.adapters import contact_positions
+from modules.evaluate.src.model.adapters import contact_position_ids, contact_positions
 from modules.evaluate.src.model.contact_model import load_contact_trunk
 
 if TYPE_CHECKING:
@@ -97,7 +97,11 @@ def _extract_attention_features(
         "attention_mask": torch.tensor([tokens.attention_mask], device=device),
         "output_attentions": True,
     }
-    positions = torch.tensor([tokens.position_ids], device=device)
+    positions = contact_position_ids(
+        trunk,
+        torch.tensor([tokens.position_ids], device=device),
+        record_id=chain.record_id,
+    )
     if "position_ids" in inspect.signature(trunk.forward).parameters:
         inputs["position_ids"] = positions
 
