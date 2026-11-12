@@ -75,6 +75,26 @@ Install from the `flair-plm` root, and run all commands below from there:
 uv sync --extra evaluate
 ```
 
+For ESMC checkpoints loaded with `trust_remote_code=True`, use the optional
+`esmc` extra (which includes `evaluate`) in a separate environment:
+
+```bash
+UV_PROJECT_ENVIRONMENT=/path/to/venvs/esmc uv sync --extra esmc
+```
+
+Invoke that environment's `bin/python` or `bin/accelerate` for ESMC runs.
+It installs the compatible `esm` and Transformers versions without changing
+the default `.venv`.
+
+ESMC contact predictors use the native Transformers backbone so attention hooks
+and original, potentially gapped position IDs are supported. Other ESMC tasks
+retain the checkpoint's `esm` remote loader.
+
+Ordinary ESM-1b tasks cap inputs at 1024 tokens, including special tokens;
+smaller configured limits are preserved. Full-chain contact prediction rejects
+chains whose original coordinates exceed the learned position table rather
+than silently truncating, windowing, or extrapolating them.
+
 The smoke tests add [`configs/smoke_test.yaml`](configs/smoke_test.yaml) to a
 model, task, and dataset overlay. It shrinks batch size, sequence length, and
 bootstrap resamples, and sets `steps.mode=evaluate_as_is`, so Tune is skipped

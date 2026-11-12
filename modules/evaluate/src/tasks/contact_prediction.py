@@ -25,6 +25,7 @@ from modules.evaluate.src.contracts.artifacts import (
 )
 from modules.evaluate.src.dataset.embedding_cache import weights_fingerprint
 from modules.evaluate.src.metrics import contact_metrics
+from modules.evaluate.src.model.adapters import contact_position_ids
 from modules.evaluate.src.model.contact_attention import (
     ATTENTION_PROTOCOL,
     ContactAttentionModel,
@@ -216,7 +217,16 @@ class ContactPredictionTask(StructuredTask):
             model_id,
             predictor=predictor,
             tokenizer=tokenizer,
-        ).to(device)
+        )
+        for chains in contacts.splits.values():
+            for chain in chains:
+                tokens = tokenize_contact_chain(chain, tokenizer)
+                contact_position_ids(
+                    model.trunk,
+                    torch.tensor([tokens.position_ids]),
+                    record_id=chain.record_id,
+                )
+        model = model.to(device)
         return PreparedArtifacts(
             model=model,
             tokenizer=tokenizer,

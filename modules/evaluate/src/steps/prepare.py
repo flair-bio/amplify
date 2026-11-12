@@ -2,9 +2,8 @@
 Run the evaluation preparation workflow.
 
 The step is ordered to minimize work and keep the decisions explicit:
-validate the workspace, load the tokenizer, load and tokenize the dataset once,
-derive the task-specific label count, build the collator/DataLoaders, and only
-then instantiate the model wrapper that matches the task type.
+validate the workspace, load the tokenizer and task model to resolve input
+limits, then load and tokenize the dataset once and build the DataLoaders.
 """
 
 from __future__ import annotations
@@ -66,6 +65,7 @@ from modules.evaluate.src.dataset.embeddings import (
     build_embedding_dataloaders,
 )
 from modules.evaluate.src.dataset.workspace import EvaluationWorkspace, TaskType
+from modules.evaluate.src.model.adapters import absolute_position_limit
 from modules.evaluate.src.model.embeddings import validate_embedding_cache_compat
 from modules.evaluate.src.model.heads import EmbeddingProbeHead
 from modules.evaluate.src.model.layerwise import LayerwiseProbeModel, resolve_layers
@@ -111,6 +111,19 @@ def _token_positions_by_id(
 class PrepareStep:
     def __init__(self, config: PrepareConfig) -> None:
         self.config = config
+
+    def _limit_model_length(self, model: Any) -> None:
+        if isinstance(model, LayerwiseProbeModel):
+            model = model.trunk
+        limit = absolute_position_limit(getattr(model, "config", None))
+        if limit is not None and self.config.max_length > limit:
+            logger.warning(
+                "Capping max_length from %d to %d tokens (including special "
+                "tokens) for the absolute-position ESM backbone.",
+                self.config.max_length,
+                limit,
+            )
+            self.config = self.config.model_copy(update={"max_length": limit})
 
     def run(
         self,
@@ -181,6 +194,15 @@ class PrepareStep:
         logger.info("Loading tokenizer for '%s'...", model_id)
         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
 
+        num_labels = task.resolve_num_labels(
+            workspace.num_labels, workspace.dataset_name
+        )
+        logger.info(
+            "Loading model '%s' for task '%s'...", model_id, workspace.task_type
+        )
+        model = task.build_model(model_id, num_labels, workspace.model_kwargs)
+        self._limit_model_length(model)
+
         # Load the evaluation dataset from HF hub or local cache
         logger.info("Resolving dataset '%s'...", dataset_id)
         dataset = resolve_evaluation_data(
@@ -212,9 +234,6 @@ class PrepareStep:
             ),
         )
 
-        num_labels = task.resolve_num_labels(
-            workspace.num_labels, workspace.dataset_name
-        )
         # Config-level validation can't see real label values, only the
         # declared contract; check the resolved num_labels against the
         # dataset's actual (pre-tokenization) label values here, before a
@@ -285,12 +304,6 @@ class PrepareStep:
                 )
             refit_token_dataloaders[split] = accelerator.prepare(refit_loader)
 
-        logger.info(
-            "Loading model '%s' for task '%s'...", model_id, workspace.task_type
-        )
-
-        # Get the task-specific model type (e.g. XXXforSequenceClassification) and build the model
-        model = task.build_model(model_id, num_labels, workspace.model_kwargs)
         if self.config.packed:
             parameters = inspect.signature(model.forward).parameters
             required = {"cu_seqlens", "max_seqlen"}
@@ -486,6 +499,11 @@ class PrepareStep:
         runs embed the external set once with the frozen trunk and the same
         pooling/layer settings, under a cache key naming the external dataset.
         """
+        self._limit_model_length(
+            prepared.embedding.backend.trunk
+            if prepared.embedding is not None
+            else prepared.model
+        )
         logger.info(
             "Preparing external test set '%s' (%s:%s)...",
             external.name,

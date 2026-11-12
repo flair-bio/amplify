@@ -351,6 +351,110 @@ def test_positional_adapter_restores_tables_after_exception(model_family):
                 assert getattr(module, name) is value
 
 
+def test_absolute_esm_contact_positions_match_native_forward(esm2_tokenizer):
+    config = small_trunk().config
+    config.position_embedding_type = "absolute"
+    config.max_position_embeddings = 18
+    model = ContactPredictionModel(EsmModel(config)).eval()
+    chain = prepare_contact_dataset(
+        hf_data([row(sequence="ACDEFGH")])
+    ).splits["test"][0]
+    tokens = esm2_tokenizer(chain.alignment.clean_sequence, return_tensors="pt")
+    with torch.no_grad():
+        expected = model.trunk(**tokens).last_hidden_state[0, 1:-1]
+    torch.testing.assert_close(model.extract(chain, esm2_tokenizer), expected)
+
+
+@pytest.mark.parametrize("predictor", ["bilinear512", "attention_l1", "categorical_jacobian"])
+def test_native_esmc_contact_loader_supports_original_positions(
+    tmp_path, esm2_tokenizer, predictor
+):
+    pytest.importorskip("transformers.models.esmc")
+    from transformers import EsmcConfig, EsmcForMaskedLM
+    from modules.evaluate.src.model.contact_model import build_contact_model
+
+    config = EsmcConfig(
+        hidden_size=64, num_hidden_layers=1, num_attention_heads=4,
+        num_key_value_heads=4, head_dim=16, intermediate_size=128,
+        vocab_size=64, max_position_embeddings=8,
+    )
+    config.auto_map = {
+        "AutoModel": "unused.RemoteModel",
+        "AutoModelForMaskedLM": "unused.RemoteMaskedLM",
+    }
+    EsmcForMaskedLM(config).save_pretrained(tmp_path)
+    model = build_contact_model(str(tmp_path), predictor, tokenizer=esm2_tokenizer)
+    chain = prepare_contact_dataset(
+        hf_data([row(sequence="ACXXDEFGHIK")])
+    ).splits["test"][0]
+    if predictor == "attention_l1":
+        features = model.extract(
+            chain, esm2_tokenizer, (np.array([0]), np.array([6]))
+        )
+        assert features.shape == (4, 1)
+    else:
+        features = model.predict(chain, esm2_tokenizer)
+        assert features.shape == (9, 9)
+    assert torch.isfinite(features).all()
+
+
+def test_absolute_esm_contact_preflight_rejects_long_test_chain(
+    monkeypatch, tmp_path, esm2_tokenizer
+):
+    from modules.evaluate.src.tasks import contact_prediction
+
+    config = small_trunk().config
+    config.position_embedding_type = "absolute"
+    config.max_position_embeddings = 18
+    model = ContactPredictionModel(EsmModel(config))
+    monkeypatch.setattr(contact_prediction, "build_contact_model", lambda *a, **k: model)
+    monkeypatch.setattr(
+        contact_prediction.AutoTokenizer, "from_pretrained",
+        lambda *a, **k: esm2_tokenizer,
+    )
+    dataset = DatasetDict({
+        split: Dataset.from_list(
+            [row(split, split, sequence="A" * (15 if split == "test" else 7))],
+            features=FEATURES,
+        )
+        for split in ("train", "validation", "test")
+    })
+    evaluation = config_for(tmp_path, tmp_path / "model")
+    with pytest.raises(ValueError, match="test: full-chain contact input"):
+        get_task("contact_prediction").prepare_inputs(
+            inputs=evaluation.workspace, config=evaluation.steps.prepare,
+            device=torch.device("cpu"), dataset=dataset, predictor="bilinear512",
+        )
+
+
+@pytest.mark.parametrize("sequence", ["A" * 15, "A" * 7 + "X" * 8])
+@pytest.mark.parametrize("predictor", ["bilinear512", "attention_l1", "categorical_jacobian"])
+def test_absolute_esm_rejects_long_original_contact_coordinates(
+    esm2_tokenizer, sequence, predictor
+):
+    from transformers import EsmForMaskedLM
+    from modules.evaluate.src.model.contact_attention import ContactAttentionModel
+    from modules.evaluate.src.model.contact_jacobian import ContactJacobianModel
+
+    config = small_trunk().config
+    config.position_embedding_type = "absolute"
+    config.max_position_embeddings = 18
+    if predictor == "categorical_jacobian":
+        model = ContactJacobianModel(EsmForMaskedLM(config), esm2_tokenizer)
+    elif predictor == "attention_l1":
+        from sklearn.linear_model import LogisticRegression
+        model = ContactAttentionModel(EsmModel(config))
+        model.classifier = LogisticRegression()
+        model.classifier.coef_ = np.zeros((1, config.num_hidden_layers * config.num_attention_heads))
+    else:
+        model = ContactPredictionModel(EsmModel(config))
+    chain = prepare_contact_dataset(
+        hf_data([row(sequence=sequence, positive_pairs=[])])
+    ).splits["test"][0]
+    with pytest.raises(ValueError, match="full-chain contact input.*supports 16"):
+        model.predict(chain, esm2_tokenizer)
+
+
 @pytest.mark.parametrize("initialized", [False, True])
 def test_legacy_amplify_rotary_growth_and_restoration(initialized):
     trunk = AMPLIFYModel(

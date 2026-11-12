@@ -178,7 +178,7 @@ def _run_prepare(
         dataloader_num_workers=0,
         dataloader_persistent_workers=False,
         dataloader_pin_memory=False,
-        max_length=64,
+        max_length=config_kwargs.pop("max_length", 64),
         # Keep truncation deterministic across splits/families for simpler
         # assertions.
         random_truncate_by_split={
@@ -221,6 +221,51 @@ def _run_prepare(
         seed=0,
         layerwise_config=layerwise_config,
     )
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("max_length,expected_length", [(64, 32), (16, 16)])
+@pytest.mark.parametrize("task_type", ["sequence_classification", "token_classification"])
+def test_absolute_esm_caps_inputs_before_extraction(
+    monkeypatch, tmp_path, model_family, cached, max_length, expected_length, task_type
+):
+    if model_family.name != "esm2-35m":
+        pytest.skip("ESM absolute-position limit")
+    family = model_family._replace(config_kwargs={
+        **model_family.config_kwargs,
+        "position_embedding_type": "absolute",
+        "max_position_embeddings": 34,
+    })
+    targets = [[0] * 80] if task_type == "token_classification" else [0]
+    dataset = DatasetDict({
+        split: Dataset.from_dict({
+            "id": [split], "sequence": ["A" * 80], "targets": targets,
+        })
+        for split in ("train", "validation", "test")
+    })
+    prepared = _run_prepare(
+        monkeypatch, tmp_path, task_type, family,
+        dataset=dataset, max_length=max_length, tokenize_num_proc=1,
+        embedding_cache={"enabled": cached, "cache_policy": "off"},
+    )
+    loader = (
+        prepared.embedding.backend.token_test_dataloader
+        if cached else prepared.test_dataloader
+    )
+    row = loader.dataset[0]
+    assert len(row["input_ids"]) == expected_length
+    if task_type == "token_classification":
+        assert row["targets"] == [-100] + [0] * (expected_length - 2) + [-100]
+        assert row["original_positions"] == [-1] + list(range(expected_length - 2)) + [-1]
+    if cached:
+        assert prepared.embedding.backend.max_length == expected_length
+    else:
+        batch = next(iter(loader))
+        with torch.no_grad():
+            output = prepared.model(
+                input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]
+            )
+        assert torch.isfinite(output.logits).all()
 
 
 @pytest.mark.parametrize("cached", [False, True])
