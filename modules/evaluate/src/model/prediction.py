@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 from time import monotonic
 from typing import Any, cast
 
@@ -16,7 +15,6 @@ from sklearn.base import BaseEstimator
 from modules.evaluate.src.artifacts.results import EvaluationMetadata, PredictOutput
 from modules.evaluate.src.artifacts.workspace import (
     EvaluationWorkspace,
-    get_evaluation_workspace,
 )
 from modules.evaluate.src.config.evaluation import PredictConfig
 from modules.evaluate.src.config.shared import (
@@ -95,7 +93,7 @@ def predict_layerwise(
     for layer, (ids, predictions, labels, probabilities, sequences) in conditions[
         "trained"
     ].items():
-        layer_workspace = get_evaluation_workspace(
+        layer_workspace = EvaluationWorkspace(
             workspace.config,
             variant=f"{workspace.variant}-layer_{layer}",
             seed=workspace.seed,
@@ -327,7 +325,6 @@ def predict_test_set(
             predictions_df.height,
         )
     controls: dict[str, pl.DataFrame] = {}
-    control_paths: dict[str, Path] = {}
     train_labels = None
     for control in config.conditions:
         if control in NO_INFERENCE_CONTROLS:
@@ -343,9 +340,8 @@ def predict_test_set(
                 predictions_df,
                 train_labels,
             )
-            control_path = None
         else:
-            control_df, control_path = predict_control(
+            control_df = predict_control(
                 config,
                 control,
                 workspace,
@@ -357,13 +353,10 @@ def predict_test_set(
                 seed,
             )
         controls[control] = control_df
-        if control_path is not None:
-            control_paths[control] = control_path
     output = PredictOutput(
         metadata=metadata,
         predictions=predictions_df,
         controls=controls,
-        control_paths=control_paths,
         requested_controls=config.conditions,
         config=config.model_dump(mode="json"),
         baseline_context=test.baseline_context,

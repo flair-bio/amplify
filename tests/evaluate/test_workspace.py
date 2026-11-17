@@ -448,7 +448,7 @@ def test_cli_passes_explicit_overwrite_to_pipeline(tmp_path, monkeypatch):
         lambda *args, **kwargs: nullcontext(SimpleNamespace(is_main_process=True)),
     )
     run = Mock()
-    monkeypatch.setattr(run_evaluate, "dispatch_run", run)
+    monkeypatch.setattr("modules.evaluate.src.runners.pipeline.run_evaluation", run)
     run_evaluate.main()
     assert run.call_args.kwargs["overwrite"] is True
     assert run.call_args.args[0].workspace.run_id == "test"

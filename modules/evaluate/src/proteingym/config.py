@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from modules.evaluate.src.artifacts.workspace import get_evaluation_workspace
+from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
 from modules.evaluate.src.config.shared import (
     EvaluationWorkspaceConfig,
     WandbConfig,
@@ -98,9 +98,7 @@ class ProteinGymRunConfig(BaseModel):
         values = dict(value)
         workspace = ProteinGymWorkspaceConfig.model_validate(values["workspace"])
         seed = values.get("seed", cls.model_fields["seed"].default)
-        run = get_evaluation_workspace(
-            workspace, variant=cls.run_variant(values), seed=seed
-        )
+        run = EvaluationWorkspace(workspace, variant=cls.run_variant(values), seed=seed)
         subset = workspace.dataset_config_name or workspace.dataset_name
         resolved = {
             "model_id": workspace.model_repo_id,

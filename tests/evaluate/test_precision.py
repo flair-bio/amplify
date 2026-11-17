@@ -85,6 +85,11 @@ def test_cli_applies_tf32_before_model_work(
         assert args[0].workflow == workflow
         raise ModelWorkReached
 
-    monkeypatch.setattr(run_evaluate, "dispatch_run", check_settings)
+    target = {
+        "evaluation": "modules.evaluate.src.runners.pipeline.run_evaluation",
+        "proteingym_zero_shot": "modules.evaluate.src.proteingym.zero_shot.run_zero_shot",
+        "proteingym_supervised": "modules.evaluate.src.proteingym.supervised.run_supervised",
+    }[workflow]
+    monkeypatch.setattr(target, check_settings)
     with pytest.raises(ModelWorkReached):
         run_evaluate.main(argv)

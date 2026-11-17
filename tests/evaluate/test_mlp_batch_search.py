@@ -10,6 +10,7 @@ import torch
 from accelerate import Accelerator
 from pydantic import ValidationError
 from torch.utils.data import DataLoader
+from transformers import get_scheduler
 
 from modules.core.utils.config_loader import load_and_parse
 from modules.evaluate.src.config.evaluation import (
@@ -23,10 +24,7 @@ from modules.evaluate.src.dataset.embeddings import EmbeddingDataset
 from modules.evaluate.src.model.heads import EmbeddingProbeHead
 from modules.evaluate.src.model.layerwise import LayerwiseProbeModel
 from modules.evaluate.src.trainers.selection import _generate_candidates
-from modules.evaluate.src.trainers.selection_helpers import (
-    build_optimizer,
-    build_scheduler,
-)
+from modules.evaluate.src.trainers.selection_helpers import build_optimizer
 from modules.evaluate.src.trainers.torch import evaluate_torch_validation, train_torch
 
 from .helpers import fit_inputs, fitting_state, make_inputs, patch_function
@@ -244,14 +242,12 @@ def test_trial_batch_size_controls_training_validation_and_scheduler(
         optimizer.register_step_post_hook(lambda *args: optimizer_steps.append(None))
         return optimizer
 
-    scheduler = MagicMock(wraps=build_scheduler)
+    scheduler = MagicMock(wraps=get_scheduler)
     monkeypatch.setattr(prepared.predictor.model, "forward", record_forward)
     monkeypatch.setattr(
         "modules.evaluate.src.trainers.torch.build_optimizer", track_optimizer
     )
-    monkeypatch.setattr(
-        "modules.evaluate.src.trainers.torch.build_scheduler", scheduler
-    )
+    monkeypatch.setattr("modules.evaluate.src.trainers.torch.get_scheduler", scheduler)
     hparams = {
         "learning_rate": 0.001,
         "weight_decay": 0.0,

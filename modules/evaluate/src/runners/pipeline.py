@@ -1,4 +1,4 @@
-"""Ordinary evaluation dispatch and run-wide output ownership."""
+"""Coordinate the ordinary evaluation lifecycle and run-wide output ownership."""
 
 from __future__ import annotations
 
@@ -13,36 +13,16 @@ from datasets import DatasetDict
 
 from modules.evaluate.src.artifacts.manifests import update_run_manifest
 from modules.evaluate.src.artifacts.results import PipelineResult
-from modules.evaluate.src.artifacts.workspace import (
-    EvaluationWorkspace,
-    get_evaluation_workspace,
-)
-from modules.evaluate.src.config.evaluation import (
-    EvaluationConfig,
-    ExternalTestSetConfig,
-)
+from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
+from modules.evaluate.src.config.evaluation import EvaluationConfig
 from modules.evaluate.src.dataset.loading import resolve_evaluation_data
 from modules.evaluate.src.dataset.subsets import select_test_subsets
+from modules.evaluate.src.runners.contact import run_contact_evaluation
+from modules.evaluate.src.runners.flat import run_flat_evaluation
 from modules.evaluate.src.runners.runtime import Runtime
+from modules.evaluate.src.tasks.contact_prediction import validate_pipeline
 
 logger = logging.getLogger(__name__)
-
-
-def external_workspace(
-    workspace: EvaluationWorkspace, external: ExternalTestSetConfig
-) -> EvaluationWorkspace:
-    return get_evaluation_workspace(
-        workspace.config.model_copy(
-            update={
-                "dataset_name": external.name,
-                "dataset_repo_id": external.dataset_repo_id,
-                "dataset_config_name": external.dataset_config_name,
-                "dataset_revision": external.dataset_revision,
-            }
-        ),
-        variant=workspace.variant,
-        seed=workspace.seed,
-    )
 
 
 def run_evaluation(
@@ -55,51 +35,60 @@ def run_evaluation(
     accelerator = runtime.accelerator
     if accelerator is None:
         raise ValueError("Ordinary evaluation requires an accelerator.")
-    workspace = get_evaluation_workspace(
+
+    workspace = EvaluationWorkspace(
         config.workspace, variant=config.variant, seed=config.seed
     )
-    contact = workspace.task_type == "contact_prediction"
-    if contact:
-        from modules.evaluate.src.tasks.contact_prediction import validate_pipeline
+    is_contact = workspace.task_type == "contact_prediction"
 
+    if is_contact:
         validate_pipeline(
             config,
             workspace_seed=workspace.seed,
             num_processes=accelerator.num_processes,
         )
+        runner = run_contact_evaluation
+    else:
+        runner = run_flat_evaluation
+
     with reserve_outputs(config, workspace, accelerator, overwrite=overwrite):
-        subsets = {}
-        if config.steps.predict.test_subsets:
-            dataset = resolve_evaluation_data(
-                workspace.dataset_repo_id or workspace.dataset_name,
-                split=config.steps.prepare.split,
-                seed=config.seed,
-                validation_fraction=config.steps.prepare.validation_fraction,
-                dataset=dataset,
-                config_name=workspace.config.dataset_config_name,
-                revision=workspace.config.dataset_revision,
-            )
-            if contact:
-                from modules.evaluate.src.dataset.contact import prepare_contact_dataset
+        dataset, subsets = _prepare_test_subsets(config, workspace, dataset)
+        return runner(config, workspace, accelerator, dataset=dataset, subsets=subsets)
 
-                prepare_contact_dataset(dataset)
-            subsets = select_test_subsets(
-                dataset,
-                config.steps.predict.test_subsets,
-                group_column="record_id" if contact else None,
-            )
-            dataset = next(iter(subsets.values()))
-        if contact:
-            from modules.evaluate.src.runners.contact import run_contact_evaluation
 
-            return run_contact_evaluation(
-                config, workspace, accelerator, dataset=dataset, subsets=subsets
-            )
-        from modules.evaluate.src.runners.flat import run_flat_evaluation
+def _prepare_test_subsets(
+    config: EvaluationConfig,
+    workspace: EvaluationWorkspace,
+    dataset: DatasetDict | None,
+) -> tuple[DatasetDict | None, dict[str, DatasetDict]]:
+    requested_subsets = config.steps.predict.test_subsets
+    if not requested_subsets:
+        return dataset, {}
 
-        return run_flat_evaluation(
-            config, workspace, accelerator, dataset=dataset, subsets=subsets
-        )
+    prepare = config.steps.prepare
+    dataset = resolve_evaluation_data(
+        workspace.dataset_repo_id or workspace.dataset_name,
+        split=prepare.split,
+        seed=config.seed,
+        validation_fraction=prepare.validation_fraction,
+        dataset=dataset,
+        config_name=workspace.config.dataset_config_name,
+        revision=workspace.config.dataset_revision,
+    )
+
+    is_contact = workspace.task_type == "contact_prediction"
+    if is_contact:
+        from modules.evaluate.src.dataset.contact import prepare_contact_dataset
+
+        prepare_contact_dataset(dataset)
+
+    subsets = select_test_subsets(
+        dataset,
+        requested_subsets,
+        group_column="record_id" if is_contact else None,
+    )
+    first_subset = next(iter(subsets.values()))
+    return first_subset, subsets
 
 
 @contextmanager
@@ -119,7 +108,7 @@ def reserve_outputs(
                 workspaces = [workspace]
                 if config.steps.mode != "evaluate_as_is":
                     workspaces.extend(
-                        external_workspace(workspace, external)
+                        workspace.external_workspace(external)
                         for external in config.external_test_sets
                     )
                 if len({item.run_root.resolve() for item in workspaces}) != len(

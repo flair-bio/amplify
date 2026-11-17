@@ -61,6 +61,11 @@ from modules.evaluate.src.tasks import get_task
 
 logger = logging.getLogger(__name__)
 
+_BASELINE_BOOTSTRAP_STATUS = {
+    "status": "not_computed",
+    "reason": "Standalone baseline scoring reports point estimates only.",
+}
+
 
 def run_baselines(
     config: BaselineRunConfig,
@@ -356,7 +361,7 @@ def _run_contact_baselines(
                     },
                     "score": {
                         "config": effective_score_config.model_dump(mode="json"),
-                        "bootstrap": _baseline_bootstrap_status(),
+                        "bootstrap": _BASELINE_BOOTSTRAP_STATUS.copy(),
                         "scores": result.summaries.to_dicts(),
                         "scores_path": str(scores_path),
                     },
@@ -524,7 +529,7 @@ def _publish_standalone_scores(
             },
             "score": {
                 "config": effective_score_config.model_dump(mode="json"),
-                "bootstrap": _baseline_bootstrap_status(),
+                "bootstrap": _BASELINE_BOOTSTRAP_STATUS.copy(),
                 "scores": scores,
                 "scores_path": str(scores_path),
             },
@@ -550,13 +555,6 @@ def _baseline_run_config(
     )
     run_config["score"] = score_config.model_dump(mode="json")
     return run_config
-
-
-def _baseline_bootstrap_status() -> dict[str, str]:
-    return {
-        "status": "not_computed",
-        "reason": "Standalone baseline scoring reports point estimates only.",
-    }
 
 
 def _upgrade_legacy_baseline(

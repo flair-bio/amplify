@@ -15,13 +15,12 @@ from modules.evaluate.src.artifacts.results import (
     PredictOutput,
     ScoreOutput,
 )
-from modules.evaluate.src.artifacts.workspace import get_evaluation_workspace
+from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
 from modules.evaluate.src.config.evaluation import EvaluationConfig
 from modules.evaluate.src.dataset.types import TestData as HeldOutData
 from modules.evaluate.src.dataset.types import TrainingData
 from modules.evaluate.src.model.controls import ControlPredictors
-from modules.evaluate.src.runners import evaluate as pipeline
-from modules.evaluate.src.runners import flat
+from modules.evaluate.src.runners import flat, pipeline
 from modules.evaluate.src.runners.runtime import Runtime
 
 
@@ -127,7 +126,7 @@ def test_external_set_reuses_fitted_model_without_retuning(
     _stub_services(monkeypatch, calls)
     config = _config("tune_probe")
     config.workspace.base_path = str(tmp_path)
-    workspace = get_evaluation_workspace(
+    workspace = EvaluationWorkspace(
         config.workspace, variant=config.variant, seed=config.seed
     )
     result = pipeline.run_evaluation(
@@ -189,7 +188,7 @@ def test_rerun_is_rejected_before_preparing_or_tuning(monkeypatch, tmp_path):
     _stub_services(monkeypatch, calls)
     config = _config("tune_probe")
     config.workspace.base_path = str(tmp_path)
-    workspace = get_evaluation_workspace(
+    workspace = EvaluationWorkspace(
         config.workspace, variant=config.variant, seed=config.seed
     )
     pipeline.run_evaluation(config, Runtime(torch.device("cpu"), _Accelerator()))
@@ -211,7 +210,7 @@ def test_external_preflight_failure_preserves_main_outputs(monkeypatch, tmp_path
     _stub_services(monkeypatch, calls)
     config = _config("tune_probe")
     config.workspace.base_path = str(tmp_path)
-    workspace = get_evaluation_workspace(
+    workspace = EvaluationWorkspace(
         config.workspace, variant=config.variant, seed=config.seed
     )
     pipeline.run_evaluation(config, Runtime(torch.device("cpu"), _Accelerator()))
@@ -229,7 +228,7 @@ def test_external_preflight_failure_preserves_main_outputs(monkeypatch, tmp_path
 def test_main_rank_preflight_errors_are_broadcast(monkeypatch, tmp_path):
     config = _config("tune_probe")
     config.workspace.base_path = str(tmp_path)
-    workspace = get_evaluation_workspace(
+    workspace = EvaluationWorkspace(
         config.workspace, variant=config.variant, seed=config.seed
     )
     workspace.run_root.mkdir(parents=True)

@@ -24,7 +24,7 @@ from modules.evaluate.src.artifacts.results import (
     PredictOutput,
     StructuredScoreOutput,
 )
-from modules.evaluate.src.artifacts.workspace import get_evaluation_workspace
+from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
 from modules.evaluate.src.config.evaluation import PredictConfig, ScoreConfig
 from modules.evaluate.src.config.shared import EvaluationWorkspaceConfig
 from modules.evaluate.src.dataset.collator import (
@@ -406,7 +406,7 @@ def test_token_confusion_scores_match_residue_metrics(
 def test_score_and_bootstrap_keep_classes_missing_from_test_split(tmp_path, num_labels):
     task_type = "sequence_classification" if num_labels == 2 else "token_classification"
     values = [0, 0] if num_labels == 2 else [[0, 0], [0]]
-    workspace = get_evaluation_workspace(
+    workspace = EvaluationWorkspace(
         EvaluationWorkspaceConfig(
             run_id="test",
             model_name="toy-model",
@@ -487,7 +487,7 @@ def test_token_confusion_bootstrap_preserves_results(
     )
 
     def run(name):
-        workspace = get_evaluation_workspace(
+        workspace = EvaluationWorkspace(
             EvaluationWorkspaceConfig(
                 run_id="test",
                 model_name="toy-model",
@@ -1114,7 +1114,7 @@ def _make_workspace(tmp_path, task_type, num_labels=2):
         num_labels=dataset_num_labels,
         base_path=str(tmp_path / "eval"),
     )
-    workspace = get_evaluation_workspace(config)
+    workspace = EvaluationWorkspace(config)
     workspace.setup_directories()
     return workspace
 
@@ -1656,7 +1656,7 @@ def test_shared_control_labels_preserve_bootstrap_results(
     )
 
     def run(name):
-        workspace = get_evaluation_workspace(
+        workspace = EvaluationWorkspace(
             EvaluationWorkspaceConfig(
                 run_id="test",
                 model_name="toy-model",

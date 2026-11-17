@@ -22,12 +22,12 @@ from modules.evaluate.src.trainers.selection_helpers import (
     cleanup_between_trials,
     create_optuna_study,
     load_checkpoint_state,
+    resolve_search_direction,
     sample_candidates,
 )
 from modules.evaluate.src.trainers.torch import (
     _cached_embedding_split,
     evaluate_torch_validation,
-    resolve_selection_direction,
     resolve_selection_metric,
     train_torch,
 )
@@ -138,7 +138,7 @@ def _search_hyperparameters(
     search_config = config.hyperparameter_search
     space = search_config.search_space
     metric_name = resolve_selection_metric(config, workspace)
-    direction = resolve_selection_direction(config, metric_name)
+    direction = resolve_search_direction(metric_name, search_config.direction)
     if accelerator.is_main_process:
         logger.info(
             "Starting hyperparameter tuning | pattern=%s | trial budget=%d | metric=%s (%s)",

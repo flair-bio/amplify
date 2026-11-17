@@ -13,7 +13,6 @@ from modules.evaluate.src.artifacts.files import write_settings_json
 from modules.evaluate.src.artifacts.results import FitResult
 from modules.evaluate.src.artifacts.workspace import (
     EvaluationWorkspace,
-    get_evaluation_workspace,
 )
 from modules.evaluate.src.config.evaluation import TuneConfig
 from modules.evaluate.src.model.factory import Predictor
@@ -54,7 +53,7 @@ def save_predictor(
     if isinstance(unwrapped_model, LayerwiseProbeModel):
         if config.save_best_model and accelerator.is_main_process:
             for position, layer in enumerate(unwrapped_model.layers):
-                layer_workspace = get_evaluation_workspace(
+                layer_workspace = EvaluationWorkspace(
                     workspace.config,
                     variant=f"{workspace.variant}-layer_{layer}",
                     seed=workspace.seed,

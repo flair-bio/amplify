@@ -16,7 +16,6 @@ from modules.evaluate.src.artifacts.reports import (
 from modules.evaluate.src.artifacts.results import FitResult, StructuredScoreOutput
 from modules.evaluate.src.artifacts.workspace import (
     EvaluationWorkspace,
-    get_evaluation_workspace,
 )
 from modules.evaluate.src.controls.fitting import prepare_control_predictors
 from modules.evaluate.src.dataset.types import TestData, TrainingData
@@ -169,7 +168,7 @@ def predict_layer_inputs(config, workspace, inputs, accelerator=None, *, seed=71
     )
     if config.persist_to_disk:
         for layer, output in outputs.items():
-            target = get_evaluation_workspace(
+            target = EvaluationWorkspace(
                 workspace.config,
                 variant=f"{workspace.variant}-layer_{layer}",
                 seed=workspace.seed,

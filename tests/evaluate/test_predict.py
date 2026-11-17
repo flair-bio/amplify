@@ -13,7 +13,7 @@ from accelerate import Accelerator
 from datasets import DatasetDict
 
 from modules.evaluate.src.artifacts.reports import publish_layer_comparison
-from modules.evaluate.src.artifacts.workspace import get_evaluation_workspace
+from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
 from modules.evaluate.src.config.evaluation import (
     EvaluationConfig,
     HeadConfig,
@@ -195,7 +195,7 @@ def test_online_layerwise_cli_branch(monkeypatch, tmp_path, model_family):
     monkeypatch.setattr(sys, "argv", ["run_evaluate.py", "config.yaml"])
     run_evaluate.main()
     for layer in (0, 2):
-        layer_workspace = get_evaluation_workspace(
+        layer_workspace = EvaluationWorkspace(
             config.workspace,
             variant=f"{config.variant}-layer_{layer}",
             seed=config.seed,
@@ -225,7 +225,7 @@ def test_online_layerwise_pipeline_scores_each_layer(
             enabled=True, layers=[0, -1], autocast_dtype="float32"
         ),
     )
-    workspace = get_evaluation_workspace(
+    workspace = EvaluationWorkspace(
         _make_workspace(tmp_path, task_type).config, variant="layerwise-test"
     )
     accelerator = Accelerator(cpu=True)
@@ -276,7 +276,7 @@ def test_online_layerwise_pipeline_scores_each_layer(
             pl.read_parquet(result.control_paths["untrained"])["layer_index"].to_list()
             == [layer] * 4
         )
-        layer_workspace = get_evaluation_workspace(
+        layer_workspace = EvaluationWorkspace(
             workspace.config, variant=f"layerwise-test-layer_{layer}"
         )
         score = score_inputs(
@@ -294,7 +294,7 @@ def test_online_layerwise_pipeline_scores_each_layer(
         )
         assert persisted_scores["layer_index"].unique().to_list() == [layer]
     score_paths = [
-        get_evaluation_workspace(
+        EvaluationWorkspace(
             workspace.config, variant=f"layerwise-test-layer_{layer}"
         ).comparison_path
         / "scores.parquet"
@@ -332,7 +332,7 @@ def test_cached_layerwise_pipeline_scores_each_layer(
     prepared.predictor.model.trunk.forward = MagicMock(
         side_effect=AssertionError("cached probes ran the trunk")
     )
-    workspace = get_evaluation_workspace(
+    workspace = EvaluationWorkspace(
         _make_workspace(tmp_path, task_type).config, variant="layerwise-cached"
     )
     accelerator = Accelerator(cpu=True)
@@ -377,7 +377,7 @@ def test_cached_layerwise_pipeline_scores_each_layer(
     assert set(results) == {0, 2}
     for layer, result in results.items():
         assert result.predictions["sequence"].null_count() == 0
-        layer_workspace = get_evaluation_workspace(
+        layer_workspace = EvaluationWorkspace(
             workspace.config, variant=f"layerwise-cached-layer_{layer}"
         )
         score = score_inputs(
@@ -586,7 +586,7 @@ def test_model_controls_align_repeated_and_unique_ids(
         ),
     )
     predictions = pl.DataFrame({"id": test_ids, "prediction": [-0.5] * len(test_ids)})
-    result, _ = predict_control(
+    result = predict_control(
         builder,
         "random_both",
         SimpleNamespace(task_type="pseudo_perplexity"),
@@ -644,7 +644,7 @@ def test_cached_layerwise_token_controls(monkeypatch, tmp_path, model_family):
         ),
         embedding_cache=EmbeddingCacheConfig(enabled=True, dtype="float32"),
     )
-    workspace = get_evaluation_workspace(
+    workspace = EvaluationWorkspace(
         _make_workspace(tmp_path, "token_classification").config,
         variant="layerwise-cached-token-controls",
     )
@@ -687,7 +687,7 @@ def test_cached_layerwise_token_controls(monkeypatch, tmp_path, model_family):
                 for frame in result.controls.values()
             )
         )
-        layer_workspace = get_evaluation_workspace(
+        layer_workspace = EvaluationWorkspace(
             workspace.config, variant=f"layerwise-cached-token-controls-layer_{layer}"
         )
         assert (
@@ -731,7 +731,7 @@ def test_online_layerwise_controls_and_bootstrap(
         ),
         embedding_cache=EmbeddingCacheConfig(enabled=cached, dtype="float32"),
     )
-    workspace = get_evaluation_workspace(
+    workspace = EvaluationWorkspace(
         _make_workspace(tmp_path, "sequence_classification").config,
         variant="layerwise-controls",
     )
@@ -773,7 +773,7 @@ def test_online_layerwise_controls_and_bootstrap(
                 for frame in result.controls.values()
             )
         )
-        layer_workspace = get_evaluation_workspace(
+        layer_workspace = EvaluationWorkspace(
             workspace.config, variant=f"layerwise-controls-layer_{layer}"
         )
         score = score_inputs(
@@ -1119,7 +1119,7 @@ def _make_workspace(tmp_path, task_type, num_labels=2):
         num_labels=dataset_num_labels,
         base_path=str(tmp_path / "eval"),
     )
-    workspace = get_evaluation_workspace(config)
+    workspace = EvaluationWorkspace(config)
     workspace.setup_directories()
     return workspace
 

@@ -14,7 +14,7 @@ from modules.evaluate.src.artifacts.results import (
     FitResult,
     PredictOutput,
 )
-from modules.evaluate.src.artifacts.workspace import get_evaluation_workspace
+from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
 from modules.evaluate.src.config.evaluation import EvaluationConfig, PredictConfig
 from modules.evaluate.src.config.load import (
     load_baseline_config,
@@ -30,8 +30,7 @@ from modules.evaluate.src.model.contact_features import (
 )
 from modules.evaluate.src.model.controls import ControlPredictors
 from modules.evaluate.src.model.factory import Predictor
-from modules.evaluate.src.runners import evaluate as pipeline
-from modules.evaluate.src.runners import flat
+from modules.evaluate.src.runners import flat, pipeline
 from modules.evaluate.src.runners.runtime import Runtime
 
 from .test_contact_data import hf_data, row
@@ -207,6 +206,8 @@ def test_pipeline_fits_once_and_predicts_only_selected_subsets(
                 "run_id": "subsets",
                 "dataset_name": "toy",
                 "dataset_repo_id": "toy",
+                "dataset_config_name": "subset-view",
+                "dataset_revision": "a" * 40,
                 "model_name": "m",
                 "task_type": "sequence_classification",
                 "target_type": "categorical",
@@ -260,18 +261,23 @@ def test_pipeline_fits_once_and_predicts_only_selected_subsets(
             predictions=pl.DataFrame(),
         )
 
+    def prepare_test(
+        config, workspace, trunk, tokenizer, test, source, *, dataset, **kwargs
+    ):
+        assert set(dataset) == {"test"}
+        assert list(dataset["test"]["id"]) == [source.name]
+        assert source.dataset_repo_id == workspace.dataset_repo_id
+        assert source.dataset_config_name == workspace.config.dataset_config_name
+        assert source.dataset_revision == workspace.config.dataset_revision
+        assert source.split == config.split.test
+        return HeldOutData(dataset["test"])
+
     monkeypatch.setattr(flat, "prepare_training_data", prepare)
-    monkeypatch.setattr(
-        flat,
-        "prepare_test_subset",
-        lambda config, workspace, trunk, tokenizer, test, name, dataset, **kwargs: (
-            HeldOutData(dataset["test"])
-        ),
-    )
+    monkeypatch.setattr(flat, "prepare_test_data", prepare_test)
     monkeypatch.setattr(flat, "fit_predictor", fit)
     monkeypatch.setattr(flat, "prepare_control_predictors", controls)
     monkeypatch.setattr(flat, "predict_test_set", predict)
-    root = get_evaluation_workspace(config.workspace, config.variant, seed=config.seed)
+    root = EvaluationWorkspace(config.workspace, config.variant, seed=config.seed)
     accelerator = SimpleNamespace(
         is_main_process=True,
         num_processes=1,

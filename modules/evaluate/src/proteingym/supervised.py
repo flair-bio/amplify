@@ -17,7 +17,7 @@ from transformers import PreTrainedTokenizerBase
 
 from modules.evaluate.src.artifacts.manifests import update_run_manifest
 from modules.evaluate.src.artifacts.workspace import (
-    get_evaluation_workspace,
+    EvaluationWorkspace,
     reserve_run_outputs,
 )
 from modules.evaluate.src.config.shared import HeadType
@@ -428,7 +428,7 @@ def run_supervised(
     """Evaluate the benchmark using the application's shared runtime."""
     if config.workspace is None:
         return _run_supervised(config, runtime)
-    workspace = get_evaluation_workspace(
+    workspace = EvaluationWorkspace(
         config.workspace,
         variant=config.run_variant(config.model_dump()),
         seed=config.seed,

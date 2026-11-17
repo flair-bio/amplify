@@ -12,6 +12,7 @@ import torch
 from accelerate import Accelerator
 from torch import nn
 from torch.utils.data import DataLoader
+from transformers import get_scheduler
 
 from modules.evaluate.src.artifacts.results import FitResult
 from modules.evaluate.src.config.evaluation import TuneConfig
@@ -26,15 +27,12 @@ from modules.evaluate.src.model.layerwise import (
 from modules.evaluate.src.tasks.registry import get_flat_task
 from modules.evaluate.src.trainers.selection_helpers import (
     build_optimizer,
-    build_scheduler,
     checkpoint_state,
     load_checkpoint_state,
+    resolve_search_direction,
     split_decay_parameters,
 )
-from modules.evaluate.src.trainers.torch import (
-    resolve_selection_direction,
-    resolve_selection_metric,
-)
+from modules.evaluate.src.trainers.torch import resolve_selection_metric
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +76,7 @@ def fit_layerwise(
         val_loader,
         accelerator,
         metric,
-        resolve_selection_direction(config, metric),
+        resolve_search_direction(metric, config.hyperparameter_search.direction),
         validation_metric_groups,
     )
     for layer, (score, epoch) in results.items():
@@ -163,12 +161,12 @@ def _train_heads(
     )
     updates = math.ceil(len(train_loader) / config.accumulation_steps)
     total_steps = max(1, updates * config.max_epochs * accelerator.num_processes)
-    scheduler = build_scheduler(
+    scheduler = get_scheduler(
         config.lr_scheduler_type,
         optimizer,
         num_warmup_steps=int(total_steps * config.warmup_ratio),
         num_training_steps=total_steps,
-        extra_kwargs=config.scheduler_kwargs,
+        scheduler_specific_kwargs=config.scheduler_kwargs or None,
     )
     optimizer, scheduler = accelerator.prepare(optimizer, scheduler)
     patience = config.early_stopping_patience if val_loader is not None else None

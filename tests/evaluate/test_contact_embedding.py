@@ -17,7 +17,7 @@ from transformers import EsmConfig, EsmModel
 
 from modules.evaluate.src import run_evaluate
 from modules.evaluate.src.artifacts.checkpoints import save_predictor
-from modules.evaluate.src.artifacts.workspace import get_evaluation_workspace
+from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
 from modules.evaluate.src.config.load import load_evaluation_config
 from modules.evaluate.src.dataset.contact import (
     candidate_pairs,
@@ -32,7 +32,7 @@ from modules.evaluate.src.model.contact_model import (
 from modules.evaluate.src.model.factory import Predictor
 from modules.evaluate.src.runners import runtime as runtime_module
 from modules.evaluate.src.runners.contact import prepare_contact_features
-from modules.evaluate.src.runners.evaluate import run_evaluation
+from modules.evaluate.src.runners.pipeline import run_evaluation
 from modules.evaluate.src.runners.runtime import Runtime
 from modules.evaluate.src.tasks import available_tasks, get_task
 from modules.evaluate.src.trainers.contact import (
@@ -187,9 +187,7 @@ def test_contact_predictor_pipeline_roundtrip(
     )
     fit = Mock(wraps=getattr(contact_training, fit_name))
     monkeypatch.setattr(contact_training, fit_name, fit)
-    workspace = get_evaluation_workspace(
-        config.workspace, config.variant, seed=config.seed
-    )
+    workspace = EvaluationWorkspace(config.workspace, config.variant, seed=config.seed)
     result = run_evaluation(
         config, Runtime(torch.device("cpu"), Accelerator(cpu=True)), dataset=hf
     )
@@ -565,9 +563,7 @@ def test_development_cache_is_seed_independent_and_never_contains_test(
     model = ContactPredictionModel(small_trunk())
     model.extract = Mock(wraps=model.extract)
     config = config_for(tmp_path, tmp_path / "trunk")
-    workspace = get_evaluation_workspace(
-        config.workspace, config.variant, seed=config.seed
-    )
+    workspace = EvaluationWorkspace(config.workspace, config.variant, seed=config.seed)
     workspace.setup_directories()
     predictor = Predictor(model, esm2_tokenizer)
     features, _ = prepare_contact_features(
@@ -600,9 +596,7 @@ def test_contact_tuning_requires_prepared_features_and_never_extracts(
     tmp_path, esm2_tokenizer, materialize
 ):
     config = config_for(tmp_path, tmp_path / "trunk")
-    workspace = get_evaluation_workspace(
-        config.workspace, config.variant, seed=config.seed
-    )
+    workspace = EvaluationWorkspace(config.workspace, config.variant, seed=config.seed)
     workspace.setup_directories()
     model = ContactPredictionModel(small_trunk())
     predictor = Predictor(model, esm2_tokenizer)
@@ -669,9 +663,7 @@ def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
     for split, rows in hf.items():
         rows.to_parquet(data / f"{split}-00000-of-00001.parquet")
     config = config_for(tmp_path, model_path)
-    workspace = get_evaluation_workspace(
-        config.workspace, config.variant, seed=config.seed
-    )
+    workspace = EvaluationWorkspace(config.workspace, config.variant, seed=config.seed)
     results = []
 
     def run(*args, **kwargs):
@@ -684,7 +676,7 @@ def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
     monkeypatch.setattr(
         runtime_module, "Accelerator", lambda **kwargs: Accelerator(cpu=True)
     )
-    monkeypatch.setattr(run_evaluate, "dispatch_run", run)
+    monkeypatch.setattr("modules.evaluate.src.runners.pipeline.run_evaluation", run)
     monkeypatch.setattr(sys, "argv", ["run_evaluate.py", "config.yaml"])
     run_evaluate.main()
     result = results[0]
@@ -723,7 +715,7 @@ def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
         actual["scores"], predicted[actual["original_i"], actual["original_j"]]
     )
     config2 = config_for(tmp_path, model_path, seed=14)
-    sibling = get_evaluation_workspace(config2.workspace, config2.variant, seed=14)
+    sibling = EvaluationWorkspace(config2.workspace, config2.variant, seed=14)
     run_evaluation(config2, Runtime(torch.device("cpu"), Accelerator(cpu=True)))
     sibling_content = sibling.run_manifest_path.read_bytes()
     with pytest.raises(FileExistsError):

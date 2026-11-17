@@ -5,11 +5,10 @@ from __future__ import annotations
 import argparse
 import logging
 from collections.abc import Sequence
-from typing import Any
 
 from modules.evaluate.src.config.evaluation import BaselineRunConfig
-from modules.evaluate.src.config.load import RunConfig, load_run_config
-from modules.evaluate.src.runners.runtime import Runtime, initialize_runtime
+from modules.evaluate.src.config.load import load_run_config
+from modules.evaluate.src.runners.runtime import initialize_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -39,36 +38,28 @@ def parse_cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def dispatch_run(
-    config: RunConfig,
-    runtime: Runtime,
-    *,
-    overwrite: bool = False,
-) -> Any:
-    if isinstance(config, BaselineRunConfig):
-        from modules.evaluate.src.runners.baselines import run_baselines
-
-        return run_baselines(config)
-    if config.workflow == "proteingym_supervised":
-        from modules.evaluate.src.proteingym.supervised import run_supervised
-
-        return run_supervised(config, runtime, overwrite=overwrite)
-    if config.workflow == "proteingym_zero_shot":
-        from modules.evaluate.src.proteingym.zero_shot import run_zero_shot
-
-        return run_zero_shot(config, runtime, overwrite=overwrite)
-    from modules.evaluate.src.runners.evaluate import run_evaluation
-
-    return run_evaluation(config, runtime, overwrite=overwrite)
-
-
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_cli(argv)
     config = load_run_config(
         args.paths, args.overrides or None, baseline_only=args.baselines
     )
     with initialize_runtime(config) as runtime:
-        dispatch_run(config, runtime, overwrite=args.overwrite)
+        if isinstance(config, BaselineRunConfig):
+            from modules.evaluate.src.runners.baselines import run_baselines
+
+            run_baselines(config)
+        elif config.workflow == "proteingym_supervised":
+            from modules.evaluate.src.proteingym.supervised import run_supervised
+
+            run_supervised(config, runtime, overwrite=args.overwrite)
+        elif config.workflow == "proteingym_zero_shot":
+            from modules.evaluate.src.proteingym.zero_shot import run_zero_shot
+
+            run_zero_shot(config, runtime, overwrite=args.overwrite)
+        else:
+            from modules.evaluate.src.runners.pipeline import run_evaluation
+
+            run_evaluation(config, runtime, overwrite=args.overwrite)
     logger.info("Evaluation completed successfully.")
 
 

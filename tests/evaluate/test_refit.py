@@ -8,6 +8,7 @@ import pytest
 import torch
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
+from transformers import get_scheduler
 
 from modules.core.utils.config_loader import load_and_parse
 from modules.evaluate.src.config.evaluation import (
@@ -20,7 +21,6 @@ from modules.evaluate.src.config.evaluation import (
 from modules.evaluate.src.dataset.embeddings import EmbeddingDataset
 from modules.evaluate.src.model.heads import EmbeddingProbeHead
 from modules.evaluate.src.trainers.fitting import _report_torch_seed_variance
-from modules.evaluate.src.trainers.selection_helpers import build_scheduler
 from modules.evaluate.src.trainers.torch import train_torch
 
 from .helpers import fit_inputs, fitting_state, make_inputs, patch_function
@@ -134,7 +134,7 @@ def test_fresh_refit_uses_selected_architecture_budget_and_development_statistic
 
     def scheduler(*args, **kwargs):
         schedules.append(kwargs["num_training_steps"])
-        return build_scheduler(*args, **kwargs)
+        return get_scheduler(*args, **kwargs)
 
     def variance(
         config, train_trunk, _fit_result, ws, predictor, training, accelerator, hparams
@@ -145,9 +145,7 @@ def test_fresh_refit_uses_selected_architecture_budget_and_development_statistic
 
     patch_function(monkeypatch, train_torch, record_train)
     patch_function(monkeypatch, _report_torch_seed_variance, variance)
-    monkeypatch.setattr(
-        "modules.evaluate.src.trainers.torch.build_scheduler", scheduler
-    )
+    monkeypatch.setattr("modules.evaluate.src.trainers.torch.get_scheduler", scheduler)
     result = fit_inputs(config, workspace, prepared, seed=42, accelerator=accelerator)
     assert len(refits) == 1
     model, hparams = refits[0]

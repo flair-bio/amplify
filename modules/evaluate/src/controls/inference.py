@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from time import monotonic
 from typing import Any
 
@@ -53,13 +52,8 @@ def predict_control(
     predictions_df: pl.DataFrame,
     accelerator: Accelerator,
     seed: int,
-) -> tuple[pl.DataFrame, Path | None]:
-    """Dispatch to the right control-building strategy.
-
-    The returned path is always ``None``. Control predictions depend on
-    the fitted head and are deliberately not cached; only trunk
-    embeddings are reusable across runs.
-    """
+) -> pl.DataFrame:
+    """Predict a model-based control and align its rows to the test predictions."""
     if control in BASELINE_NAMES:
         raise ValueError(
             f"'{control}' is a model-independent baseline; build it with the baseline service, not control inference."
@@ -67,39 +61,6 @@ def predict_control(
     started = monotonic()
     if accelerator.is_main_process:
         logger.info("Control '%s' prediction started", control)
-    result = _get_or_build_control(
-        config,
-        control,
-        workspace,
-        predictor,
-        test,
-        control_predictors,
-        predictions_df,
-        accelerator,
-        seed,
-    )
-    if accelerator.is_main_process:
-        logger.info(
-            "Control '%s' prediction finished in %.1fs (%d rows)",
-            control,
-            monotonic() - started,
-            result[0].height,
-        )
-    return result
-
-
-def _get_or_build_control(
-    config: PredictConfig,
-    control: str,
-    workspace: EvaluationWorkspace,
-    predictor: Predictor,
-    test: TestData,
-    control_predictors: ControlPredictors,
-    predictions_df: pl.DataFrame,
-    accelerator: Accelerator,
-    seed: int,
-) -> tuple[pl.DataFrame, Path | None]:
-    """Build a model-based control from the current head and embeddings."""
     is_scrambled_sequences = control == SCRAMBLED_SEQUENCES_CONTROL
     using_embeddings = test.embedding is not None
     if using_embeddings:
@@ -166,15 +127,22 @@ def _get_or_build_control(
                 f"Control '{control}' produced {control_ids.len()} rows in a different order/count than the {predictions_df.height} test rows; controls with repeated ids must iterate the test set in the same order as the trained model's predictions."
             )
         aligned = predictions_df.select("id").with_columns(control_df.drop("id"))
-        return (aligned, None)
-    aligned = predictions_df.select("id").join(
-        control_df, on="id", how="left", maintain_order="left", validate="1:1"
-    )
-    if aligned["prediction"].null_count() > 0:
-        raise RuntimeError(
-            f"Control '{control}' predictions could not be aligned to all test example ids; check that the control and test dataloaders use the same ids."
+    else:
+        aligned = predictions_df.select("id").join(
+            control_df, on="id", how="left", maintain_order="left", validate="1:1"
         )
-    return (aligned, None)
+        if aligned["prediction"].null_count() > 0:
+            raise RuntimeError(
+                f"Control '{control}' predictions could not be aligned to all test example ids; check that the control and test dataloaders use the same ids."
+            )
+    if accelerator.is_main_process:
+        logger.info(
+            "Control '%s' prediction finished in %.1fs (%d rows)",
+            control,
+            monotonic() - started,
+            aligned.height,
+        )
+    return aligned
 
 
 def _run_embedding_control_inference(

@@ -10,7 +10,7 @@ from accelerate import Accelerator as HFAccelerator
 from accelerate.state import AcceleratorState
 from datasets import Dataset, DatasetDict
 
-from modules.evaluate.src.artifacts.workspace import get_evaluation_workspace
+from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
 from modules.evaluate.src.config.evaluation import (
     DatasetSplitConfig,
     ExternalTestSetConfig,
@@ -123,7 +123,7 @@ def _make_workspace(tmp_path, task_type, num_labels=2):
         num_labels=dataset_num_labels,
         base_path=str(tmp_path / "eval"),
     )
-    return get_evaluation_workspace(config)
+    return EvaluationWorkspace(config)
 
 
 def _run_prepare(
@@ -220,7 +220,7 @@ def _run_prepare(
 
 
 @pytest.mark.parametrize("cached", [False, True])
-def test_prepare_test_subset_reuses_model_and_controls(
+def test_prepare_selected_test_data_reuses_model_and_controls(
     monkeypatch, tmp_path, model_family, cached
 ):
     prepared = _run_prepare(
@@ -248,16 +248,23 @@ def test_prepare_test_subset_reuses_model_and_controls(
         tokenize_num_proc=1,
         embedding_cache={"enabled": cached, "cache_policy": "off"},
     )
-    selected_test = prepare_module.prepare_test_subset(
+    source = ExternalTestSetConfig(
+        name="selected",
+        dataset_repo_id=workspace.dataset_repo_id or workspace.dataset_name,
+        dataset_config_name=workspace.config.dataset_config_name,
+        dataset_revision=workspace.config.dataset_revision,
+        split=config.split.test,
+    )
+    selected_test = prepare_module.prepare_test_data(
         config,
         workspace,
         prepared.predictor.trunk,
         prepared.predictor.tokenizer,
         prepared.test,
-        "selected",
-        subset,
+        source,
         accelerator=HFAccelerator(cpu=True),
         seed=0,
+        dataset=subset,
     )
     selected = replace(prepared, test=selected_test)
     assert selected.predictor.model is prepared.predictor.model

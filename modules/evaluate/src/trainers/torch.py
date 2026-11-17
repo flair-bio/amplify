@@ -6,13 +6,14 @@ import logging
 import math
 from contextlib import nullcontext
 from time import monotonic
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 import torch
 from accelerate import Accelerator
 from accelerate.utils import broadcast
 from torch import nn
+from transformers import get_scheduler
 
 from modules.evaluate.src.config.evaluation import TuneConfig
 from modules.evaluate.src.config.shared import EvaluationWorkspaceConfig
@@ -25,7 +26,6 @@ from modules.evaluate.src.tasks.registry import get_flat_task
 from modules.evaluate.src.tasks.token_classification import IGNORE_INDEX
 from modules.evaluate.src.trainers.selection_helpers import (
     build_optimizer,
-    build_scheduler,
     checkpoint_state,
     load_checkpoint_state,
     resolve_search_direction,
@@ -43,12 +43,6 @@ def resolve_selection_metric(
         config.hyperparameter_search.metric
         or get_flat_task(workspace.task_type).default_metrics()[0]
     )
-
-
-def resolve_selection_direction(
-    config: TuneConfig, metric_name: str
-) -> Literal["maximize", "minimize"]:
-    return resolve_search_direction(metric_name, config.hyperparameter_search.direction)
 
 
 def evaluate_torch_validation(
@@ -236,7 +230,9 @@ def train_torch(
         )
     metric_name = resolve_selection_metric(config, workspace) if monitor else None
     direction = (
-        resolve_selection_direction(config, metric_name) if metric_name else "maximize"
+        resolve_search_direction(metric_name, config.hyperparameter_search.direction)
+        if metric_name
+        else "maximize"
     )
     cached_val = _cached_embedding_split(training.val_dataloader) if monitor else None
     param_groups = split_decay_parameters(model, hparams["weight_decay"])
@@ -259,12 +255,12 @@ def train_torch(
     process_multiplier = 1 if cached_probe else accelerator.num_processes
     total_steps = max(1, updates_per_epoch * max_epochs * process_multiplier)
     warmup_steps = int(total_steps * config.warmup_ratio)
-    scheduler = build_scheduler(
+    scheduler = get_scheduler(
         config.lr_scheduler_type,
         optimizer,
         num_warmup_steps=warmup_steps,
         num_training_steps=total_steps,
-        extra_kwargs=config.scheduler_kwargs,
+        scheduler_specific_kwargs=config.scheduler_kwargs or None,
     )
     if not cached_probe:
         optimizer, scheduler = accelerator.prepare(optimizer, scheduler)

@@ -524,43 +524,6 @@ def prepare_test_data(
     )
 
 
-def prepare_test_subset(
-    config: PrepareConfig,
-    workspace: EvaluationWorkspace,
-    trunk: nn.Module | None,
-    tokenizer: PreTrainedTokenizerBase,
-    test: TestData,
-    name: str,
-    dataset: DatasetDict,
-    *,
-    accelerator: Accelerator,
-    seed: int,
-    layerwise_config: LayerwiseConfig | None = None,
-    group_column: str | None = None,
-) -> TestData:
-    """Reuse the fitted predictor and controls on another selected test set."""
-    external = ExternalTestSetConfig(
-        name=name,
-        dataset_repo_id=workspace.dataset_repo_id or workspace.dataset_name,
-        dataset_config_name=workspace.config.dataset_config_name,
-        dataset_revision=workspace.config.dataset_revision,
-        split=config.split.test,
-    )
-    return prepare_test_data(
-        config,
-        workspace,
-        trunk,
-        tokenizer,
-        test,
-        external,
-        accelerator=accelerator,
-        seed=seed,
-        layerwise_config=layerwise_config,
-        dataset=DatasetDict({"test": dataset["test"]}),
-        group_column=group_column,
-    )
-
-
 def prepare_feature_inputs(
     config: PrepareConfig,
     workspace: EvaluationWorkspace,

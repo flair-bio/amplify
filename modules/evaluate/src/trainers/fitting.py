@@ -43,20 +43,20 @@ from modules.evaluate.src.trainers.torch import (
 logger = logging.getLogger(__name__)
 
 
-def _fit_predictor(
-    config: TuneConfig,
-    train_trunk: bool,
-    _fit_result: FitResult,
+def fit_predictor(
+    *,
     workspace: EvaluationWorkspaceConfig,
     predictor: Predictor,
     training: TrainingData,
-    seed: int = 710019,
-    accelerator: Accelerator | None = None,
-) -> Predictor:
-    """Fit the primary probe, and the trunk in finetune mode."""
-    logger.info(
-        "Running predictor fitting (%s)...", "finetune" if train_trunk else "tune_probe"
-    )
+    config: TuneConfig,
+    accelerator: Accelerator,
+    seed: int,
+    mode: Literal["tune_probe", "finetune"] = "tune_probe",
+) -> FitResult:
+    """Select and fit a predictor; return its model and selection provenance."""
+    result = FitResult(model=predictor.model, seed=seed)
+    train_trunk = mode == "finetune"
+    logger.info("Running predictor fitting (%s)...", mode)
     if accelerator is None:
         raise ValueError("Pass the application-owned accelerator explicitly.")
     if training.train_dataloader is None:
@@ -124,109 +124,112 @@ def _fit_predictor(
                     f"refit_on_train_validation requires nonempty final-refit embedding datasets; missing or empty {name} split."
                 )
     if isinstance(predictor.model, LayerwiseProbeModel):
-        return _run_layerwise(
-            config, _fit_result, workspace, predictor, training, accelerator, seed
+        _run_layerwise(
+            config, result, workspace, predictor, training, accelerator, seed
         )
-    if config.head.head_type in CLASSICAL_HEAD_TYPES:
+    elif config.head.head_type in CLASSICAL_HEAD_TYPES:
         _run_classical_head(
-            config, _fit_result, workspace, predictor, training, seed, accelerator
-        )
-        return predictor
-    if not isinstance(predictor.model, nn.Module):
-        raise TypeError("Torch probe tuning requires a torch.nn.Module model.")
-    if config.head.head_type == "mlp" and isinstance(
-        predictor.model, EmbeddingProbeHead
-    ):
-        predictor.model = EmbeddingProbeHead(
-            predictor.model.embedding_size,
-            predictor.model.num_labels,
-            predictor.model.task_type,
-            probe_hidden_size=config.head.hidden_size,
-            probe_hidden_depth=config.head.hidden_depth,
-        ).to(accelerator.device)
-    model = predictor.model
-    embedding_dataset = find_embedding_dataset(training.train_dataloader)
-    cached_probe = embedding_dataset is not None
-    if embedding_dataset is not None and isinstance(model, EmbeddingProbeHead):
-        features = embedding_dataset.embeddings
-        row_mask = None
-        if config.standardize_features:
-            if workspace.task_type == "token_classification":
-                row_mask = torch.as_tensor(embedding_dataset.labels) != IGNORE_INDEX
-                num_rows = int(row_mask.sum().item())
-            else:
-                num_rows = features.shape[0]
-            logger.info(
-                "Standardizing cached probe features using %d training rows.", num_rows
-            )
-        model.fit_standardization(
-            features,
-            enabled=config.standardize_features,
-            row_mask=row_mask,
-            show_progress=accelerator.is_main_process,
-        )
-    if not cached_probe and (not train_trunk):
-        logger.warning(
-            "Embedding cache is unavailable; tuning head_type='%s' without it will recompute frozen-trunk representations during training.",
-            config.head.head_type,
-        )
-    if config.head.head_type == "torch_linear" and (not cached_probe):
-        validate_native_linear_head(model)
-    distributed_training = not cached_probe
-    configure_trainable_params(model, train_trunk)
-    if distributed_training:
-        model = accelerator.prepare(model)
-        predictor.model = model
-    if config.hyperparameter_search.enabled:
-        best_hparams = _search_hyperparameters(
-            config,
-            train_trunk,
-            _fit_result,
-            workspace,
-            predictor,
-            training,
-            accelerator,
-            seed,
+            config, result, workspace, predictor, training, seed, accelerator
         )
     else:
-        best_hparams = {
-            "learning_rate": config.learning_rate,
-            "weight_decay": config.weight_decay,
-            "max_epochs": config.max_epochs,
-        }
-        if not config.refit_on_train_validation:
-            train_torch(
+        if not isinstance(predictor.model, nn.Module):
+            raise TypeError("Torch probe tuning requires a torch.nn.Module model.")
+        if config.head.head_type == "mlp" and isinstance(
+            predictor.model, EmbeddingProbeHead
+        ):
+            predictor.model = EmbeddingProbeHead(
+                predictor.model.embedding_size,
+                predictor.model.num_labels,
+                predictor.model.task_type,
+                probe_hidden_size=config.head.hidden_size,
+                probe_hidden_depth=config.head.hidden_depth,
+            ).to(accelerator.device)
+        model = predictor.model
+        embedding_dataset = find_embedding_dataset(training.train_dataloader)
+        cached_probe = embedding_dataset is not None
+        if embedding_dataset is not None and isinstance(model, EmbeddingProbeHead):
+            features = embedding_dataset.embeddings
+            row_mask = None
+            if config.standardize_features:
+                if workspace.task_type == "token_classification":
+                    row_mask = torch.as_tensor(embedding_dataset.labels) != IGNORE_INDEX
+                    num_rows = int(row_mask.sum().item())
+                else:
+                    num_rows = features.shape[0]
+                logger.info(
+                    "Standardizing cached probe features using %d training rows.",
+                    num_rows,
+                )
+            model.fit_standardization(
+                features,
+                enabled=config.standardize_features,
+                row_mask=row_mask,
+                show_progress=accelerator.is_main_process,
+            )
+        if not cached_probe and (not train_trunk):
+            logger.warning(
+                "Embedding cache is unavailable; tuning head_type='%s' without it will recompute frozen-trunk representations during training.",
+                config.head.head_type,
+            )
+        if config.head.head_type == "torch_linear" and (not cached_probe):
+            validate_native_linear_head(model)
+        distributed_training = not cached_probe
+        configure_trainable_params(model, train_trunk)
+        if distributed_training:
+            model = accelerator.prepare(model)
+            predictor.model = model
+        if config.hyperparameter_search.enabled:
+            best_hparams = _search_hyperparameters(
                 config,
                 train_trunk,
+                result,
+                workspace,
+                predictor,
+                training,
+                accelerator,
+                seed,
+            )
+        else:
+            best_hparams = {
+                "learning_rate": config.learning_rate,
+                "weight_decay": config.weight_decay,
+                "max_epochs": config.max_epochs,
+            }
+            if not config.refit_on_train_validation:
+                train_torch(
+                    config,
+                    train_trunk,
+                    workspace,
+                    predictor,
+                    training,
+                    accelerator,
+                    best_hparams,
+                )
+        result.selected_hyperparameters = dict(best_hparams)
+        if config.variance_seeds and cached_probe:
+            _report_torch_seed_variance(
+                config,
+                train_trunk,
+                result,
                 workspace,
                 predictor,
                 training,
                 accelerator,
                 best_hparams,
             )
-    _fit_result.selected_hyperparameters = dict(best_hparams)
-    if config.variance_seeds and cached_probe:
-        _report_torch_seed_variance(
+        _finalize_torch_probe(
             config,
             train_trunk,
-            _fit_result,
             workspace,
             predictor,
             training,
             accelerator,
             best_hparams,
+            seed,
         )
-    _finalize_torch_probe(
-        config,
-        train_trunk,
-        workspace,
-        predictor,
-        training,
-        accelerator,
-        best_hparams,
-        seed,
-    )
-    return predictor
+    result.model = predictor.model
+    result.final_fit_split = _final_fit_split(config, predictor, training)
+    return result
 
 
 def _report_torch_seed_variance(
@@ -277,30 +280,3 @@ def _report_torch_seed_variance(
     load_checkpoint_state(model, canonical_state)
     _fit_result.seed_variance[metric_name] = scores
     _log_seed_variance(metric_name, scores)
-
-
-def fit_predictor(
-    *,
-    workspace: EvaluationWorkspaceConfig,
-    predictor: Predictor,
-    training: TrainingData,
-    config: TuneConfig,
-    accelerator: Accelerator,
-    seed: int,
-    mode: Literal["tune_probe", "finetune"] = "tune_probe",
-) -> FitResult:
-    """Select and fit a predictor; return its model and selection provenance."""
-    result = FitResult(model=predictor.model, seed=seed)
-    _fit_predictor(
-        config,
-        mode == "finetune",
-        result,
-        workspace,
-        predictor,
-        training,
-        seed=seed,
-        accelerator=accelerator,
-    )
-    result.model = predictor.model
-    result.final_fit_split = _final_fit_split(config, predictor, training)
-    return result

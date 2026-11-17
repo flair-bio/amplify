@@ -22,7 +22,7 @@ from modules.evaluate.src.artifacts.results import (
     ContactEvaluationMetadata,
     PredictOutput,
 )
-from modules.evaluate.src.artifacts.workspace import get_evaluation_workspace
+from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
 from modules.evaluate.src.config.evaluation import (
     BaselineRunConfig,
     PredictConfig,
@@ -97,7 +97,7 @@ def hf_data(rows, *, features=FEATURES):
 
 
 def prediction_inputs(dataset, predictor, tmp_path):
-    workspace = get_evaluation_workspace(
+    workspace = EvaluationWorkspace(
         EvaluationWorkspaceConfig(
             model_name="toy",
             dataset_name="casp",
@@ -245,7 +245,7 @@ def test_separation_prior_is_shared_and_scored_as_a_contact_baseline(tmp_path):
         other_edition_context, "separation_prior"
     )
 
-    workspace = get_evaluation_workspace(
+    workspace = EvaluationWorkspace(
         EvaluationWorkspaceConfig(
             model_name="toy",
             dataset_name="casp",

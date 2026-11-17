@@ -11,7 +11,7 @@ import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from modules.evaluate.src.artifacts.files import write_json
 from modules.evaluate.src.artifacts.manifests import update_run_manifest
@@ -22,12 +22,14 @@ from modules.evaluate.src.config.shared import (
 )
 from modules.evaluate.src.tasks import TaskType
 
+if TYPE_CHECKING:
+    from modules.evaluate.src.config.evaluation import ExternalTestSetConfig
+
 __all__ = [
     "DatasetWorkspaceConfig",
     "EvaluationWorkspace",
     "EvaluationWorkspaceConfig",
     "TaskType",
-    "get_evaluation_workspace",
 ]
 
 
@@ -139,6 +141,23 @@ class EvaluationWorkspace:
         workspace.manifest_namespace = ("tests", name)
         workspace._all_paths = [workspace.run_root]
         return workspace
+
+    def external_workspace(
+        self, external: ExternalTestSetConfig
+    ) -> EvaluationWorkspace:
+        """Use an external dataset while preserving the run's variant and seed."""
+        return EvaluationWorkspace(
+            self.config.model_copy(
+                update={
+                    "dataset_name": external.name,
+                    "dataset_repo_id": external.dataset_repo_id,
+                    "dataset_config_name": external.dataset_config_name,
+                    "dataset_revision": external.dataset_revision,
+                }
+            ),
+            variant=self.variant,
+            seed=self.seed,
+        )
 
     @contextmanager
     def reserve_run(self, *, overwrite: bool = False) -> Iterator[list[Path]]:
@@ -321,15 +340,6 @@ class EvaluationWorkspace:
                 else {}
             )
             update_run_manifest(path, "experiment", {**experiment, kind: identity})
-
-
-def get_evaluation_workspace(
-    config: EvaluationWorkspaceConfig,
-    variant: str | None = None,
-    seed: int | None = None,
-) -> EvaluationWorkspace:
-    """Build a workspace, optionally identifying the probe/mode variant."""
-    return EvaluationWorkspace(config, variant=variant, seed=seed)
 
 
 @contextmanager

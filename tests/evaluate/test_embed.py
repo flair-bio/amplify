@@ -13,7 +13,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from modules.evaluate.src.artifacts.cache import EmbeddingCache, embedding_cache_key
-from modules.evaluate.src.artifacts.workspace import get_evaluation_workspace
+from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
 from modules.evaluate.src.config.evaluation import EvaluationConfig, LayerwiseConfig
 from modules.evaluate.src.config.shared import (
     EmbeddingCacheConfig,
@@ -1095,7 +1095,7 @@ class TestCachedPreparation:
             embedding_cache=EmbeddingCacheConfig(enabled=True),
         )
 
-        workspace = get_evaluation_workspace(
+        workspace = EvaluationWorkspace(
             EvaluationWorkspaceConfig(
                 run_id="test",
                 dataset_name="toy_dataset",
@@ -1157,7 +1157,7 @@ class TestCachedPreparation:
             **{k: v for k, v in batch.items() if k != "id"}
         )
         assert output.loss is not None
-        workspace = get_evaluation_workspace(
+        workspace = EvaluationWorkspace(
             EvaluationWorkspaceConfig(
                 run_id="test",
                 dataset_name="toy_dataset",

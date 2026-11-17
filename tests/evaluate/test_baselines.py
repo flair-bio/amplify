@@ -17,7 +17,7 @@ from modules.evaluate.src.artifacts.baselines import (
 )
 from modules.evaluate.src.artifacts.predictions import persist_predictions
 from modules.evaluate.src.artifacts.results import EvaluationMetadata, PredictOutput
-from modules.evaluate.src.artifacts.workspace import get_evaluation_workspace
+from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
 from modules.evaluate.src.config.evaluation import (
     BaselineRunConfig,
     ExternalTestSetConfig,
@@ -363,7 +363,7 @@ def test_score_loads_shared_predictions_and_standalone_manifest(
     for model in ("first", "second"):
         workspace = _make_workspace(tmp_path, config.workspace.task_type, num_labels=3)
         workspace.config.base_path = str(tmp_path)
-        workspace = get_evaluation_workspace(
+        workspace = EvaluationWorkspace(
             workspace.config.model_copy(
                 update={"model_name": model, "model_repo_id": None}
             ),
@@ -1044,7 +1044,7 @@ def test_external_prepare_and_score_use_source_fit_identity(
     )
     paths = run_baselines(baseline_config, dataset=raw)
     assert prepared.test.baseline_context["fit"] == source.test.baseline_context["fit"]
-    workspace = get_evaluation_workspace(
+    workspace = EvaluationWorkspace(
         workspace.config.model_copy(
             update={
                 "dataset_name": external.name,

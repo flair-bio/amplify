@@ -28,12 +28,10 @@ from modules.evaluate.src.trainers.refit import _final_fit_split
 from modules.evaluate.src.trainers.selection_helpers import (
     _log_seed_variance,
     create_optuna_study,
+    resolve_search_direction,
     sample_candidates,
 )
-from modules.evaluate.src.trainers.torch import (
-    resolve_selection_direction,
-    resolve_selection_metric,
-)
+from modules.evaluate.src.trainers.torch import resolve_selection_metric
 
 if TYPE_CHECKING:
     import optuna
@@ -223,7 +221,9 @@ def _run_classical_head(
             "Classical probe hyperparameter search requires a validation split. Add a 'validation' split or use fixed steps.tune.head.hyperparameters."
         )
     metric_name = resolve_selection_metric(config, workspace)
-    direction = resolve_selection_direction(config, metric_name)
+    direction = resolve_search_direction(
+        metric_name, config.hyperparameter_search.direction
+    )
     if training.val_dataloader is not None:
         best_estimator, best_hparams, best_score = fit_candidates(
             head_config.head_type,

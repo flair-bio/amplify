@@ -21,13 +21,14 @@ from modules.evaluate.src.artifacts.results import (
 )
 from modules.evaluate.src.artifacts.workspace import (
     EvaluationWorkspace,
-    get_evaluation_workspace,
 )
-from modules.evaluate.src.config.evaluation import EvaluationConfig
+from modules.evaluate.src.config.evaluation import (
+    EvaluationConfig,
+    ExternalTestSetConfig,
+)
 from modules.evaluate.src.controls.fitting import prepare_control_predictors
 from modules.evaluate.src.dataset.preparation import (
     prepare_test_data,
-    prepare_test_subset,
     prepare_training_data,
 )
 from modules.evaluate.src.dataset.types import TestData, TrainingData
@@ -39,7 +40,6 @@ from modules.evaluate.src.model.factory import (
     load_tokenizer,
 )
 from modules.evaluate.src.model.prediction import predict_layerwise, predict_test_set
-from modules.evaluate.src.runners.evaluate import external_workspace
 from modules.evaluate.src.tasks.registry import get_flat_task
 from modules.evaluate.src.trainers.fitting import fit_predictor
 
@@ -118,23 +118,28 @@ def run_flat_evaluation(
         result = PipelineResult([])
         for index, (name, subset_data) in enumerate(subsets.items()):
             target = workspace.test_workspace(name)
-            view = (
-                test
-                if index == 0
-                else prepare_test_subset(
+            view = test
+            if index > 0:
+                subset_source = ExternalTestSetConfig(
+                    name=name,
+                    dataset_repo_id=workspace.dataset_repo_id or workspace.dataset_name,
+                    dataset_config_name=workspace.config.dataset_config_name,
+                    dataset_revision=workspace.config.dataset_revision,
+                    split=config.steps.prepare.split.test,
+                )
+                view = prepare_test_data(
                     config.steps.prepare,
                     workspace,
                     predictor.trunk,
                     predictor.tokenizer,
                     test,
-                    name,
-                    subset_data,
+                    subset_source,
                     accelerator=accelerator,
                     seed=config.seed,
                     layerwise_config=config.steps.layerwise,
+                    dataset=DatasetDict({"test": subset_data["test"]}),
                     group_column=config.steps.score.group_column,
                 )
-            )
             evaluation = {
                 "status": "running",
                 "test_subset": name,
@@ -196,7 +201,7 @@ def run_flat_evaluation(
             )
             result.external[external.name] = evaluate_test_set(
                 config,
-                external_workspace(workspace, external),
+                workspace.external_workspace(external),
                 predictor,
                 training,
                 view,
@@ -233,7 +238,7 @@ def evaluate_test_set(
         )
         evaluations = []
         for layer, prediction in layer_predictions.items():
-            target = get_evaluation_workspace(
+            target = EvaluationWorkspace(
                 workspace.config,
                 variant=f"{workspace.variant}-layer_{layer}",
                 seed=workspace.seed,

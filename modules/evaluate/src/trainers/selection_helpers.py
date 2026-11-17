@@ -11,8 +11,6 @@ import numpy as np
 import torch
 from torch import nn
 from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LRScheduler
-from transformers import get_scheduler
 
 from modules.evaluate.src.metrics.metrics import LOWER_IS_BETTER_METRICS
 
@@ -129,23 +127,6 @@ def split_decay_parameters(
     if no_decay_params:
         param_groups.append({"params": no_decay_params, "weight_decay": 0.0})
     return param_groups
-
-
-def build_scheduler(
-    name: str,
-    optimizer: Optimizer,
-    num_warmup_steps: int,
-    num_training_steps: int,
-    extra_kwargs: dict[str, Any],
-) -> LRScheduler:
-    """Instantiate an LR scheduler by name."""
-    return get_scheduler(
-        name,
-        optimizer=optimizer,
-        num_warmup_steps=num_warmup_steps,
-        num_training_steps=num_training_steps,
-        scheduler_specific_kwargs=extra_kwargs or None,
-    )
 
 
 def checkpoint_state(model: nn.Module) -> dict[str, Any]:

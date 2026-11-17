@@ -20,6 +20,8 @@ from modules.evaluate.src.proteingym.config import (
     ProteinGymSupervisedConfig,
     ProteinGymZeroShotConfig,
 )
+from modules.evaluate.src.proteingym.supervised import run_supervised
+from modules.evaluate.src.proteingym.zero_shot import run_zero_shot
 from modules.evaluate.src.runners import runtime as runtime_module
 
 CONFIGS = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
@@ -27,11 +29,16 @@ CONFIGS = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
 
 def run(config, **kwargs):
     with runtime_module.initialize_runtime(config) as runtime:
-        return run_evaluate.dispatch_run(config, runtime, **kwargs)
+        runner = (
+            run_supervised
+            if config.workflow == "proteingym_supervised"
+            else run_zero_shot
+        )
+        return runner(config, runtime, **kwargs)
 
 
 def reserve(config):
-    workspace = workspace_module.get_evaluation_workspace(
+    workspace = workspace_module.EvaluationWorkspace(
         config.workspace,
         variant=config.run_variant(config.model_dump()),
         seed=config.seed,
@@ -270,7 +277,7 @@ def test_scratch_root_locks_and_overwrite_preserve_siblings(run_case, tmp_path):
     sibling_manifest = (sibling.output_dir / "run_manifest.json").read_bytes()
     run(config, overwrite=True)
     assert (sibling.output_dir / "run_manifest.json").read_bytes() == sibling_manifest
-    workspace = workspace_module.get_evaluation_workspace(
+    workspace = workspace_module.EvaluationWorkspace(
         config.workspace,
         variant=config.run_variant(config.model_dump()),
         seed=config.seed,

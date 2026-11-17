@@ -46,8 +46,9 @@ from modules.evaluate.src.proteingym.supervised import (
     pool_embeddings,
     resolve_folds,
     run_cv,
+    run_supervised,
 )
-from modules.evaluate.src.run_evaluate import dispatch_run
+from modules.evaluate.src.proteingym.zero_shot import run_zero_shot
 from modules.evaluate.src.runners.runtime import initialize_runtime
 
 _ALPHABET = "ACDEFGHIKLMNPQRSTVWY"
@@ -55,7 +56,12 @@ _ALPHABET = "ACDEFGHIKLMNPQRSTVWY"
 
 def run(config):
     with initialize_runtime(config) as runtime:
-        return dispatch_run(config, runtime)
+        runner = (
+            run_supervised
+            if config.workflow == "proteingym_supervised"
+            else run_zero_shot
+        )
+        return runner(config, runtime)
 
 
 class _FakeTokenizer:

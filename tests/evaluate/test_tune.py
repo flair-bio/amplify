@@ -8,10 +8,11 @@ import torch
 from accelerate import Accelerator
 from torch import nn
 from torch.utils.data import DataLoader
+from transformers import get_scheduler
 
 from modules.evaluate.src.artifacts.cache import EmbeddingCache
 from modules.evaluate.src.artifacts.results import FitResult
-from modules.evaluate.src.artifacts.workspace import get_evaluation_workspace
+from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
 from modules.evaluate.src.config.evaluation import (
     HeadConfig,
     HyperparameterSearchConfig,
@@ -33,7 +34,6 @@ from modules.evaluate.src.trainers.selection import (
 )
 from modules.evaluate.src.trainers.selection_helpers import (
     build_optimizer,
-    build_scheduler,
     checkpoint_state,
     resolve_search_direction,
     sample_candidates,
@@ -42,7 +42,6 @@ from modules.evaluate.src.trainers.selection_helpers import (
 from modules.evaluate.src.trainers.torch import (
     _cached_embedding_split,
     evaluate_torch_validation,
-    resolve_selection_direction,
     resolve_selection_metric,
     train_torch,
 )
@@ -273,7 +272,7 @@ def test_online_layerwise_tuning_saves_independent_heads(
     )
     assert isinstance(prepared.predictor.model, LayerwiseProbeModel)
     workspace_config = _make_workspace(tmp_path, "sequence_classification").config
-    workspace = get_evaluation_workspace(workspace_config, variant="layerwise-test")
+    workspace = EvaluationWorkspace(workspace_config, variant="layerwise-test")
     step = fitting_state(
         TuneConfig(
             head=HeadConfig(head_type="torch_linear"),
@@ -304,7 +303,7 @@ def test_online_layerwise_tuning_saves_independent_heads(
         )
     )
     for layer in (0, 2):
-        layer_workspace = get_evaluation_workspace(
+        layer_workspace = EvaluationWorkspace(
             workspace_config, variant=f"layerwise-test-layer_{layer}"
         )
         checkpoint = torch.load(
@@ -569,24 +568,18 @@ def test_gather_embeddings_unwraps_accelerate_dataset_wrappers() -> None:
     accelerator.gather_for_metrics.assert_not_called()
 
 
-def test_resolve_direction_flips_to_minimize_for_lower_is_better_metric() -> None:
-    step = fitting_state(TuneConfig())
-    assert resolve_selection_direction(step.config, "mse") == "minimize"
-    assert resolve_selection_direction(step.config, "f1") == "maximize"
-
-
-def test_resolve_direction_respects_explicit_direction() -> None:
-    step = fitting_state(
-        TuneConfig(
-            hyperparameter_search=HyperparameterSearchConfig(direction="maximize")
-        )
-    )
-    assert resolve_selection_direction(step.config, "mse") == "maximize"
-
-
-def test_resolve_search_direction_uses_metric_default_unless_explicit() -> None:
-    assert resolve_search_direction("mse", None) == "minimize"
-    assert resolve_search_direction("mse", "maximize") == "maximize"
+@pytest.mark.parametrize(
+    "metric,direction,expected",
+    [
+        ("mse", None, "minimize"),
+        ("f1", None, "maximize"),
+        ("mse", "maximize", "maximize"),
+    ],
+)
+def test_resolve_search_direction_uses_metric_default_unless_explicit(
+    metric, direction, expected
+) -> None:
+    assert resolve_search_direction(metric, direction) == expected
 
 
 @pytest.mark.parametrize("is_main_process", [False, True])
@@ -978,14 +971,12 @@ def test_cached_probe_batch_size_honors_loader_and_override(
         optimizer.register_step_post_hook(lambda *args: optimizer_steps.append(None))
         return optimizer
 
-    scheduler = MagicMock(wraps=build_scheduler)
+    scheduler = MagicMock(wraps=get_scheduler)
     forward = MagicMock(wraps=model.forward)
     monkeypatch.setattr(
         "modules.evaluate.src.trainers.torch.build_optimizer", track_optimizer
     )
-    monkeypatch.setattr(
-        "modules.evaluate.src.trainers.torch.build_scheduler", scheduler
-    )
+    monkeypatch.setattr("modules.evaluate.src.trainers.torch.get_scheduler", scheduler)
     monkeypatch.setattr(model, "forward", forward)
     workspace = MagicMock(task_type="sequence_classification", num_labels=2)
     hparams = {"learning_rate": 0.001, "weight_decay": 0.0, "max_epochs": 2}
