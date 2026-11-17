@@ -1,4 +1,4 @@
-"""Contract tests covering every registered TaskHandler uniformly.
+"""Contract tests covering every registered FlatTask uniformly.
 
 New task types are added to ``modules/evaluate/src/tasks/`` (see the
 "Adding a task type" section of ``modules/evaluate/README.md``); this file
@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import torch
 
-from modules.evaluate.src.tasks import TaskHandler, available_tasks, get_task
+from modules.evaluate.src.tasks import FlatTask, available_tasks, get_task
 
 
 @pytest.mark.parametrize(
@@ -110,20 +110,18 @@ def _calibration_label_rows(batch_size: int, seq_len: int) -> list[list[float]]:
 
 
 @pytest.fixture(
-    params=[
-        name for name in available_tasks() if name != "contact_prediction"
-    ]
+    params=[name for name in available_tasks() if name != "contact_prediction"]
 )
-def task(request) -> TaskHandler:
+def task(request) -> FlatTask:
     return get_task(request.param)
 
 
-def test_resolve_num_labels(task: TaskHandler):
+def test_resolve_num_labels(task: FlatTask):
     num_labels = task.resolve_num_labels(num_labels=4, dataset_name="toy")
     assert isinstance(num_labels, int) and num_labels >= 1
 
 
-def test_collate_labels_shape(task: TaskHandler):
+def test_collate_labels_shape(task: FlatTask):
     batch_size, seq_len = 3, 5
     num_labels = 4
     is_multilabel = task.name == "sequence_multilabel_classification"
@@ -170,7 +168,7 @@ def test_sequence_regression_collates_numeric_string_labels():
     assert collated.tolist() == [0.25, -1.5]
 
 
-def test_extract_predictions_reduces_class_dimension(task: TaskHandler):
+def test_extract_predictions_reduces_class_dimension(task: FlatTask):
     if task.pairwise:
         # Per-pair binary score, not a per-class logit: shape is unchanged.
         logits = torch.randn(2, 4, 4)
@@ -206,7 +204,7 @@ def test_extract_predictions_reduces_class_dimension(task: TaskHandler):
         assert preds.shape == logits.shape[:-1]
 
 
-def test_split_batch_rows_is_row_aligned(task: TaskHandler):
+def test_split_batch_rows_is_row_aligned(task: FlatTask):
     if task.pairwise:
         preds = torch.rand(2, 3, 3)
         labels = torch.full((2, 3, 3), -100, dtype=torch.long)
@@ -242,7 +240,7 @@ def test_split_batch_rows_is_row_aligned(task: TaskHandler):
             assert len(pred) == len(label)
 
 
-def test_default_metrics_are_computable(task: TaskHandler):
+def test_default_metrics_are_computable(task: FlatTask):
     metric_names = task.default_metrics()
     assert metric_names
 
@@ -304,7 +302,7 @@ def test_default_metrics_are_computable(task: TaskHandler):
     assert set(scores) == set(metric_names)
 
 
-def test_scramble_labels_preserves_shape(task: TaskHandler):
+def test_scramble_labels_preserves_shape(task: FlatTask):
     rng = np.random.default_rng(0)
     if task.pairwise:
         labels = [[6, 1, 0], [8, 0], [5]]
@@ -320,12 +318,12 @@ def test_scramble_labels_preserves_shape(task: TaskHandler):
         assert [len(seq) for seq in scrambled] == [len(seq) for seq in labels]
 
 
-def test_unknown_metric_name_raises(task: TaskHandler):
+def test_unknown_metric_name_raises(task: FlatTask):
     with pytest.raises(KeyError):
         task.validate_metric_names(["not_a_real_metric"])
 
 
-def test_label_consuming_tasks_declare_a_dataset_contract(task: TaskHandler):
+def test_label_consuming_tasks_declare_a_dataset_contract(task: FlatTask):
     if not task.requires_source_labels:
         pytest.skip(f"{task.name} derives its targets from the sequence.")
 
@@ -387,7 +385,7 @@ def test_multilabel_mcc_respects_aggregation(average, expected):
 def test_missing_dataset_contract_warns_at_class_definition():
     with pytest.warns(UserWarning, match="accepted_target_types"):
 
-        class _MissingContractTask(TaskHandler):
+        class _MissingContractTask(FlatTask):
             name = "missing_contract"
             auto_model_class = object
             metrics = {"accuracy": lambda values, labels, average: 1.0}

@@ -1,170 +1,75 @@
+"""The single command-line entry point for all evaluation workflows."""
+
+from __future__ import annotations
+
+import argparse
 import logging
-import sys
-from typing import Any, cast
+from collections.abc import Sequence
+from typing import Any
 
-import torch
-from accelerate import Accelerator
+from modules.evaluate.src.config.evaluation import BaselineRunConfig
+from modules.evaluate.src.config.load import RunConfig, load_run_config
+from modules.evaluate.src.runners.runtime import Runtime, initialize_runtime
 
-from modules.evaluate.src.contracts.config_loader import (
-    load_baseline_config,
-    load_evaluation_config,
-)
-from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
-from modules.evaluate.src.runners.baselines import (
-    run_baselines,
-    run_multi_target_baselines,
-)
-from modules.evaluate.src.runners.multi_target import run_multi_target_evaluation
-from modules.evaluate.src.runners.pipeline import run_pipeline
-from modules.evaluate.src.utils.seed import seed_everything
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    stream=sys.stdout,
-    force=True,
-)
 logger = logging.getLogger(__name__)
 
-# Silence HTTP request logs from underlying libraries
-logging.getLogger("urllib3").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 
-
-def main() -> None:
-    """Entry point for the evaluation pipeline.
-
-    Usage::
-
-        uv run run_evaluate.py [--baselines | --overwrite] <config.yaml> [<override.yaml> ...] [key=value ...]
-
-    One or more YAML files may be supplied; later files override earlier ones
-    for shared keys.  Any ``key=value`` arguments (containing ``=``) are
-    treated as OmegaConf dotlist overrides applied after YAML merging.
-    Without an explicit task overlay, workspace.default_task_type in the
-    dataset selects its task overlay; workspace.task_type can override it.
-    Baseline-only runs require an explicit overlay under configs/baselines/
-    or a baselines.names=... override.
-
-    Examples::
-
-        uv run modules/evaluate/src/run_evaluate.py modules/evaluate/configs/config.yaml
-        uv run modules/evaluate/src/run_evaluate.py modules/evaluate/configs/config.yaml configs/experiment.yaml
-        uv run modules/evaluate/src/run_evaluate.py modules/evaluate/configs/config.yaml dataset.base_path=/data
-    """
-    args = sys.argv[1:]
-    baseline_only = "--baselines" in args
-    overwrite = "--overwrite" in args
-    args = [
-        argument for argument in args if argument not in {"--baselines", "--overwrite"}
-    ]
-    if baseline_only and overwrite:
-        raise SystemExit(
-            "--overwrite applies to model runs only; baseline artifacts are validated "
-            "and reused."
-        )
-    if not args:
-        print(
-            "Usage: run_evaluate [--baselines | --overwrite] <config.yaml> [<override.yaml> ...] [key=value ...]",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    # Separate yaml paths (no ``=``) from dotlist overrides (contain ``=``).
-    config_paths = [a for a in args if "=" not in a]
-    overrides = [a for a in args if "=" in a]
-
-    if not config_paths:
-        print("Error: at least one YAML config file must be provided.", file=sys.stderr)
-        sys.exit(1)
-
-    if baseline_only:
-        baseline_config = load_baseline_config(config_paths, overrides or None)
-        baseline_runner = (
-            run_multi_target_baselines
-            if baseline_config.multi_target is not None
-            else run_baselines
-        )
-        for test, artifacts in baseline_runner(baseline_config).items():
-            for name, path in artifacts.items():
-                logger.info("Baseline %s / %s: %s", test, name, path)
-        return
-
-    config = load_evaluation_config(path=config_paths, overrides=overrides or None)
-    workspace = get_evaluation_workspace(
-        config.workspace, variant=config.variant, seed=config.seed
+def parse_cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Evaluate one configured target or a ProteinGym assay suite."
     )
-
-    logger.info("=== Starting Evaluation Pipeline ===")
-    torch.set_float32_matmul_precision("high" if config.tf32 else "highest")
-    torch.backends.cuda.matmul.allow_tf32 = config.tf32
-    torch.backends.cudnn.allow_tf32 = config.tf32
-    logger.info("CUDA TF32 allowed: %s", config.tf32)
-    accelerator = Accelerator(
-        gradient_accumulation_steps=config.steps.tune.accumulation_steps
+    parser.add_argument(
+        "--baselines", action="store_true", help="Run ordinary dataset baselines only."
     )
-
-    logger.info(
-        "Loaded config | workspace.model_name=%s | workspace.dataset_name=%s | workspace.task_type=%s | steps.mode=%s | steps.tune.hyperparameter_search=%s | steps.score.bootstrap_enabled=%s",
-        config.workspace.model_name,
-        config.workspace.dataset_name,
-        config.workspace.task_type,
-        config.steps.mode,
-        config.steps.tune.hyperparameter_search.enabled,
-        config.steps.score.bootstrap_enabled,
+    parser.add_argument(
+        "--overwrite", action="store_true", help="Replace an existing model run."
     )
-
-    # Optionally start a Weights & Biases run so the steps' log_wandb() calls
-    # (training loss, validation and test metrics) are recorded. Import lazily so
-    # wandb is only required when actually enabled. Only the main process
-    # initializes a run: under multi-process accelerate launches, every
-    # rank would otherwise create its own duplicate wandb run.
-    wandb_run = None
-    if config.wandb.enabled and accelerator.is_main_process:
-        import wandb
-
-        wandb_api = cast(Any, wandb)
-        wandb_run = wandb_api.init(
-            project=config.wandb.project,
-            entity=config.wandb.entity,
-            name=config.wandb.run_name
-            or (
-                f"{config.workspace.model_name}-{config.workspace.dataset_name}"
-                f"-{config.variant}"
-            ),
-            tags=config.wandb.tags,
-            config=config.model_dump(mode="json"),
+    parser.add_argument(
+        "config", nargs="*", help="YAML files followed by optional key=value overrides."
+    )
+    args = parser.parse_args(argv)
+    if args.baselines and args.overwrite:
+        parser.error(
+            "--overwrite applies to model runs only; baseline artifacts are validated and reused."
         )
+    args.paths = [value for value in args.config if "=" not in value]
+    args.overrides = [value for value in args.config if "=" in value]
+    if not args.paths:
+        parser.error("at least one YAML config file must be provided")
+    return args
 
-    # Seed everything for reproducibility
-    logger.info("Seeding everything for reproducibility...")
-    seed_everything(config.seed)
 
-    # Nest outputs under this run's variant (head type + mode + non-default
-    # split) so sweeping probes for the same model+dataset doesn't
-    # overwrite a previous variant's checkpoint/predictions/scores.
-    logger.info(
-        "Initialized workspace: model %s dataset %s variant %s",
-        workspace.model_name,
-        workspace.dataset_name,
-        config.variant,
+def dispatch_run(
+    config: RunConfig,
+    runtime: Runtime,
+    *,
+    overwrite: bool = False,
+) -> Any:
+    if isinstance(config, BaselineRunConfig):
+        from modules.evaluate.src.runners.baselines import run_baselines
+
+        return run_baselines(config)
+    if config.workflow == "proteingym_supervised":
+        from modules.evaluate.src.proteingym.supervised import run_supervised
+
+        return run_supervised(config, runtime, overwrite=overwrite)
+    if config.workflow == "proteingym_zero_shot":
+        from modules.evaluate.src.proteingym.zero_shot import run_zero_shot
+
+        return run_zero_shot(config, runtime, overwrite=overwrite)
+    from modules.evaluate.src.runners.evaluate import run_evaluation
+
+    return run_evaluation(config, runtime, overwrite=overwrite)
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_cli(argv)
+    config = load_run_config(
+        args.paths, args.overrides or None, baseline_only=args.baselines
     )
-    if config.multi_target is not None:
-        run_multi_target_evaluation(
-            config,
-            accelerator,
-            multi_target=config.multi_target,
-            overwrite=overwrite,
-        )
-    else:
-        run_pipeline(config, workspace, accelerator, overwrite=overwrite)
-
-    logger.info("=== Evaluation Pipeline Completed Successfully ===")
-
-    if wandb_run is not None:
-        wandb_run.finish()
+    with initialize_runtime(config) as runtime:
+        dispatch_run(config, runtime, overwrite=args.overwrite)
+    logger.info("Evaluation completed successfully.")
 
 
 if __name__ == "__main__":

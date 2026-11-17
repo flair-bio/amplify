@@ -2,7 +2,7 @@
 
 from datasets import DatasetDict
 
-from modules.evaluate.src.contracts.config import TestSubsets
+from modules.evaluate.src.config.shared import TestSubsets
 
 
 def select_test_subsets(

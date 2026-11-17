@@ -1,13 +1,19 @@
-"""Build predictions for model-based inference ablations."""
+"""Model resources and primitives for inference ablations."""
 
 from __future__ import annotations
 
 import copy
 import hashlib
 import logging
-from typing import Any, Literal
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
+
+if TYPE_CHECKING:
+    from sklearn.base import BaseEstimator
+    from torch import nn
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +51,17 @@ RANDOMIZED_HEAD_CONTROLS = frozenset(
     }
 )
 NO_INFERENCE_CONTROLS = frozenset({SCRAMBLED_LABELS_CONTROL})
+
+
+@dataclass
+class ControlPredictors:
+    """Independent control models shared across test views."""
+
+    random_trunk_model: nn.Module | BaseEstimator | None = None
+    random_trunk_seed: int | None = None
+    independent_models: dict[str, nn.Module | BaseEstimator] = field(
+        default_factory=dict
+    )
 
 
 def build_random_trunk(trunk: torch.nn.Module, seed: int) -> torch.nn.Module:
@@ -113,3 +130,58 @@ def build_control_model(
 
     model.eval()
     return model
+
+
+def make_sequence_scrambler(
+    tokenizer: Any, seed: int
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """Build a batch_transform that shuffles token order within each sequence
+    (leaving padding/special-token positions, as well as each sequence's
+    first amino acid, in place), destroying sequence/positional
+    information while preserving token composition.
+
+    Loops over rows in Python (batch_size is small relative to a training
+    loop, so this isn't performance-critical) and permutes each row's
+    shufflable positions in place via ``torch.randperm``, rather than a
+    single vectorized argsort over the whole batch. Uses its own
+    ``torch.Generator`` seeded from `seed` (rather than torch's global
+    RNG) so the shuffling is fully deterministic and independent of any
+    other randomness consumed elsewhere in the run.
+    """
+    special_ids_list = list(tokenizer.all_special_ids)
+    state: dict[str, Any] = {"generator": None, "device": None}
+
+    def _scramble(batch: dict[str, Any]) -> dict[str, Any]:
+        batch = dict(batch)
+        input_ids = batch["input_ids"]
+        device = input_ids.device
+        batch_size, _ = input_ids.shape
+        if state["generator"] is None or state["device"] != device:
+            state["generator"] = torch.Generator(device=device).manual_seed(seed)
+            state["device"] = device
+        generator = state["generator"]
+        special_ids = torch.tensor(
+            special_ids_list, device=device, dtype=input_ids.dtype
+        )
+        movable = ~torch.isin(input_ids, special_ids)
+        scrambled = input_ids.clone()
+        if "cu_seqlens" in batch:
+            offsets = batch["cu_seqlens"][: batch["num_sequences"] + 1].tolist()
+            spans = [(0, start, end) for start, end in zip(offsets[:-1], offsets[1:])]
+        else:
+            spans = [(row, 0, input_ids.shape[1]) for row in range(batch_size)]
+        for row, start, end in spans:
+            movable_idx = movable[row, start:end].nonzero(as_tuple=True)[0] + start
+            if movable_idx.numel() <= 1:
+                continue
+            shufflable_idx = movable_idx[1:]
+            perm = shufflable_idx[
+                torch.randperm(
+                    shufflable_idx.numel(), generator=generator, device=device
+                )
+            ]
+            scrambled[row, shufflable_idx] = input_ids[row, perm]
+        batch["input_ids"] = scrambled
+        return batch
+
+    return _scramble

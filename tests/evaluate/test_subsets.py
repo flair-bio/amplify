@@ -1,35 +1,41 @@
 """Test-only selection, shared fitting, and isolated subset artifacts."""
 
 import json
-from dataclasses import replace
 from types import SimpleNamespace
 
 import polars as pl
 import pytest
+import torch
 from datasets import Dataset, DatasetDict
 from pydantic import ValidationError
 
-from modules.evaluate.src.contracts.artifacts import (
+from modules.evaluate.src.artifacts.results import (
     EvaluationMetadata,
+    FitResult,
     PredictOutput,
-    PreparedArtifacts,
-    ScoreOutput,
 )
-from modules.evaluate.src.contracts.config import EvaluationConfig, PredictConfig
-from modules.evaluate.src.contracts.config_loader import (
+from modules.evaluate.src.artifacts.workspace import get_evaluation_workspace
+from modules.evaluate.src.config.evaluation import EvaluationConfig, PredictConfig
+from modules.evaluate.src.config.load import (
     load_baseline_config,
     load_evaluation_config,
 )
 from modules.evaluate.src.dataset.contact import prepare_contact_dataset
 from modules.evaluate.src.dataset.subsets import select_test_subsets
-from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
-from modules.evaluate.src.runners import pipeline
-from modules.evaluate.src.tasks import get_task
-from modules.evaluate.src.tasks.contact_prediction import (
+from modules.evaluate.src.dataset.types import TestData as HeldOutData
+from modules.evaluate.src.dataset.types import TrainingData
+from modules.evaluate.src.model.contact_features import (
     contact_development_attention_fingerprint,
+    contact_fitting_identity,
 )
+from modules.evaluate.src.model.controls import ControlPredictors
+from modules.evaluate.src.model.factory import Predictor
+from modules.evaluate.src.runners import evaluate as pipeline
+from modules.evaluate.src.runners import flat
+from modules.evaluate.src.runners.runtime import Runtime
 
 from .test_contact_data import hf_data, row
+from .test_pipeline_external import _stub_services
 
 
 def test_subset_config_selects_only_one_edition_for_models_and_baselines():
@@ -38,7 +44,10 @@ def test_subset_config_selects_only_one_edition_for_models_and_baselines():
         "modules/evaluate/configs/datasets/contact_prediction_casp.yaml",
         "modules/evaluate/configs/predictors/contact_jacobian.yaml",
     ]
-    baseline_paths = [*paths, "modules/evaluate/configs/baselines/contact_prediction.yaml"]
+    baseline_paths = [
+        *paths,
+        "modules/evaluate/configs/baselines/contact_prediction.yaml",
+    ]
     overrides = [
         "steps.predict.test_subsets.casp14=null",
         "steps.predict.test_subsets.casp16=null",
@@ -105,27 +114,44 @@ def test_selection_preserves_development_and_all_chain_units():
 
 
 def test_generic_baselines_use_matching_subset_artifacts(tmp_path):
-    from modules.evaluate.src.contracts.config import BaselineRunConfig
-    from modules.evaluate.src.runners.baselines import run_baselines
     import polars as pl
 
-    data = DatasetDict({
-        "train": Dataset.from_dict({"id": ["train"], "sequence": ["ACDE"], "targets": [1]}),
-        "validation": Dataset.from_dict({"id": ["val"], "sequence": ["ACDE"], "targets": [0]}),
-        "test": Dataset.from_dict({
-            "id": ["a", "b"], "sequence": ["ACDE", "FGHI"],
-            "targets": [1, 0], "cohort": ["a", "b"],
-        }),
-    })
-    config = BaselineRunConfig.model_validate({
-        "workspace": {
-            "dataset_name": "toy", "dataset_repo_id": "toy",
-            "task_type": "sequence_classification", "target_type": "categorical",
-            "label_format": "scalar", "num_labels": 2, "base_path": str(tmp_path),
-        },
-        "baselines": {"names": ["majority_class"]},
-        "test_subsets": {"a": {"cohort": "a"}, "b": {"cohort": "b"}},
-    })
+    from modules.evaluate.src.config.evaluation import BaselineRunConfig
+    from modules.evaluate.src.runners.baselines import run_baselines
+
+    data = DatasetDict(
+        {
+            "train": Dataset.from_dict(
+                {"id": ["train"], "sequence": ["ACDE"], "targets": [1]}
+            ),
+            "validation": Dataset.from_dict(
+                {"id": ["val"], "sequence": ["ACDE"], "targets": [0]}
+            ),
+            "test": Dataset.from_dict(
+                {
+                    "id": ["a", "b"],
+                    "sequence": ["ACDE", "FGHI"],
+                    "targets": [1, 0],
+                    "cohort": ["a", "b"],
+                }
+            ),
+        }
+    )
+    config = BaselineRunConfig.model_validate(
+        {
+            "workspace": {
+                "dataset_name": "toy",
+                "dataset_repo_id": "toy",
+                "task_type": "sequence_classification",
+                "target_type": "categorical",
+                "label_format": "scalar",
+                "num_labels": 2,
+                "base_path": str(tmp_path),
+            },
+            "baselines": {"names": ["majority_class"]},
+            "test_subsets": {"a": {"cohort": "a"}, "b": {"cohort": "b"}},
+        }
+    )
     outputs = run_baselines(config, dataset=data)
     fit_directories = []
     for name, subset in select_test_subsets(data, config.test_subsets).items():
@@ -139,9 +165,9 @@ def test_generic_baselines_use_matching_subset_artifacts(tmp_path):
 def test_fitting_identity_changes_with_development_labels_not_test_selection(
     esm2_tokenizer,
 ):
-    from modules.evaluate.src.contracts.artifacts import ContactArtifacts
     from modules.evaluate.src.dataset.contact import tokenize_contact_chain
     from modules.evaluate.src.model.contact_attention import ContactAttentionModel
+
     from .test_contact_embedding import small_trunk
 
     raw = hf_data([row("c14"), row("c15", edition=15)])
@@ -149,27 +175,13 @@ def test_fitting_identity_changes_with_development_labels_not_test_selection(
     second = prepare_contact_dataset(raw, edition=15)
     assert first.fingerprint != second.fingerprint
     assert first.development_fingerprint == second.development_fingerprint
-    prepared = PreparedArtifacts(
-        model=ContactAttentionModel(small_trunk()),
-        tokenizer=esm2_tokenizer,
-        train_dataloader=None,
-        val_dataloader=None,
-        test_dataloader=None,
-        contact=ContactArtifacts(first),
-    )
-    task = get_task("contact_prediction")
-    identity = task.fitting_identity(prepared)
-    assert (
-        task.fitting_identity(replace(prepared, contact=ContactArtifacts(second)))
-        == identity
-    )
+    predictor = Predictor(ContactAttentionModel(small_trunk()), esm2_tokenizer)
+    identity = contact_fitting_identity(predictor, first, {})
+    assert contact_fitting_identity(predictor, second, {}) == identity
     changed_raw = hf_data([row("c14"), row("c15", edition=15)])
     changed_raw["train"] = Dataset.from_list([row("train", "train", positive_pairs=[])])
     changed = prepare_contact_dataset(changed_raw, edition=14)
-    assert (
-        task.fitting_identity(replace(prepared, contact=ContactArtifacts(changed)))
-        != identity
-    )
+    assert contact_fitting_identity(predictor, changed, {}) != identity
     tokens = [
         tokenize_contact_chain(chain, esm2_tokenizer) for chain in first.splits["train"]
     ]
@@ -218,82 +230,63 @@ def test_pipeline_fits_once_and_predicts_only_selected_subsets(
         }
     )
     calls = []
-    model, control = object(), object()
+    model = _stub_services(monkeypatch, [])
+    control = object()
 
-    class Prepare:
-        def __init__(self, _config):
-            pass
+    def prepare(config, workspace, model, tokenizer, *, dataset, **kwargs):
+        return (TrainingData(None, None), HeldOutData(dataset["test"]))
 
-        def run(self, workspace, *, dataset, **kwargs):
-            return PreparedArtifacts(
-                model=model,
-                tokenizer=None,
-                train_dataloader=None,
-                val_dataloader=None,
-                test_dataloader=dataset["test"],
-            )
+    def fit(**kwargs):
+        calls.append("fit")
+        return FitResult(model=kwargs["predictor"].model, seed=kwargs["seed"])
 
-        def prepare_test_subset(self, workspace, base, name, dataset, **kwargs):
-            return replace(base, test_dataloader=dataset["test"])
+    def controls(*args, **kwargs):
+        calls.append("control")
+        return ControlPredictors(random_trunk_model=control)
 
-    class Tune:
-        def __init__(self, *args, **kwargs):
-            pass
+    def predict(config, workspace, predictor, training, test, controls, **kwargs):
+        assert predictor.model is model
+        assert controls.random_trunk_model is control
+        assert list(test.test_dataloader["id"]) == [workspace.test_subset]
+        assert workspace.model_path == root.model_path
+        calls.append(workspace.test_subset)
+        return PredictOutput(
+            metadata=EvaluationMetadata(
+                model_name="m",
+                dataset_name="toy",
+                task_type="sequence_classification",
+                test_subset=workspace.test_subset,
+            ),
+            predictions=pl.DataFrame(),
+        )
 
-        def run(self, workspace, base, **kwargs):
-            calls.append("fit")
-            return base
-
-    class Controls(Tune):
-        def run(self, workspace, base, **kwargs):
-            calls.append("control")
-            base.controls.random_trunk_model = control
-            return base
-
-    class Predict(Tune):
-        def run(self, workspace, base, **kwargs):
-            assert base.model is model
-            assert base.controls.random_trunk_model is control
-            assert list(base.test_dataloader["id"]) == [workspace.test_subset]
-            assert workspace.model_path == root.model_path
-            calls.append(workspace.test_subset)
-            return PredictOutput(
-                metadata=EvaluationMetadata(
-                    model_name="m",
-                    dataset_name="toy",
-                    task_type="sequence_classification",
-                    test_subset=workspace.test_subset,
-                ),
-                predictions=pl.DataFrame(),
-            )
-
-    class Score(Tune):
-        def run(self, *args, **kwargs):
-            return ScoreOutput(scores={})
-
-    for name, cls in (
-        ("PrepareStep", Prepare),
-        ("TuneStep", Tune),
-        ("ControlsStep", Controls),
-        ("PredictStep", Predict),
-        ("ScoreStep", Score),
-    ):
-        monkeypatch.setattr(pipeline, name, cls)
-    root = get_evaluation_workspace(config.workspace, config.variant)
+    monkeypatch.setattr(flat, "prepare_training_data", prepare)
+    monkeypatch.setattr(
+        flat,
+        "prepare_test_subset",
+        lambda config, workspace, trunk, tokenizer, test, name, dataset, **kwargs: (
+            HeldOutData(dataset["test"])
+        ),
+    )
+    monkeypatch.setattr(flat, "fit_predictor", fit)
+    monkeypatch.setattr(flat, "prepare_control_predictors", controls)
+    monkeypatch.setattr(flat, "predict_test_set", predict)
+    root = get_evaluation_workspace(config.workspace, config.variant, seed=config.seed)
     accelerator = SimpleNamespace(
         is_main_process=True,
         num_processes=1,
         prepare=lambda value: value,
         wait_for_everyone=lambda: None,
+        device=torch.device("cpu"),
     )
-    result = pipeline.run_pipeline(config, root, accelerator, dataset=data)
+    result = pipeline.run_evaluation(
+        config, Runtime(torch.device("cpu"), accelerator), dataset=data
+    )
     assert calls == (["fit"] if mode == "tune_probe" else []) + ["control", *names]
     assert set(result.test_subsets) == set(names)
     for name in names:
         workspace = root.test_workspace(name)
         manifest = json.loads(workspace.run_manifest_path.read_text())
-        assert manifest["tests"][name]["evaluation"]["filters"] == {
-            "cohort": name
-        }
+        assert manifest["tests"][name]["evaluation"]["filters"] == {"cohort": name}
         assert manifest["tests"][name]["evaluation"]["status"] == "complete"
     assert not (root.run_root / "tests" / "c").exists()

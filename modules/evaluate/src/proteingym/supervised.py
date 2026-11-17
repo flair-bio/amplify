@@ -1,24 +1,4 @@
-"""Supervised per-assay evaluation: pool frozen-trunk embeddings, fit a linear
-probe per CV fold, evaluate out-of-fold predictions against held-out variants.
-
-Splits are either an official ProteinGym fold column (``fold_random_5``,
-``fold_modulo_5``, ``fold_contiguous_5``) sourced alongside the assay, or a
-freshly generated k-fold split when no official column is available/wanted.
-
-``probe_type="linear"`` reuses the main pipeline's ``sklearn_linear`` head
-(``model/heads.py``'s ``build_estimator``/``sweep_classical_head``: Ridge or
-LogisticRegression, standardized internally, with the same C/alpha task
-filtering used by ``TuneStep``) instead of a standalone implementation.
-``probe_type="mlp"`` is a two-layer ``Linear-GELU-Linear`` torch MLP trained
-by Adam (the same shape as ``EmbeddingProbeHead``'s projection+classifier),
-and ``probe_type="torch_linear"`` is a single ``torch.nn.Linear`` layer
-trained by Adam; both fit on pooled embeddings standardized (zero mean, unit
-variance) per fold so regularization strength is comparable across trunks
-with different embedding scales. Passing ``search_space`` sweeps a grid of
-probe hyperparameters, scored on an inner holdout carved out of each fold's
-training rows, then refits the winning hyperparameters on the fold's full
-training rows.
-"""
+"""ProteinGym supervised assay evaluation and fold-local probe fitting."""
 
 from __future__ import annotations
 
@@ -26,6 +6,7 @@ import logging
 from typing import Any, Literal, Sequence
 
 import numpy as np
+import polars as pl
 import torch
 from scipy.stats import spearmanr
 from sklearn.metrics import roc_auc_score
@@ -34,16 +15,33 @@ from sklearn.preprocessing import StandardScaler
 from torch import nn
 from transformers import PreTrainedTokenizerBase
 
+from modules.evaluate.src.artifacts.manifests import update_run_manifest
+from modules.evaluate.src.artifacts.workspace import (
+    get_evaluation_workspace,
+    reserve_run_outputs,
+)
+from modules.evaluate.src.config.shared import HeadType
+from modules.evaluate.src.model.classical import build_estimator
 from modules.evaluate.src.model.embeddings import pool_hidden_states
-from modules.evaluate.src.model.heads import (
-    HeadType,
-    build_estimator,
-    build_probe_layers,
-    sweep_classical_head,
+from modules.evaluate.src.model.factory import (
+    TORCH_DTYPES,
+    build_backbone,
+    load_tokenizer,
+)
+from modules.evaluate.src.model.heads import build_probe_layers
+from modules.evaluate.src.proteingym.aggregate import (
+    binarize_labels,
+    compute_assay_metric,
+)
+from modules.evaluate.src.proteingym.config import ProteinGymSupervisedConfig
+from modules.evaluate.src.proteingym.data import resolve_suite
+from modules.evaluate.src.proteingym.runner import AssayResult, run_assay_loop
+from modules.evaluate.src.runners.runtime import Runtime
+from modules.evaluate.src.trainers.classical import (
+    fit_candidates as sweep_classical_head,
 )
 
 logger = logging.getLogger(__name__)
-
 SplitStrategy = Literal[
     "fold_random_5",
     "fold_modulo_5",
@@ -53,19 +51,12 @@ SplitStrategy = Literal[
 ]
 Task = Literal["regression", "classification"]
 ProbeType = Literal["linear", "mlp", "torch_linear"]
-
-# The three official ProteinGym CV schemes, averaged equally per assay by the
-# official supervised leaderboard (performance_DMS_supervised_benchmarks.py).
 OFFICIAL_CV_SCHEMES: tuple[str, ...] = (
     "fold_random_5",
     "fold_modulo_5",
     "fold_contiguous_5",
 )
-
-# Inner holdout fraction carved out of a fold's training rows when tuning.
 _TUNING_VAL_FRACTION = 0.2
-
-
 _TORCH_PROBE_LOSS: dict[Task, Any] = {
     "regression": nn.functional.mse_loss,
     "classification": nn.functional.binary_cross_entropy_with_logits,
@@ -84,7 +75,7 @@ class _TorchProbe:
         self,
         task: Task,
         hidden_size: int | None = None,
-        lr: float = 1e-2,
+        lr: float = 0.01,
         epochs: int = 200,
         weight_decay: float = 0.0,
         seed: int = 0,
@@ -115,7 +106,6 @@ class _TorchProbe:
         return self
 
     def _build_model(self, input_dim: int) -> nn.Module:
-        # Same probe shape as EmbeddingProbeHead (model/heads.py).
         projection, classifier = build_probe_layers(input_dim, self.hidden_size, 1)
         return nn.Sequential(projection, classifier)
 
@@ -147,8 +137,6 @@ class _TorchProbe:
         return np.stack([1.0 - positive, positive], axis=1)
 
 
-# probe_type="linear" maps onto the pipeline's classical sklearn_linear head
-# (model/heads.py), which is Ridge/LogisticRegression under the hood.
 _LINEAR_HEAD_TYPE: HeadType = "sklearn_linear"
 _TASK_TYPE_BY_TASK: dict[Task, str] = {
     "regression": "sequence_regression",
@@ -212,7 +200,6 @@ def _fit_linear_probe(
         )
         estimator.fit(train_X, train_y)
         return estimator
-
     inner_train_X, inner_val_X, inner_train_y, inner_val_y = train_test_split(
         train_X,
         train_y,
@@ -261,7 +248,6 @@ def _fit_probe(
         return _fit_linear_probe(
             train_X, train_y, task, hyperparameters, search_space, seed
         )
-
     scaler = StandardScaler().fit(train_X)
     scaled_train_X = scaler.transform(train_X)
     if not search_space:
@@ -270,7 +256,6 @@ def _fit_probe(
         estimator = _make_probe(task, probe_type, **hyperparameters)
         estimator.fit(scaled_train_X, train_y)
         return _ScaledEstimator(scaler, estimator)
-
     inner_train_X, inner_val_X, inner_train_y, inner_val_y = train_test_split(
         scaled_train_X,
         train_y,
@@ -288,8 +273,7 @@ def _fit_probe(
         estimator.fit(inner_train_X, inner_train_y)
         score = _score_candidate(task, estimator, inner_val_X, inner_val_y)
         if score > best_score:
-            best_params, best_score = params, score
-
+            best_params, best_score = (params, score)
     if device is not None:
         best_params = {**best_params, "device": str(device)}
     best_estimator = _make_probe(task, probe_type, **best_params)
@@ -297,7 +281,6 @@ def _fit_probe(
     return _ScaledEstimator(scaler, best_estimator)
 
 
-@torch.no_grad()
 def pool_embeddings(
     model: torch.nn.Module,
     tokenizer: PreTrainedTokenizerBase,
@@ -319,7 +302,6 @@ def pool_embeddings(
         )
         input_ids = encoding["input_ids"].to(device)
         attention_mask = encoding["attention_mask"].to(device)
-
         hidden = model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -346,9 +328,7 @@ def resolve_folds(
         return folds
     if official_folds is None:
         raise ValueError(
-            f"Official split '{strategy}' requested but not present in the "
-            "sourced assay; re-source with the dms_substitutions track or use "
-            "split='custom_kfold'."
+            f"Official split '{strategy}' requested but not present in the sourced assay; re-source with the dms_substitutions track or use split='custom_kfold'."
         )
     return np.asarray(official_folds)
 
@@ -422,8 +402,7 @@ def run_seeded_split(
         raise ValueError("Seeded split must contain both train and test rows")
     if task == "classification" and len(np.unique(targets[train_mask])) < 2:
         raise ValueError(
-            "Seeded split's train rows contain only one class; cannot fit a "
-            "classification probe"
+            "Seeded split's train rows contain only one class; cannot fit a classification probe"
         )
     estimator = _fit_probe(
         embeddings[train_mask],
@@ -441,3 +420,145 @@ def run_seeded_split(
     else:
         predictions[test_mask] = estimator.predict_proba(embeddings[test_mask])[:, 1]
     return predictions
+
+
+def run_supervised(
+    config: ProteinGymSupervisedConfig, runtime: Runtime, *, overwrite: bool = False
+) -> dict[str, object]:
+    """Evaluate the benchmark using the application's shared runtime."""
+    if config.workspace is None:
+        return _run_supervised(config, runtime)
+    workspace = get_evaluation_workspace(
+        config.workspace,
+        variant=config.run_variant(config.model_dump()),
+        seed=config.seed,
+    )
+    settings = config.model_dump(
+        mode="json", exclude={"model_id", "data_dir", "data_repo_id", "output_dir"}
+    )
+    with reserve_run_outputs(workspace, settings, overwrite=overwrite):
+        resolved = config.model_copy(update={"data_dir": resolve_suite(config)})
+        inputs = {"model_id": resolved.model_id, "data_dir": str(resolved.data_dir)}
+        workspace.validate_experiment("inputs", inputs)
+        update_run_manifest(workspace.run_manifest_path, "inputs", inputs)
+        return _run_supervised(resolved, runtime)
+
+
+def _run_supervised(
+    config: ProteinGymSupervisedConfig, runtime: Runtime
+) -> dict[str, object]:
+    device = runtime.device
+    tokenizer = load_tokenizer(config.model_id)
+    model = (
+        build_backbone(
+            config.model_id,
+            **{
+                "torch_dtype": TORCH_DTYPES[config.dtype],
+                **(config.workspace.model_kwargs if config.workspace else {}),
+            },
+        )
+        .to(device)
+        .eval()
+    )
+
+    def score_assay(row: dict, assay: pl.DataFrame) -> np.ndarray | AssayResult:
+        has_score = "dms_score" in assay.columns
+        task: Task = "regression" if has_score else "classification"
+        targets = (
+            assay["dms_score"].to_numpy()
+            if has_score
+            else binarize_labels(assay["dms_score_bin"].to_numpy())
+        )
+        if not has_score and row.get("is_clinical"):
+            targets = 1 - targets
+        embeddings = pool_embeddings(
+            model,
+            tokenizer,
+            assay["mutated_sequence"].to_list(),
+            device=device,
+            batch_size=config.batch_size,
+            max_length=config.max_length,
+        )
+        if config.split == "seeded":
+            if "split" not in assay.columns:
+                raise ValueError(
+                    "split='seeded' requires sourced train/validation/test labels"
+                )
+            return run_seeded_split(
+                embeddings,
+                targets,
+                assay["split"].to_numpy(),
+                task=task,
+                probe_type=config.probe_type,
+                hyperparameters=config.probe_hyperparameters,
+                search_space=config.probe_search_space,
+                seed=config.seed,
+                device=device,
+            )
+        if config.split == "official_average":
+            schemes = ("fold_random_5",) if row.get("is_indel") else OFFICIAL_CV_SCHEMES
+            missing = [scheme for scheme in schemes if scheme not in assay.columns]
+            if missing:
+                raise ValueError(
+                    f"split='official_average' requires official fold columns {missing}; re-source the assay with the substitutions track"
+                )
+            metric_values = []
+            predictions_by_scheme = {}
+            for scheme in schemes:
+                predictions = run_cv(
+                    embeddings,
+                    targets,
+                    assay[scheme].to_numpy(),
+                    task=task,
+                    probe_type=config.probe_type,
+                    hyperparameters=config.probe_hyperparameters,
+                    search_space=config.probe_search_space,
+                    seed=config.seed,
+                    device=device,
+                )
+                _, value = compute_assay_metric(
+                    predictions,
+                    dms_scores=targets if has_score else None,
+                    dms_score_bin=targets if not has_score else None,
+                )
+                metric_values.append(value)
+                predictions_by_scheme[scheme] = predictions
+            mean_predictions = np.nanmean(
+                np.stack(list(predictions_by_scheme.values())), axis=0
+            )
+            return AssayResult(mean_predictions, float(np.nanmean(metric_values)))
+        official_folds = (
+            assay[config.split].to_numpy() if config.split in assay.columns else None
+        )
+        folds = resolve_folds(
+            assay.height,
+            official_folds,
+            config.split,
+            n_splits=config.custom_kfold_splits,
+            seed=config.seed,
+        )
+        return run_cv(
+            embeddings,
+            targets,
+            folds,
+            task=task,
+            probe_type=config.probe_type,
+            hyperparameters=config.probe_hyperparameters,
+            search_space=config.probe_search_space,
+            seed=config.seed,
+            device=device,
+        )
+
+    return run_assay_loop(
+        config.data_dir,
+        config.output_dir,
+        config.max_assays,
+        score_assay,
+        data_repo_id=config.data_repo_id,
+        force_download=config.force_download,
+        compute_uncertainty=config.compute_uncertainty,
+        n_bootstrap=config.n_bootstrap,
+        run_manifest_path=config.output_dir / "run_manifest.json"
+        if config.workspace is not None
+        else None,
+    )

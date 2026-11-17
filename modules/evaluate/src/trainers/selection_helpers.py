@@ -1,8 +1,4 @@
-"""Shared selection and optimizer utilities for fitting services.
-
-Optimizer/scheduler construction, trainable-parameter freezing, and
-checkpoint helpers used to train and search over probe hyperparameters.
-"""
+"""Shared optimization and candidate-selection primitives."""
 
 from __future__ import annotations
 
@@ -11,6 +7,7 @@ import logging
 import random
 from typing import Any, Literal, Sequence, TypeVar
 
+import numpy as np
 import torch
 from torch import nn
 from torch.optim import Optimizer
@@ -20,10 +17,6 @@ from transformers import get_scheduler
 from modules.evaluate.src.metrics.metrics import LOWER_IS_BETTER_METRICS
 
 logger = logging.getLogger(__name__)
-
-# Optimizer name -> torch.optim class. Covers the common cases used for
-# probing/fine-tuning; any additional constructor kwargs (e.g. momentum for
-# 'sgd', betas for 'adamw') can be passed via TuneConfig.optimizer_kwargs.
 OPTIMIZER_REGISTRY: dict[str, type[Optimizer]] = {
     "adamw": torch.optim.AdamW,
     "adam": torch.optim.Adam,
@@ -32,19 +25,16 @@ OPTIMIZER_REGISTRY: dict[str, type[Optimizer]] = {
     "adagrad": torch.optim.Adagrad,
     "adafactor": torch.optim.Adafactor,
 }
-
 TPE_MIN_STARTUP_TRIALS = 3
 TPE_MAX_STARTUP_TRIALS = 5
 TPE_STARTUP_TRIAL_DIVISOR = 3
 PRUNER_WARMUP_STEPS = 3
-
 SearchDirection = Literal["maximize", "minimize"]
 Candidate = TypeVar("Candidate")
 
 
 def resolve_search_direction(
-    metric_name: str,
-    configured_direction: SearchDirection | None,
+    metric_name: str, configured_direction: SearchDirection | None
 ) -> SearchDirection:
     """Choose a metric-appropriate search direction unless overridden."""
     if configured_direction is None:
@@ -73,10 +63,8 @@ def create_optuna_study(direction: SearchDirection, seed: int, n_trials: int) ->
         import optuna
     except ImportError as exc:
         raise ImportError(
-            "Optuna is required for search_pattern='bohb'. Install the "
-            "'evaluate' extra or select 'grid'/'random'."
+            "Optuna is required for search_pattern='bohb'. Install the 'evaluate' extra or select 'grid'/'random'."
         ) from exc
-
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     return optuna.create_study(
         direction=direction,
@@ -123,11 +111,10 @@ def split_decay_parameters(
     """
     decay_params: list[nn.Parameter] = []
     no_decay_params: list[nn.Parameter] = []
-    # Match pretraining, including norms loaded through HF's dynamic modules.
     decay_norm_weights = {
         id(module.weight)
         for module in model.modules()
-        if any(cls.__name__ == "ZeroCenteredRMSNorm" for cls in type(module).__mro__)
+        if any((cls.__name__ == "ZeroCenteredRMSNorm" for cls in type(module).__mro__))
     }
     for param in model.parameters():
         if not param.requires_grad:
@@ -136,7 +123,6 @@ def split_decay_parameters(
             no_decay_params.append(param)
         else:
             decay_params.append(param)
-
     param_groups = []
     if decay_params:
         param_groups.append({"params": decay_params, "weight_decay": weight_decay})
@@ -182,8 +168,7 @@ def load_checkpoint_state(model: nn.Module, state: dict[str, Any]) -> None:
     result = model.load_state_dict(state, strict=False)
     if result.unexpected_keys:
         raise RuntimeError(
-            f"Unexpected keys when restoring checkpointed state: "
-            f"{result.unexpected_keys}"
+            f"Unexpected keys when restoring checkpointed state: {result.unexpected_keys}"
         )
 
 
@@ -214,27 +199,34 @@ def configure_trainable_params(model: nn.Module, train_trunk: bool) -> None:
     relying on `id()`, preventing accidental freezing of tied head weights.
     """
     base_prefix = getattr(model, "base_model_prefix", None)
-
     if base_prefix is None:
         if train_trunk:
             logger.warning(
-                "Could not resolve a distinct trunk submodule via "
-                "model.base_model_prefix; leaving all parameters trainable "
-                "(mode='finetune' will have no effect)."
+                "Could not resolve a distinct trunk submodule via model.base_model_prefix; leaving all parameters trainable (mode='finetune' will have no effect)."
             )
         for param in model.parameters():
             param.requires_grad = True
         return
-
     for name, param in model.named_parameters():
         is_trunk = name == base_prefix or name.startswith(f"{base_prefix}.")
         param.requires_grad = train_trunk or not is_trunk
-
-    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    n_total = sum(p.numel() for p in model.parameters())
+    n_trainable = sum((p.numel() for p in model.parameters() if p.requires_grad))
+    n_total = sum((p.numel() for p in model.parameters()))
     logger.info(
         "Trainable parameters: %s/%s (train_trunk=%s)",
         f"{n_trainable:,}",
         f"{n_total:,}",
         train_trunk,
+    )
+
+
+def _log_seed_variance(metric_name: str, scores: list[float]) -> None:
+    mean, std = (float(np.mean(scores)), float(np.std(scores)))
+    logger.info(
+        "Seed variance (%d extra seeds, val %s): mean=%.4f std=%.4f scores=%s",
+        len(scores),
+        metric_name,
+        mean,
+        std,
+        scores,
     )

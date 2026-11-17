@@ -22,7 +22,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from torch.nn.utils.rnn import pad_sequence
 from transformers import PreTrainedTokenizerBase
 
-from modules.evaluate.src.tasks import TaskType, get_task
+from modules.evaluate.src.tasks import TaskType
+from modules.evaluate.src.tasks.registry import get_flat_task
 
 
 def unpack_packed(
@@ -89,7 +90,7 @@ class EvaluationCollator:
     ) -> None:
         self.tokenizer = tokenizer
         self.task_type = task_type
-        self.task = get_task(task_type)
+        self.task = get_flat_task(task_type)
         self.pad_to_multiple_of = config.pad_to_multiple_of
         self.packed = config.packed
         self.label_column = config.label_column

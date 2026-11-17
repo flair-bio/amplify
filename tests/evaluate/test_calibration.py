@@ -16,9 +16,9 @@ from modules.evaluate.scripts.dataset_sourcing.source_calibration import (
     build_calibration_frame,
     read_export,
 )
-from modules.evaluate.src.contracts.artifacts import EvaluationMetadata, PredictOutput
-from modules.evaluate.src.contracts.config import BaselineRunConfig, ScoreConfig
-from modules.evaluate.src.dataset.dataloader import tokenize_dataset
+from modules.evaluate.src.artifacts.results import EvaluationMetadata, PredictOutput
+from modules.evaluate.src.config.evaluation import BaselineRunConfig, ScoreConfig
+from modules.evaluate.src.dataset.tokenization import tokenize_dataset
 from modules.evaluate.src.metrics.bootstrap import id_groups
 from modules.evaluate.src.metrics.calibration_metrics import (
     crossfit_temperatures,

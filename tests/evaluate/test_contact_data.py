@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -11,34 +12,36 @@ import polars as pl
 import pytest
 from datasets import Dataset, DatasetDict, Features, List, Value
 
-from modules.evaluate.src.contracts.artifacts import (
-    ContactArtifacts,
+from modules.evaluate.src.artifacts.baselines import (
+    artifact_directory,
+    load_baseline_artifact,
+)
+from modules.evaluate.src.artifacts.predictions import persist_predictions
+from modules.evaluate.src.artifacts.reports import publish_structured_scores
+from modules.evaluate.src.artifacts.results import (
     ContactEvaluationMetadata,
     PredictOutput,
-    PreparedArtifacts,
 )
-from modules.evaluate.src.contracts.config import (
+from modules.evaluate.src.artifacts.workspace import get_evaluation_workspace
+from modules.evaluate.src.config.evaluation import (
     BaselineRunConfig,
-    EvaluationWorkspaceConfig,
     PredictConfig,
     ScoreConfig,
 )
-from modules.evaluate.src.dataset import contact, dataloader
-from modules.evaluate.src.dataset.baseline_data import (
-    artifact_directory,
-    contact_baseline_context,
-    load_baseline_artifact,
-)
+from modules.evaluate.src.config.shared import EvaluationWorkspaceConfig
+from modules.evaluate.src.dataset import contact, loading, tokenization
+from modules.evaluate.src.dataset.baseline_data import contact_baseline_context
 from modules.evaluate.src.dataset.contact import (
     candidate_pairs,
     load_contact_dataset,
     prepare_contact_dataset,
     tokenize_contact_chain,
 )
-from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
+from modules.evaluate.src.model.contact_prediction import predict_contact
+from modules.evaluate.src.model.controls import ControlPredictors
+from modules.evaluate.src.model.factory import Predictor
 from modules.evaluate.src.runners.baselines import run_baselines
-from modules.evaluate.src.steps.predict import PredictStep
-from modules.evaluate.src.steps.score import ScoreStep
+from modules.evaluate.src.tasks.contact_prediction import prediction_metadata, score
 
 FEATURES = Features(
     {
@@ -107,15 +110,46 @@ def prediction_inputs(dataset, predictor, tmp_path):
         variant="bilinear512-frozen_trunk",
         seed=0,
     )
-    prepared = PreparedArtifacts(
-        model=SimpleNamespace(predict=lambda chain, tokenizer: predictor(chain)),
-        tokenizer=None,
-        train_dataloader=None,
-        val_dataloader=None,
-        test_dataloader=None,
-        contact=ContactArtifacts(dataset=dataset),
+    prepared = SimpleNamespace(
+        predictor=Predictor(
+            SimpleNamespace(predict=lambda chain, tokenizer: predictor(chain)),
+            tokenizer=None,
+        ),
+        dataset=dataset,
     )
     return workspace, prepared
+
+
+def run_prediction(config, workspace, inputs, *, seed=0):
+    metadata = prediction_metadata(
+        {
+            "task_type": "contact_prediction",
+            "model_name": workspace.model_name,
+            "dataset_name": workspace.dataset_name,
+            "seed": seed,
+            "variant": workspace.variant,
+            "dataset_fingerprint": inputs.dataset.fingerprint,
+            "schema_version": inputs.dataset.schema_version,
+            "protocol_version": contact.PROTOCOL_VERSION,
+        }
+    )
+    result = predict_contact(
+        inputs.predictor, inputs.dataset, ControlPredictors(), metadata, config
+    )
+    if config.persist_to_disk:
+        persist_predictions(workspace, result, seed)
+    return result
+
+
+def run_scoring(config, workspace, *, predict_result, seed=0):
+    result = score(predict_result, config, seed=seed)
+    return publish_structured_scores(
+        config,
+        result=result,
+        output_dir=workspace.scores_path,
+        manifest_path=workspace.run_manifest_path,
+        baseline_references={},
+    )
 
 
 def test_local_loading_uses_only_parquet_and_preserves_rows(tmp_path, monkeypatch):
@@ -144,7 +178,7 @@ def test_local_loading_uses_only_parquet_and_preserves_rows(tmp_path, monkeypatc
 
 def test_hub_loading_requires_and_passes_commit_sha(monkeypatch):
     loader = Mock(return_value=hf_data([row()]))
-    monkeypatch.setattr(dataloader, "load_dataset", loader)
+    monkeypatch.setattr(loading, "load_dataset", loader)
     for revision in (None, "main", "v6"):
         with pytest.raises(ValueError, match="commit SHA"):
             load_contact_dataset("flair-bio/contact_prediction_casp", revision=revision)
@@ -235,7 +269,7 @@ def test_separation_prior_is_shared_and_scored_as_a_contact_baseline(tmp_path):
         schema_version=contact.SCHEMA_VERSION,
         protocol_version=contact.PROTOCOL_VERSION,
     )
-    scored = ScoreStep(ScoreConfig()).run(
+    scored = partial(run_scoring, ScoreConfig())(
         workspace,
         predict_result=PredictOutput(
             metadata=metadata,
@@ -300,19 +334,17 @@ def test_generic_loader_preserves_fixed_splits_but_generic_tokenization_rejects_
     monkeypatch, protein_tokenizer
 ):
     hf = hf_data([row()])
-    monkeypatch.setattr(
-        dataloader, "load_raw_evaluation_dataset", Mock(return_value=hf)
-    )
+    monkeypatch.setattr(loading, "load_raw_evaluation_dataset", Mock(return_value=hf))
     sha = "a" * 40
-    assert dataloader.load_evaluation_dataset("repo/data", revision=sha) is hf
+    assert loading.load_evaluation_dataset("repo/data", revision=sha) is hf
     with pytest.raises(ValueError, match="unchanged fixed"):
-        dataloader.load_evaluation_dataset(
+        loading.load_evaluation_dataset(
             "repo/data",
             revision=sha,
-            split=dataloader.DatasetSplitConfig(validation=None),
+            split=loading.DatasetSplitConfig(validation=None),
         )
-    with pytest.raises(ValueError, match="contact step methods"):
-        dataloader.tokenize_dataset(
+    with pytest.raises(ValueError, match="contact workflow"):
+        tokenization.tokenize_dataset(
             hf, protein_tokenizer, "contact_prediction", "sequence", "targets", 512
         )
 
@@ -402,14 +434,14 @@ def test_steps_share_full_chain_predictions_and_roundtrip_outputs(tmp_path):
         side_effect=lambda chain: np.zeros((len(chain.alignment.clean_sequence),) * 2)
     )
     workspace, prepared = prediction_inputs(dataset, predictor, tmp_path)
-    predictions = PredictStep(PredictConfig(controls=[])).run(
+    predictions = partial(run_prediction, PredictConfig(controls=[]))(
         workspace, prepared, seed=0
     )
     predictor.assert_called_once_with(dataset.splits["test"][0])
     assert predictions.predictions.height == len(rows)
     assert predictions.predictions_path is not None
     assert isinstance(predictions.metadata, ContactEvaluationMetadata)
-    scored = ScoreStep(ScoreConfig()).run(workspace, predict_result=predictions)
+    scored = partial(run_scoring, ScoreConfig())(workspace, predict_result=predictions)
     assert scored.unit_scores.height == 2 * len(rows)
     statuses = {
         (r["id"], r["minsep"]): r["status"] for r in scored.unit_scores.to_dicts()
@@ -424,30 +456,30 @@ def test_steps_share_full_chain_predictions_and_roundtrip_outputs(tmp_path):
 
 
 def test_deleted_chains_are_unscorable_and_bad_predictions_fail(tmp_path):
-    step = PredictStep(PredictConfig(controls=[], persist_to_disk=False))
+    step = partial(run_prediction, PredictConfig(controls=[], persist_to_disk=False))
     dataset = prepare_contact_dataset(
         hf_data([row(sequence="XBOUZJ", positive_pairs=[])])
     )
     predictor = Mock(side_effect=AssertionError("No retained residues"))
     workspace, prepared = prediction_inputs(dataset, predictor, tmp_path)
-    predictions = step.run(workspace, prepared, seed=0)
+    predictions = step(workspace, prepared, seed=0)
     predictor.assert_not_called()
-    result = ScoreStep(ScoreConfig()).run(workspace, predict_result=predictions)
+    result = partial(run_scoring, ScoreConfig())(workspace, predict_result=predictions)
     assert result.unit_scores["status"].to_list() == ["no_retained_members"] * 2
     dataset = prepare_contact_dataset(hf_data([row()]))
     workspace, prepared = prediction_inputs(
         dataset, lambda chain: np.zeros((10, 10)), tmp_path
     )
     with pytest.raises(ValueError, match="full retained-chain"):
-        step.run(workspace, prepared, seed=0)
+        step(workspace, prepared, seed=0)
     workspace, prepared = prediction_inputs(
         dataset, Mock(side_effect=MemoryError("too long")), tmp_path
     )
     with pytest.raises(MemoryError, match="too long"):
-        step.run(workspace, prepared, seed=0)
+        step(workspace, prepared, seed=0)
     with pytest.raises(ValueError, match="no fitted contact control"):
-        PredictStep(PredictConfig()).run(workspace, prepared, seed=0)
+        partial(run_prediction, PredictConfig())(workspace, prepared, seed=0)
     with pytest.raises(ValueError, match="complexes"):
-        ScoreStep(ScoreConfig(bootstrap_enabled=True)).run(
+        partial(run_scoring, ScoreConfig(bootstrap_enabled=True))(
             workspace, predict_result=predictions
         )

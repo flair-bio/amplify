@@ -1,4 +1,4 @@
-"""Config for the ProteinGym zero-shot and supervised scoring entry points."""
+"""Schemas for ProteinGym workflows selected by the shared evaluation CLI."""
 
 from __future__ import annotations
 
@@ -7,11 +7,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from modules.evaluate.src.contracts.config import (
+from modules.evaluate.src.artifacts.workspace import get_evaluation_workspace
+from modules.evaluate.src.config.shared import (
     EvaluationWorkspaceConfig,
+    WandbConfig,
     validate_directory_label,
 )
-from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 
 ProteinGymDtype = Literal["float32", "float16", "bfloat16"]
 
@@ -59,6 +60,7 @@ class ProteinGymRunConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    wandb: WandbConfig = Field(default_factory=WandbConfig)
     workspace: ProteinGymWorkspaceConfig | None = None
     model_id: str
     # Final fallback directory containing reference.parquet plus
@@ -119,8 +121,9 @@ class ProteinGymRunConfig(BaseModel):
 
 
 class ProteinGymZeroShotConfig(ProteinGymRunConfig):
-    """Config for ``run_proteingym_zero_shot.py``."""
+    """Configuration for the ProteinGym zero-shot workflow."""
 
+    workflow: Literal["proteingym_zero_shot"] = "proteingym_zero_shot"
     # Reference scorers run alongside the model, each written to its own
     # output_dir/baselines/<name>/ subfolder: "random" (chance-level sanity
     # check), "blosum62" (substitution-matrix baseline, substitutions only),
@@ -129,8 +132,9 @@ class ProteinGymZeroShotConfig(ProteinGymRunConfig):
 
 
 class ProteinGymSupervisedConfig(ProteinGymRunConfig):
-    """Config for ``run_proteingym_supervised.py``."""
+    """Configuration for the ProteinGym supervised workflow."""
 
+    workflow: Literal["proteingym_supervised"] = "proteingym_supervised"
     # Official fold columns are sourced with the assay; "seeded" uses the
     # persisted train/validation/test split generated during sourcing.
     # "official_average" averages all three official DMS schemes for

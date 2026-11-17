@@ -108,14 +108,14 @@ metrics.
 | UniProt GO | `GO_mf`, `GO_bp`, `GO_cc` | `sequence_multilabel_classification` | Protein-centric Fmax | Fmax, F1 |
 | InterPro | 7 `interpro_*` entry types | `sequence_multilabel_classification` | Macro-F1 | Macro-F1, multilabel MCC, average precision |
 | UniProt features | 12 `uniprot_*` residue overlays | `token_classification` | Macro-F1 | Macro-F1, accuracy |
-| UniProt ProtParam | `uniprot_protparams` (all 31 properties per run) | `sequence_regression` | Per-property R² | Per-property R², equal-weight mean R² |
+| UniProt ProtParam | `uniprot_protparams` (one selected property per run) | `sequence_regression` | R² | R², MSE |
 | AMPLIFY / UR100P | `uniprot_ur100p_test` | `pseudo_perplexity` | Not applicable | Pseudo-perplexity |
 | Any sequence dataset | MLM models with a mask token | `pseudo_perplexity` | Not applicable | Pseudo-perplexity |
 | omicMSA homolog profiles | `omicmsa_calibration` (test split only) | `calibration` | Not applicable | Calibration agreement for T, NT, high-NT |
-| ProteinGym | 4 assay tracks | Separate runners | Per-assay | Spearman (DMS), AUC (clinical) |
+| ProteinGym | 4 assay tracks | Assay-specific workflows | Per-assay | Spearman (DMS), AUC (clinical) |
 
-ProteinGym uses separate runners. The next section describes the active
-evaluation overlays.
+ProteinGym uses the shared `run_evaluate.py` entry point with its own workflow
+preset. The next section describes the active evaluation overlays.
 
 ---
 
@@ -668,8 +668,7 @@ hydrophobicity, be read back from the embedding?
 
 - **Readout:** one number per protein: one of 31 properties, such as
   amino-acid composition, molecular mass, isoelectric point, or GRAVY
-  (average   hydrophobicity). The overlay evaluates all 31 properties automatically.
-  Each property is a separate regression run,
+  (average hydrophobicity). Each invocation evaluates one selected property,
   selected and reported with R². The full list is in the
   [sourcing guide](dataset-sourcing.md#uniprot-protparam).
 - **Used for:** these properties guide purification and formulation (for
@@ -684,40 +683,26 @@ hydrophobicity, be read back from the embedding?
   with `sequence_regression` ·
   [Hub](https://huggingface.co/datasets/flair-bio/uniprot_protparams)
 
-Selecting the ProtParams overlay with the ordinary evaluation entry point
-trains all 31 probes sequentially and automatically publishes their
-equal-weight mean test R². No separate aggregation command is needed:
+The ProtParams overlay selects `length` by default. Choose another scalar
+property with `steps.prepare.label_column`; each invocation is one regression
+run:
 
 ```bash
 python -m modules.evaluate.src.run_evaluate \
     modules/evaluate/configs/config.yaml \
     modules/evaluate/configs/models/amplify_120m.yaml \
-    modules/evaluate/configs/datasets/uniprot_protparams.yaml
+    modules/evaluate/configs/datasets/uniprot_protparams.yaml \
+    steps.prepare.label_column=mass \
+    workspace.run_id=mass
 ```
 
-This behavior is configured through the dataset overlay's `multi_target`
-block (`target_columns`, `metric`, and summary-output settings), not a
-ProtParam-specific runner. Another dataset with multiple scalar targets can
-reuse the same orchestration by declaring its own block.
+Automatic multi-target expansion and mean-across-target reports are not
+supported. Use distinct run IDs for separate properties; compatible embedding
+caches remain reusable. `--overwrite` replaces only the selected run under the
+ordinary output-protection rules.
 
-The Mila launcher uses one job (array index 33) for the complete suite.
-Property runs use IDs `<run_id>-<property>` while retaining the dataset
-identity and compatible embedding caches. A restart skips completed properties
-only when their saved configuration matches. Matching incomplete runs are
-restarted from scratch; incompatible runs fail rather than being silently reused.
-`--overwrite` reruns all properties under the existing output-protection rules.
-
-The runner writes `scores.parquet` and `run_manifest.json` under
-`<model_root>/<variant>-<run_id>-summary/seed_<seed>/` only after all properties
-complete. The last row of `scores.parquet` contains the unweighted mean, labelled
-`unweighted_property_mean` with a null manifest path. The manifest also records
-the summary. Negative R² values are retained; targets are never pooled.
-Missing, nonfinite, or incompatible results prevent publication of a partial mean.
-Regression evaluation of `uniprot_protparams` always runs the complete property
-suite; selecting an individual property is not supported. The suite requires
-ordinary regression probes, without layerwise or additional test sets.
-Baseline-only runs also aggregate all properties in `scores.parquet` and their
-run manifest; non-regression evaluations continue to use their existing paths.
+Predictions, scores and the run manifest use the ordinary per-run workspace
+layout. Baseline-only runs also evaluate only the selected property.
 
 ### Pseudo-perplexity: UniProt UR100P test set
 

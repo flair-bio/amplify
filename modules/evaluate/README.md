@@ -94,7 +94,7 @@ uv run accelerate launch modules/evaluate/src/run_evaluate.py \
     modules/evaluate/configs/smoke_test.yaml
 ```
 
-If the run prints `=== Evaluation Pipeline Completed Successfully ===`, your
+If the run prints `Evaluation completed successfully.`, your
 environment and the Prepare, Predict, and Score steps work. To exercise training
 too, append a [probe overlay](#predictor-overlays-configspredictors) such as
 `modules/evaluate/configs/predictors/torch_linear.yaml`.
@@ -102,9 +102,9 @@ too, append a [probe overlay](#predictor-overlays-configspredictors) such as
 ### Contact prediction
 
 The replacement CASP14-16 benchmark consumes the schema-6.0 Hugging Face dataset
-only. `tasks/contact_prediction.py` owns its data/prediction/scoring orchestration;
-the existing step classes delegate to that handler and persist its artifacts.
-The data contract/alignment also live in that task module, shared extraction in
+only. `runners/contact.py` orchestrates preparation, fitting and evaluation.
+The data contract/alignment live in `dataset/contact.py`, prediction/scoring
+semantics in `tasks/contact_prediction.py`, shared extraction in
 `model/inference.py`, and ranking/aggregation in `metrics/contact_metrics.py`.
 The frozen-embedding, attention, and zero-shot categorical-Jacobian predictors
 run through the normal CLI and prediction entry point. CASP `random_trunk`
@@ -191,10 +191,10 @@ with one tokenizer token per canonical amino acid.
 
 `tokenize_contact_chain` supplies uncropped tokens and original-coordinate
 position IDs. Native AMPLIFY and ESM rotary computations preserve gaps and
-grow positional caches without rescaling. `PreparedArtifacts.contact_dataset`
-passes these chains to the standard `PredictStep.run()`, which delegates
-scientific processing to the task handler and uses ordinary prediction
-persistence. Pass a local `workspace.dataset_repo_id` directory and omit the revision for
+grow positional caches without rescaling. `runners/contact.py` passes the
+contact dataset and predictor explicitly to contact inference and pure task
+scoring, then uses shared artifact publishers. Pass a local
+`workspace.dataset_repo_id` directory and omit the revision for
 offline Parquet loading. No source coordinate files or source-manifest joins
 are used. The runtime dataset fingerprint covers the scoring rows and fixed
 development splits.
@@ -284,8 +284,8 @@ Dataset configuration selection is separate from
 The [dataset catalog](docs/datasets.md) lists each shipped overlay, what its
 labels represent, and which task uses it; [Dataset Sourcing](docs/dataset-sourcing.md)
 covers building and publishing them. ProteinGym uses per-assay variant tables and
-its own runners (`run_proteingym_zero_shot.py`, `run_proteingym_supervised.py`)
-instead of `run_evaluate.py`; see the [ProteinGym guide](docs/proteingym.md).
+the same `run_evaluate.py` entry point, with `workflow: proteingym_zero_shot`
+or `workflow: proteingym_supervised`; see the [ProteinGym guide](docs/proteingym.md).
 
 ---
 
@@ -599,7 +599,9 @@ builder parameters belong in `workspace.model_kwargs`.
 
 ### Config schema
 
-All config classes are Pydantic models composed into a single `EvaluationConfig` (`src/contracts/config.py`):
+Ordinary evaluation uses the Pydantic `EvaluationConfig` in
+[`src/config/evaluation.py`](src/config/evaluation.py), with shared settings in
+[`src/config/shared.py`](src/config/shared.py):
 
 ```
 EvaluationConfig
@@ -707,12 +709,12 @@ uv run accelerate launch --num_processes 1 \
 Packed mode supports frozen-trunk embedding caching. Sequence-level tasks keep
 one pooled embedding per source example; token tasks keep one row per valid
 token. Packed and padded embeddings use distinct cache keys. ProteinGym uses
-separate runners and is unaffected.
+assay-specific workflow functions and is unaffected.
 
-**Input:** `workspace.dataset_repo_id` (or `dataset_name`) and
-`workspace.model_repo_id` (or `model_name`).
-**Output:** in-memory `PreparedArtifacts` containing the tokenizer, model, and
-dataloaders.
+**Input:** a workspace, explicitly constructed model/tokenizer and dataset source.
+**Output:** separate `TrainingData` and `TestData` records containing loaders,
+aligned IDs and cache/provenance metadata. The workflow retains model resources
+in `Predictor`.
 
 ---
 
@@ -734,7 +736,7 @@ dataloaders.
 | `warmup_ratio` | `0.06` | Fraction of total training steps used for LR warmup |
 | `max_grad_norm` | `1.0` | Gradient clipping norm |
 | `accumulation_steps` | `1` | Batches accumulated per optimizer step |
-| `batch_size` | `128` | Cached-embedding probe batch size; set to `null` to use the PrepareStep loader size |
+| `batch_size` | `128` | Cached-embedding probe batch size; set to `null` to use the preparation loader size |
 | `standardize_features` | `true` | Standardize ordinary cached MLP/Torch linear inputs with training-set statistics; layerwise probing uses its own setting |
 | `early_stopping_patience` | `5` | Stop early after this many epochs with no validation improvement |
 | `optimizer` | `adamw` | One of `adamw`, `adam`, `sgd`, `rmsprop`, `adagrad`, `adafactor` |
@@ -828,12 +830,13 @@ supervised probes retain their existing preprocessing.
 Cached validation features stay on the device across epochs, and validation
 inference skips loss computation.
 
-**Input:** `PreparedArtifacts` from the Prepare step (or a resumed checkpoint)
-**Output:** in-memory updated `PreparedArtifacts.model`; `<run>/model/` on disk when `save_best_model=true`
+**Input:** `Predictor`, `TrainingData`, fitting settings and the shared runtime.
+**Output:** `FitResult` with the selected model and fitting provenance;
+the workflow publishes `<run>/model/` when `save_best_model=true`.
 
 Contact checkpoints save the trunk and tokenizer alongside `contact_head.pt`
 and `contact_config.json`. Reload them with
-`get_task("contact_prediction").load_finetuned_model(path)`.
+`model.contact_model.load_contact_model(path)`.
 
 ---
 
@@ -895,7 +898,7 @@ uses the searched batch size by default. With HPO disabled, it uses
 `steps.tune.batch_size`, falling back to the prepared loader batch size when
 null. Embedding extraction has its own `steps.prepare.embedding_batch_size` setting.
 
-**Input:** `PreparedArtifacts` (trained model + test dataloader) from Prepare/Tune
+**Input:** `Predictor`, one `TestData` view and the prepared `ControlPredictors`.
 **Output:** `<run>/predictions.parquet` and `<run>/controls/<control>/predictions.parquet`; settings and control paths are recorded in `<run>/run_manifest.json`'s "predict" section.
 
 ---
@@ -905,8 +908,8 @@ null. Embedding extraction has its own `steps.prepare.embedding_batch_size` sett
 All tasks implement `score(predictions, config, seed=...)` without filesystem
 access. Tasks select metrics, aggregation and supported uncertainty methods;
 `metrics/scoring.py` supplies flat-task scoring and paired statistical analysis.
-`ScoreStep` loads saved model predictions, invokes the task scoring contract,
-then publishes standalone model scores. It does not load or compare shared
+The workflow passes in-memory predictions to the task scoring contract,
+then publishes model scores through `artifacts/reports.py`. It does not load or compare shared
 baselines; their independent score reports are published by `--baselines`.
 
 **Purpose:** Compute task-specific metrics from the Predict step's output and, optionally, bootstrap confidence intervals for those metrics plus a statistical comparison between the trained model and each configured control condition, to quantify how much of its performance is attributable to learning from the data rather than model/data artifacts.
@@ -955,7 +958,7 @@ intervals describe the paired differences, not standalone control-score interval
 
 ### Output disk layout
 
-`get_evaluation_workspace()` (in [`src/dataset/workspace.py`](src/dataset/workspace.py))
+`get_evaluation_workspace()` (in [`src/artifacts/workspace.py`](src/artifacts/workspace.py))
 groups outputs by **benchmark root -> task -> dataset -> baseline/model -> run**:
 
 ```
@@ -1245,50 +1248,56 @@ obsolete standalone `categorical_jacobian` task has been removed.
 ```
 modules/evaluate/
 ├── README.md                        ← this file
-├── docs/                            ← controls, dataset catalog, dataset sourcing, ProteinGym guides
+├── docs/                            ← guides and the refactor implementation plan
 ├── configs/                         ← base config + overlays; see Config files above
 ├── scripts/dataset_sourcing/        ← sourcing entry points; reusable helpers in shared/ (docs/dataset-sourcing.md)
 └── src/
-    ├── run_evaluate.py              ← CLI entry point: runs the stage lifecycle
-    ├── run_proteingym_*.py          ← ProteinGym zero-shot and supervised runners
-    ├── contracts/                   ← configuration/loading/validation and typed handoffs
-    ├── runners/                     ← shared step pipeline
-    ├── dataset/                     ← loading/alignment, feature datasets/cache, baseline artifacts, workspaces
-    ├── proteingym/                  ← ProteinGym sourcing, baselines, scoring
-    ├── model/                       ← architectures, extraction, inference, weight ablations
-    ├── trainers/                    ← selection/HPO/refit and Torch/classical/contact/layerwise fitting
-    ├── steps/                       ← stage lifecycle, cache access and publication
-    ├── tasks/                       ← scientific preparation/fitting/inference/scoring and capabilities
-    ├── metrics/                     ← scoring, hierarchical aggregation, bootstrap/comparisons, tables
-    └── utils/                       ← storage, I/O, seeds, tracking, amino acids;
-                                       narrow ProteinGym pooling compatibility export
+    ├── __init__.py                  ← package marker
+    ├── run_evaluate.py              ← sole CLI: parse, load, initialize runtime, dispatch
+    ├── config/                      ← shared/evaluation schemas, loading, validation
+    ├── runners/                     ← runtime setup, evaluation dispatch, flat/contact lifecycles, baselines
+    ├── artifacts/                   ← result records, workspaces, locks, caches, checkpoints, publication
+    ├── dataset/                     ← loading, tokenization, preparation, typed data, batching
+    ├── model/                       ← factories, architectures, extraction and prediction
+    ├── trainers/                    ← functional selection, HPO, refit and fitting
+    ├── controls/                    ← independent control fitting, state and inference
+    ├── tasks/                       ← labels, observations, metrics and scientific protocols
+    ├── proteingym/                  ← assay data, folds, mutation scoring and aggregation
+    ├── metrics/                     ← scoring, aggregation, bootstrap/comparisons, pure tables
+    └── utils/                       ← seeds, tracking, amino-acid constants
 ```
 
 Shared config loading helpers live in `modules/core/utils/config_loader.py`.
+Runtime setup lives in `runners/runtime.py`; data-only result records live in
+`artifacts/results.py`. See the [refactor plan](docs/REFACTOR_PLAN.md) for the
+design rationale.
 
 ### Pipeline Architecture & Distributed Execution
 
-The runner chains `PrepareStep`, optional `TuneStep`, `ControlsStep`,
-`PredictStep` and `ScoreStep`:
+`run_evaluate.py` dispatches ordinary, baseline-only, ProteinGym supervised and
+ProteinGym zero-shot runs. There are no Python step classes. The YAML `steps.*`
+settings and the preparation/fitting/prediction/scoring names remain unchanged.
 
-- **Prepare → Tune → Predict** share an in-memory `PreparedArtifacts` (`contracts/artifacts.py`). Execution-specific state lives in `embedding`, `layerwise`, or `contact` payloads; incompatible contact/loader combinations fail at construction. The embedding backend retains the frozen trunk and token loaders. Fitting services return `FitResult`; the stage owns publication. Independently fitted random-trunk probes reuse those services without nested stages.
-- **Score** runs on rank 0 only, as a plain CPU step. `run_evaluate.py` passes it the in-memory `PredictOutput`; without one, it rebuilds predictions from `run_manifest.json` and the parquet files it lists, so scoring can be rerun standalone.
-- **Controls** owns independent cached, layerwise and task-specific control
-  preparation/fitting. Tune fits only the primary predictor. The control stage
-  shares existing cache/trainer/publication APIs without nested training runs;
-  Predict retains shared extraction for inference-only ablations.
-- **Tasks** coordinate scientific preparation, trainer selection, observations
-  and scoring. Contact declares development feature requests; Prepare
-  materializes/caches them before Tune invokes task fitting. Tasks never receive
-  workspace objects or manage cache paths, distributed lifecycle or publication.
-  Fixed CASP/predictor validation belongs to `ContactPredictionTask.validate_config`.
-  Independent control preparation runs even in `evaluate_as_is`.
-  The run manifest's `score` section includes primary and control metric summaries
-  with CASP settings and paths to aggregate/unit Parquet files. Contact bootstrap
-  is unavailable until complex-level resampling is implemented.
-- **Results** use `PipelineResult.evaluations`: records carrying the workspace,
-  prediction metadata, and optional score. The original layer-keyed
-  `predictions` and `scores` properties remain compatibility views.
+`runners/evaluate.py` reserves all destinations before model work and selects
+the flat or fixed-protocol contact workflow. The flat workflow constructs a
+`Predictor` (live model, tokenizer and optional frozen trunk), prepares separate
+`TrainingData` and `TestData`, fits the primary model and controls once, then
+reuses them across test subsets and external test sets. `ControlPredictors`
+owns independent fitted control models; data records do not own models.
+
+Trainers are functions returning `FitResult`. Flat task objects define label
+semantics, observations and pure scoring; they do not construct models, select
+trainers or publish files. Model factories and workflow functions make those
+choices explicitly. Contact uses domain functions and its own workflow rather
+than pretending its full-chain data are ordinary flat loaders.
+
+Only rank zero scores gathered flat predictions and publishes results.
+`artifacts/` contains shared result records and owns filesystem effects.
+Constructing result records performs no I/O; metrics operate on arrays and tables.
+`PipelineResult.evaluations` contains workspace/prediction/score records.
+ProteinGym retains assay-specific protocols while sharing configuration
+dispatch, runtime, model factories, estimator fitting and artifact publication.
+Contact bootstrap remains unavailable until complex-level resampling exists.
 
 Cache and result files publish through unique same-directory temporary files
 and atomic replacement. Independent contact-feature/baseline jobs coordinate
@@ -1308,49 +1317,29 @@ and FP32 MLM heads without replacing `forward`.
 
 #### Distributed execution (`accelerate`) patterns
 
-Under `accelerate launch`, several processes (ranks) run the same code, usually one per GPU. These patterns recur across stages and `trainers/selection.py`, `trainers/torch.py`, and `trainers/selection_helpers.py`:
+Under `accelerate launch`, several processes (ranks) run the same code, usually one per GPU. These patterns recur across workflows and `trainers/selection.py`, `trainers/torch.py`, and `trainers/selection_helpers.py`:
 
-1. **Every rank must reach every collective call.** `accelerator.gather_for_metrics()`, `broadcast()`, and `broadcast_object_list()` are collective operations: every process must call them, in the same order, or the ranks that do call them hang forever waiting for the ones that don't. So a branch that looks like it should be gated on `if accelerator.is_main_process:` (e.g. "only build this control's model") often *can't* be, if anything inside it issues a collective call. `ControlBuilder.build`'s docstring shows a branch that is deliberately *not* wrapped in error handling for this reason.
+1. **Every rank must reach every collective call.** `accelerator.gather_for_metrics()`, `broadcast()`, and `broadcast_object_list()` are collective operations: every process must call them in the same order. Control preparation and checkpoint state gathering run on all ranks; only publication is gated on `is_main_process`.
 2. **Decide once on rank 0, then broadcast the decision.** For a choice that must be identical on every rank (e.g. "does a cached file exist," "should this HPO trial be pruned"), only rank 0 evaluates the condition; the boolean is wrapped in a tensor and sent to every rank via `broadcast(..., from_process=0)` before anyone branches on it. Letting each rank decide independently can split them, because filesystem state, floating-point rounding, or the Optuna `trial` object (which exists only on rank 0) can differ.
-3. **Freeze/unfreeze parameters *before* `accelerator.prepare()`, never after.** Changing `requires_grad` on a model already wrapped for DDP leaves its gradient-reduction buckets built around the wrong parameter set. `configure_trainable_params()` always runs before `accelerator.prepare(model)` in `TuneStep`.
+3. **Freeze/unfreeze parameters *before* `accelerator.prepare()`, never after.** Changing `requires_grad` on a model already wrapped for DDP leaves its gradient-reduction buckets built around the wrong parameter set. Fitting configures trainable parameters before wrapping the model.
 4. **Classical probes fit identically on every rank.** Each rank holds the full gathered training embeddings and fits the estimator with the same seed, so no live sklearn object has to be broadcast; only rank 0 saves it.
 
 Before adding a control condition, training-loop branch, or cross-rank decision,
-inspect collectives in the existing stage and trainer implementation.
+inspect collectives in the existing workflow and trainer implementation.
 
 ### Adding a Task Type
 
-Every step (`prepare`/`tune`/`predict`/`score`) is task-agnostic: it looks up a
-`TaskHandler` for `workspace.task_type` via `modules.evaluate.src.tasks.get_task`
-and delegates all task-specific behavior to it. Adding a new task type means
-adding one handler module, not editing the steps.
-
-1. Create `modules/evaluate/src/tasks/<your_task>.py` with a class that
-   subclasses `FlatMetricsTask` (or `StructuredTask` for structured scoring), sets
-   `name` to the `task_type` string, and is
-   decorated with `@register_task`. Override only what differs from the
-   defaults in `TaskHandler` (see its docstrings): typically
-   `auto_model_class`/`build_model`, `label_dtype`/`collate_labels`,
-   `extract_predictions`/`split_batch_rows`, and `metrics`/`default_metric_names`.
-   `name`, `auto_model_class` (unless `build_model` is overridden), and at
-   least one metric/`default_metric_names` entry are required; a handler
-   missing one fails at import time, not at first use.
-   Tasks that expand one source example into several tokenized rows (e.g.
-   one row per masked residue) override `expand_tokenized_example`; tasks
-   whose dataset overlay has no real label column set
-   `requires_source_labels = False` so `tokenize_dataset` doesn't require one.
-2. Import the new module from `modules/evaluate/src/tasks/__init__.py` so it
-   self-registers.
-3. Add a task config under `modules/evaluate/configs/tasks/`, and declare the
-   accepted dataset target types and label formats on the handler.
-   If the head size comes from `workspace.num_labels` (classification-style
-   heads), also override `validate_num_labels()` to check it against the labels
-   actually present in the dataset (see `sequence_classification.py`/
-   `token_classification.py`). This catches a wrong `num_labels` before the
-   head is built, instead of as a cryptic index-out-of-bounds error in training.
-4. Add focused tests for task-specific behavior. `tests/evaluate/test_tasks.py`
-   is parametrized over every registered task, so the new handler is also
-   exercised by the shared contract suite automatically.
+1. Add `tasks/<your_task>.py` with a narrow `FlatTask` subclass defining label
+   formats, observations, supported controls/baselines and metrics. Override
+   alignment, collation, expansion or label validation only when necessary.
+2. Add its class name to the explicit `_TASKS` mapping in `tasks/registry.py`.
+   Modules are imported lazily; there are no registration decorators or eager
+   imports in `tasks/__init__.py`.
+3. Add a task overlay in `configs/tasks/`. If its model construction differs
+   from existing tasks, extend `model/factory.py` explicitly. A genuinely
+   different execution protocol should have workflow functions, not task hooks
+   that construct models or call trainers.
+4. Exercise the task's scientific behavior and its applicable workflow.
 
 `contact_prediction` supplies the structured scoring contract: original-coordinate
 units, fixed CASP protocols and hierarchical aggregation. Dataset preparation
@@ -1363,11 +1352,6 @@ The `categorical_jacobian` predictor reuses the contact label and metric
 contract but replaces a fitted head with the frozen MLM; see
 [Categorical-Jacobian contact prediction](#categorical-jacobian-contact-prediction).
 
-Declare supported heads, controls, modes and data behavior on the task. Reuse
-existing services where possible. A genuinely new execution strategy may require
-explicit stage selection; do not introduce task lifecycle hooks or callbacks
-into stages from trainers.
-
 #### Minimal example
 
 The smallest possible handler, a sequence-level classification task scored
@@ -1375,23 +1359,20 @@ only by accuracy, is roughly:
 
 ```python
 # modules/evaluate/src/tasks/my_task.py
-from transformers import AutoModelForSequenceClassification
-
 from modules.evaluate.src.metrics import metrics
-from modules.evaluate.src.tasks.base import FlatMetricsTask
-from modules.evaluate.src.tasks.registry import register_task
+from modules.evaluate.src.tasks.base import FlatTask
 
 
-@register_task
-class MyTask(FlatMetricsTask):
+class MyTask(FlatTask):
     name = "my_task"
-    auto_model_class = AutoModelForSequenceClassification
+    accepted_target_types = frozenset({"categorical"})
+    accepted_label_formats = frozenset({"scalar"})
     metrics = {"accuracy": metrics.accuracy}
     default_metric_names = ("accuracy",)
 ```
 
-Then add `from modules.evaluate.src.tasks import my_task  # noqa: F401` to
-`modules/evaluate/src/tasks/__init__.py`. See
+Then add `"my_task": "MyTask"` to `_TASKS` in `tasks/registry.py`, and select
+the appropriate model constructor in `model/factory.py`. See
 [`sequence_classification.py`](src/tasks/sequence_classification.py) for a
 slightly fuller real example, and
 [`token_classification.py`](src/tasks/token_classification.py) for one that

@@ -6,9 +6,9 @@ from accelerate import Accelerator
 from datasets import Dataset, DatasetDict
 from transformers import EsmForMaskedLM
 
-from modules.evaluate.src.contracts.config import EvaluationConfig
-from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
-from modules.evaluate.src.runners.pipeline import run_pipeline
+from modules.evaluate.src.config.evaluation import EvaluationConfig
+from modules.evaluate.src.runners.evaluate import run_evaluation
+from modules.evaluate.src.runners.runtime import Runtime
 from modules.evaluate.src.tasks.sequence_regression import SequenceRegressionTask
 from modules.evaluate.src.utils.amino_acids import CANONICAL_AMINO_ACIDS
 from modules.pretrain.src.model.modeling_amplify import (
@@ -72,19 +72,33 @@ def test_task_pipeline_roundtrip(
     validation_group_column = "validation_family" if group_column is not None else None
     validation_groups_seen = []
     if group_column is not None:
-        dataset["test"] = dataset["test"].add_column(
-            "id", ["original-0", "original-1", "original-2", "original-3"],
-        ).add_column(group_column, [0, 0, 1, 1])
-        dataset["validation"] = dataset["validation"].add_column(
-            "id", ["val-0", "val-1", "val-2", "val-3"],
-        ).add_column(validation_group_column, [10, 10, 20, 20])
+        dataset["test"] = (
+            dataset["test"]
+            .add_column(
+                "id",
+                ["original-0", "original-1", "original-2", "original-3"],
+            )
+            .add_column(group_column, [0, 0, 1, 1])
+        )
+        dataset["validation"] = (
+            dataset["validation"]
+            .add_column(
+                "id",
+                ["val-0", "val-1", "val-2", "val-3"],
+            )
+            .add_column(validation_group_column, [10, 10, 20, 20])
+        )
         compute_grouped = SequenceRegressionTask.compute_grouped_metrics
 
         def record_grouped(self, predictions, labels, group_ids, *args, **kwargs):
             validation_groups_seen.append(group_ids)
-            return compute_grouped(self, predictions, labels, group_ids, *args, **kwargs)
+            return compute_grouped(
+                self, predictions, labels, group_ids, *args, **kwargs
+            )
 
-        monkeypatch.setattr(SequenceRegressionTask, "compute_grouped_metrics", record_grouped)
+        monkeypatch.setattr(
+            SequenceRegressionTask, "compute_grouped_metrics", record_grouped
+        )
     label_format = {
         "token_classification": "per_token",
         "sequence_multilabel_classification": "multilabel",
@@ -134,15 +148,18 @@ def test_task_pipeline_roundtrip(
                     },
                 },
                 "predict": {"controls": ["random_trunk"]},
-                "score": {"metrics": [metric], "bootstrap_enabled": False,
-                          "group_column": group_column},
+                "score": {
+                    "metrics": [metric],
+                    "bootstrap_enabled": False,
+                    "group_column": group_column,
+                },
             },
         }
     )
-    workspace = get_evaluation_workspace(
-        config.workspace, config.variant, seed=config.seed
+    accelerator = Accelerator(cpu=True)
+    result = run_evaluation(
+        config, Runtime(accelerator.device, accelerator), dataset=dataset
     )
-    result = run_pipeline(config, workspace, Accelerator(cpu=True), dataset=dataset)
     prediction = result.predictions[None]
     assert prediction.predictions.height > 0
     assert set(prediction.controls) == {"random_trunk"}

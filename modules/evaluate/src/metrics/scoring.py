@@ -12,12 +12,12 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import polars as pl
 
-from modules.evaluate.src.contracts.artifacts import (
+from modules.evaluate.src.artifacts.results import (
     ConfidenceInterval,
     PredictOutput,
     ScoreOutput,
 )
-from modules.evaluate.src.contracts.config import ScoreConfig
+from modules.evaluate.src.config.evaluation import ScoreConfig
 from modules.evaluate.src.metrics.bootstrap import (
     as_indexable_array,
     bootstrap_confusion_scores,
@@ -37,13 +37,13 @@ from modules.evaluate.src.metrics.comparisons import (
 from modules.evaluate.src.metrics.tables import build_long_df
 
 if TYPE_CHECKING:
-    from modules.evaluate.src.tasks.base import FlatMetricsTask
+    from modules.evaluate.src.tasks.base import FlatTask
 
 logger = logging.getLogger(__name__)
 
 
 def score_flat(
-    task: FlatMetricsTask,
+    task: FlatTask,
     predict_result: PredictOutput,
     config: ScoreConfig,
     *,
@@ -59,7 +59,7 @@ def score_flat(
     task, predict_result = task.prepare_scoring(predict_result, config)
     if predict_result.predictions.is_empty():
         raise ValueError(
-            "ScoreStep requires PredictOutput.predictions to be "
+            "scoring requires PredictOutput.predictions to be "
             "populated (run the Predict step before scoring)."
         )
     predictions_df = predict_result.predictions
@@ -147,7 +147,7 @@ def score_flat(
 
 
 def _bootstrap(
-    task: FlatMetricsTask,
+    task: FlatTask,
     config: ScoreConfig,
     predict_result: PredictOutput,
     predictions_col: list[Any],
@@ -337,7 +337,7 @@ def _bootstrap(
 
 
 def compare_layer_scores(
-    task: FlatMetricsTask,
+    task: FlatTask,
     config: ScoreConfig,
     layer_predictions: dict[int, PredictOutput],
     *,

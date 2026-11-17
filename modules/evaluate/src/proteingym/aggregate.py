@@ -283,3 +283,52 @@ def aggregate_proteingym_metrics(
         if column in assay_results.columns
         and assay_results[column].drop_nulls().len() > 0
     }
+
+
+def build_workspace_scores(
+    assays: pl.DataFrame, summary: dict, condition: str
+) -> pl.DataFrame:
+    """Keep assay metrics distinct from the hierarchy's function/overall means."""
+    rows = []
+    for assay in assays.iter_rows(named=True):
+        metrics = {
+            name: assay[name]
+            for name in ("spearman", "auc", "mcc", "ndcg", "top_recall")
+            if name in assay
+        }
+        metrics[assay["metric"]] = assay["score"]
+        for metric, value in metrics.items():
+            rows.append(
+                {
+                    "scope": "assay",
+                    "dms_id": assay["dms_id"],
+                    "uniprot_id": assay["uniprot_id"],
+                    "coarse_selection_type": assay["coarse_selection_type"],
+                    "num_variants": assay["num_variants"],
+                    "metric": metric,
+                    "control": condition,
+                    "value": value,
+                }
+            )
+    primary_metric = summary.get("metric", assays["metric"][0])
+    aggregates = {**summary.get("metrics", {}), primary_metric: summary}
+    for metric, aggregate in aggregates.items():
+        rows.append(
+            {
+                "scope": "overall",
+                "metric": metric,
+                "control": condition,
+                "value": aggregate["overall"],
+            }
+        )
+        for function, value in aggregate.get("per_category", {}).items():
+            rows.append(
+                {
+                    "scope": "function",
+                    "coarse_selection_type": function,
+                    "metric": metric,
+                    "control": condition,
+                    "value": value,
+                }
+            )
+    return pl.from_dicts(rows, infer_schema_length=None)

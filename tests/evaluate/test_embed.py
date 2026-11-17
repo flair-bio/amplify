@@ -1,49 +1,43 @@
-"""Tests for frozen-trunk extraction, feature loaders, and representation caches.
-
-Unit tests cover the storage/key primitives in isolation; the integration
-tests reuse ``PrepareStep`` via ``tests.evaluate.test_prepare._run_prepare``
-(offline-mocked tokenizer/dataset/model, same as the rest of test_prepare.py)
-to verify the end-to-end cache-enabled Prepare flow with real tiny models.
-"""
+"""Frozen-trunk feature extraction, loader reuse, and representation caches."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 from accelerate import Accelerator
 from accelerate.data_loader import BatchSamplerShard
 from torch import nn
 from torch.utils.data import DataLoader
 
-from modules.evaluate.src.contracts.config import EvaluationConfig, LayerwiseConfig
-from modules.evaluate.src.contracts.config import EvaluationWorkspaceConfig
-from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
-from modules.evaluate.src.model.heads import EmbeddingProbeHead
-from modules.evaluate.src.model.layerwise import LayerwiseProbeModel, resolve_layers
-from modules.evaluate.src.model.layerwise import run_layerwise_conditions
-from modules.evaluate.src.dataset.embedding_cache import EmbeddingCache, embedding_cache_key
-from modules.evaluate.src.dataset.embeddings import (
-    EmbeddingDataset,
-    build_embedding_dataloaders,
-    embedding_collate_fn,
+from modules.evaluate.src.artifacts.cache import EmbeddingCache, embedding_cache_key
+from modules.evaluate.src.artifacts.workspace import get_evaluation_workspace
+from modules.evaluate.src.config.evaluation import EvaluationConfig, LayerwiseConfig
+from modules.evaluate.src.config.shared import (
+    EmbeddingCacheConfig,
+    EvaluationWorkspaceConfig,
 )
+from modules.evaluate.src.dataset.embeddings import build_embedding_dataloaders
 from modules.evaluate.src.model.embeddings import (
     extract_embeddings,
     pool_hidden_state_layers,
     pool_hidden_states,
     residue_attention_mask,
 )
-from modules.evaluate.src.contracts.config import EmbeddingCacheConfig
+from modules.evaluate.src.model.heads import EmbeddingProbeHead
+from modules.evaluate.src.model.layerwise import (
+    LayerwiseProbeModel,
+    resolve_layers,
+    run_layerwise_conditions,
+)
 
 from .test_prepare import _run_prepare
 
-import pytest
-
 
 def test_tensor_cache_reuses_identity_and_refreshes(tmp_path):
-    from modules.evaluate.src.dataset.embedding_cache import load_tensor_cache
+    from modules.evaluate.src.artifacts.cache import load_tensor_cache
 
     calls = []
 
@@ -78,7 +72,7 @@ def test_tensor_cache_reuses_identity_and_refreshes(tmp_path):
 
 @pytest.mark.parametrize("cache_dir_enabled", [False, True])
 def test_tensor_cache_validates_before_persisting(tmp_path, cache_dir_enabled):
-    from modules.evaluate.src.dataset.embedding_cache import load_tensor_cache
+    from modules.evaluate.src.artifacts.cache import load_tensor_cache
 
     def reject(values):
         raise ValueError("invalid features")
@@ -95,7 +89,7 @@ def test_tensor_cache_validates_before_persisting(tmp_path, cache_dir_enabled):
 
 
 def test_tensor_cache_validates_reused_values(tmp_path):
-    from modules.evaluate.src.dataset.embedding_cache import load_tensor_cache
+    from modules.evaluate.src.artifacts.cache import load_tensor_cache
 
     options = dict(
         cache_dir=tmp_path,
@@ -113,7 +107,7 @@ def test_tensor_cache_validates_reused_values(tmp_path):
 
 
 def test_tensor_cache_budget_keeps_values_in_memory(tmp_path):
-    from modules.evaluate.src.dataset.embedding_cache import load_tensor_cache
+    from modules.evaluate.src.artifacts.cache import load_tensor_cache
 
     values, _ = load_tensor_cache(
         cache_dir=tmp_path,
@@ -128,7 +122,7 @@ def test_tensor_cache_budget_keeps_values_in_memory(tmp_path):
 
 
 def test_tensor_cache_checks_identity_for_explicit_key(tmp_path):
-    from modules.evaluate.src.dataset.embedding_cache import load_tensor_cache
+    from modules.evaluate.src.artifacts.cache import load_tensor_cache
 
     options = dict(
         cache_dir=tmp_path,
@@ -156,21 +150,17 @@ def test_tensor_cache_checks_identity_for_explicit_key(tmp_path):
     ],
 )
 def test_tensor_cache_validation_rejects_invalid_tensors(values):
-    from modules.evaluate.src.dataset.embedding_cache import validate_tensor_cache
+    from modules.evaluate.src.artifacts.cache import validate_tensor_cache
 
     with pytest.raises(ValueError, match="Tensor cache"):
-        validate_tensor_cache(
-            values, shapes={"features": (2, 3)}, dtype=torch.float32
-        )
+        validate_tensor_cache(values, shapes={"features": (2, 3)}, dtype=torch.float32)
 
 
 def test_tensor_cache_validation_accepts_expected_tensors():
-    from modules.evaluate.src.dataset.embedding_cache import validate_tensor_cache
+    from modules.evaluate.src.artifacts.cache import validate_tensor_cache
 
     validate_tensor_cache(
-        {"features": torch.ones(2, 3)},
-        shapes={"features": (2, 3)},
-        dtype=torch.float32,
+        {"features": torch.ones(2, 3)}, shapes={"features": (2, 3)}, dtype=torch.float32
     )
 
 
@@ -198,7 +188,9 @@ def test_cached_and_online_pooling_exclude_boundary_tokens(
     packed: bool, normalize: bool
 ) -> None:
     tokenizer = SimpleNamespace(
-        cls_token_id=99, eos_token_id=98, pad_token_id=0,
+        cls_token_id=99,
+        eos_token_id=98,
+        pad_token_id=0,
         batch_decode=lambda rows, **kwargs: ["" for _ in rows],
     )
 
@@ -219,7 +211,8 @@ def test_cached_and_online_pooling_exclude_boundary_tokens(
     if packed:
         batch.update(
             input_ids=torch.tensor([[99, 2, 4, 98, 99, 8, 98, 0]]),
-            cu_seqlens=torch.tensor([0, 4, 7, 8]), num_sequences=2,
+            cu_seqlens=torch.tensor([0, 4, 7, 8]),
+            num_sequences=2,
         )
     else:
         batch.update(
@@ -227,18 +220,31 @@ def test_cached_and_online_pooling_exclude_boundary_tokens(
             attention_mask=torch.tensor([[1, 1, 1, 1], [1, 1, 1, 0]]),
         )
     accelerator = SimpleNamespace(
-        device=torch.device("cpu"), num_processes=1,
+        device=torch.device("cpu"),
+        num_processes=1,
         gather_for_metrics=lambda values, **kwargs: values,
     )
     cached, _, _, _ = extract_embeddings(
-        trunk, [batch], accelerator, "mean", "float32", layers=[0, 1], tokenizer=tokenizer,
+        trunk,
+        [batch],
+        accelerator,
+        "mean",
+        "float32",
+        layers=[0, 1],
+        tokenizer=tokenizer,
         normalize_before_pooling=normalize,
     )
-    expected = torch.ones((2, 2)) if normalize else torch.tensor([[3.0, 4.0], [8.0, 9.0]])
+    expected = (
+        torch.ones((2, 2)) if normalize else torch.tensor([[3.0, 4.0], [8.0, 9.0]])
+    )
     assert torch.equal(cached, expected)
     probe = LayerwiseProbeModel(
-        SimpleNamespace(base_model=trunk, config=trunk.config), 1, "sequence_regression",
-        LayerwiseConfig(enabled=True, layers=[0, 1], normalize_before_pooling=normalize),
+        SimpleNamespace(base_model=trunk, config=trunk.config),
+        1,
+        "sequence_regression",
+        LayerwiseConfig(
+            enabled=True, layers=[0, 1], normalize_before_pooling=normalize
+        ),
         tokenizer=tokenizer,
     )
     for head in probe.heads.values():
@@ -341,9 +347,14 @@ def test_layerwise_packed_pooling_matches_padded(pooling, normalize):
 
     trunk = Trunk()
     probe = LayerwiseProbeModel(
-        SimpleNamespace(base_model=trunk, config=trunk.config), 1, "sequence_regression",
+        SimpleNamespace(base_model=trunk, config=trunk.config),
+        1,
+        "sequence_regression",
         LayerwiseConfig(
-            enabled=True, layers="all", autocast_dtype="float32", pooling=pooling,
+            enabled=True,
+            layers="all",
+            autocast_dtype="float32",
+            pooling=pooling,
             normalize_before_pooling=normalize,
         ),
         tokenizer=tokenizer,
@@ -447,7 +458,9 @@ def test_layerwise_token_standardization_ignores_unlabeled_positions(model_famil
         )
 
 
-@pytest.mark.parametrize("task_type", ["sequence_classification", "token_classification"])
+@pytest.mark.parametrize(
+    "task_type", ["sequence_classification", "token_classification"]
+)
 def test_distributed_layerwise_deduplicates_examples(model_family, task_type):
     from .conftest import build_tiny_model
 
@@ -459,21 +472,28 @@ def test_distributed_layerwise_deduplicates_examples(model_family, task_type):
             return tensor
 
     probe = LayerwiseProbeModel(
-        build_tiny_model(model_family, task_type, 2), 2, task_type,
-        LayerwiseConfig(enabled=True, layers=[0, -1]), tokenizer=model_family.tokenizer,
+        build_tiny_model(model_family, task_type, 2),
+        2,
+        task_type,
+        LayerwiseConfig(enabled=True, layers=[0, -1]),
+        tokenizer=model_family.tokenizer,
     )
     batch = {
         "input_ids": torch.tensor([[3, 5, 6, 4]] * 3),
         "attention_mask": torch.ones(3, 4),
         "labels": (
-            torch.tensor([0, 1, 0]) if task_type == "sequence_classification" else
-            torch.tensor([[-100, 0, 1, -100]] * 3)
+            torch.tensor([0, 1, 0])
+            if task_type == "sequence_classification"
+            else torch.tensor([[-100, 0, 1, -100]] * 3)
         ),
         "id": ["first", "second", "first"],
     }
     results = run_layerwise_conditions(
-        probe, [batch, dict(batch, id=["third", "first", "second"])], task_type,
-        Accelerator(), collect_probabilities=task_type == "sequence_classification",
+        probe,
+        [batch, dict(batch, id=["third", "first", "second"])],
+        task_type,
+        Accelerator(),
+        collect_probabilities=task_type == "sequence_classification",
     )["trained"]
     for ids, predictions, labels, probabilities, _ in results.values():
         assert ids == ["first", "second", "third"]
@@ -592,17 +612,14 @@ def test_online_layerwise_batches_share_one_trunk_pass(task_type, packed):
                 assert labels == [[0], [1, 0]]
 
 
-# ---------------------------------------------------------------------------
-# pool_hidden_states
-# ---------------------------------------------------------------------------
-
-
 class TestPoolHiddenStates:
     def test_mean_pooling_excludes_special_and_padding_tokens(self):
         tokenizer = SimpleNamespace(cls_token_id=3, eos_token_id=4, pad_token_id=0)
         input_ids = torch.tensor([[3, 5, 6, 4, 0]])
         hidden_states = torch.tensor([[[100.0], [2.0], [4.0], [200.0], [300.0]]])
-        mask = residue_attention_mask(input_ids, torch.tensor([[1, 1, 1, 1, 0]]), tokenizer)
+        mask = residue_attention_mask(
+            input_ids, torch.tensor([[1, 1, 1, 1, 0]]), tokenizer
+        )
         assert pool_hidden_states(hidden_states, mask, "mean").item() == 3.0
         assert pool_hidden_states(hidden_states, mask, "cls").item() == 100.0
 
@@ -646,11 +663,6 @@ class TestPoolHiddenStates:
         )
 
         assert torch.allclose(pooled, torch.tensor([[2.0, 3.0, 200.0, 300.0]]))
-
-
-# ---------------------------------------------------------------------------
-# embedding_cache_key
-# ---------------------------------------------------------------------------
 
 
 class TestEmbeddingCacheKey:
@@ -716,11 +728,6 @@ class TestEmbeddingCacheKey:
         )
 
 
-# ---------------------------------------------------------------------------
-# EmbeddingCache
-# ---------------------------------------------------------------------------
-
-
 class TestEmbeddingCache:
     def test_write_then_read_round_trips(self, tmp_path):
         cache = EmbeddingCache(tmp_path, max_cache_gb=1.0)
@@ -744,11 +751,6 @@ class TestEmbeddingCache:
         assert EmbeddingCache(tmp_path, max_cache_gb=1.0).fits_budget(
             10_000, 960, "float16"
         )
-
-
-# ---------------------------------------------------------------------------
-# EmbeddingProbeHead
-# ---------------------------------------------------------------------------
 
 
 class TestEmbeddingProbeHead:
@@ -835,11 +837,15 @@ class TestExtractEmbeddings:
 
         class Trunk(nn.Module):
             def forward(self, input_ids, **kwargs):
-                return SimpleNamespace(last_hidden_state=input_ids.unsqueeze(-1).float())
+                return SimpleNamespace(
+                    last_hidden_state=input_ids.unsqueeze(-1).float()
+                )
 
         monkeypatch.setattr(embed, "tqdm", track_progress)
         accelerator = SimpleNamespace(
-            device=torch.device("cpu"), num_processes=1, is_main_process=main,
+            device=torch.device("cpu"),
+            num_processes=1,
+            is_main_process=main,
         )
         batches = [
             {
@@ -851,7 +857,11 @@ class TestExtractEmbeddings:
             for i in range(5)
         ]
         embeddings, ids, labels, _ = extract_embeddings(
-            Trunk(), batches, accelerator, "mean", "float32",
+            Trunk(),
+            batches,
+            accelerator,
+            "mean",
+            "float32",
             progress_label=label,
         )
         assert ids == list(range(5))
@@ -969,12 +979,7 @@ class TestExtractEmbeddings:
         assert torch.equal(labels, torch.tensor([1]))
 
 
-# ---------------------------------------------------------------------------
-# PrepareStep integration (embedding_cache enabled)
-# ---------------------------------------------------------------------------
-
-
-class TestPrepareStepWithEmbeddingCache:
+class TestCachedPreparation:
     def test_rebatching_unwraps_accelerate_sampler_shards(
         self, monkeypatch, tmp_path, model_family
     ):
@@ -986,7 +991,7 @@ class TestPrepareStepWithEmbeddingCache:
             length_grouped_sampling=True,
             embedding_cache=EmbeddingCacheConfig(enabled=True),
         )
-        backend = artifacts.embedding.backend
+        backend = artifacts.test.embedding.backend
         original = backend.token_test_dataloader
         sharded = DataLoader(
             original.dataset,
@@ -996,7 +1001,7 @@ class TestPrepareStepWithEmbeddingCache:
             collate_fn=original.collate_fn,
         )
         loaders = build_embedding_dataloaders(
-            model=backend.trunk,
+            model=artifacts.predictor.trunk,
             splits={"test": (sharded, False)},
             accelerator=Accelerator(cpu=True),
             cache=EmbeddingCache(tmp_path / "cache", max_cache_gb=1),
@@ -1012,7 +1017,7 @@ class TestPrepareStepWithEmbeddingCache:
             is_ragged=True,
             length_grouped_sampling=True,
         )
-        expected = artifacts.test_dataloader.dataset
+        expected = artifacts.test.test_dataloader.dataset
         actual = loaders["test"].dataset
         assert actual.ids == expected.ids
         torch.testing.assert_close(actual.labels, expected.labels)
@@ -1065,19 +1070,18 @@ class TestPrepareStepWithEmbeddingCache:
             model_family,
             embedding_cache=EmbeddingCacheConfig(enabled=True),
         )
-
-        assert isinstance(artifacts.model, EmbeddingProbeHead)
-
+        assert isinstance(artifacts.predictor.model, EmbeddingProbeHead)
         for dataloader in (
-            artifacts.train_dataloader,
-            artifacts.val_dataloader,
-            artifacts.test_dataloader,
+            artifacts.training.train_dataloader,
+            artifacts.training.val_dataloader,
+            artifacts.test.test_dataloader,
         ):
             batch = next(iter(dataloader))
             assert "inputs_embeds" in batch
             assert "input_ids" not in batch
-
-            output = artifacts.model(**{k: v for k, v in batch.items() if k != "id"})
+            output = artifacts.predictor.model(
+                **{k: v for k, v in batch.items() if k != "id"}
+            )
             assert output.loss is not None
 
     def test_all_sequence_splits_are_disk_cached(
@@ -1120,16 +1124,16 @@ class TestPrepareStepWithEmbeddingCache:
             model_family,
             embedding_cache=EmbeddingCacheConfig(enabled=True, layers=[-1, -2]),
         )
-
-        assert artifacts.embedding is not None
+        assert artifacts.test.embedding is not None
         assert (
-            artifacts.embedding.backend.hidden_size
+            artifacts.test.embedding.backend.hidden_size
             == model_family.config_kwargs["hidden_size"] * 2
         )
-        assert artifacts.embedding.backend.layers == [-1, -2]
-        batch = next(iter(artifacts.train_dataloader))
+        assert artifacts.test.embedding.backend.layers == [-1, -2]
+        batch = next(iter(artifacts.training.train_dataloader))
         assert (
-            batch["inputs_embeds"].shape[-1] == artifacts.embedding.backend.hidden_size
+            batch["inputs_embeds"].shape[-1]
+            == artifacts.test.embedding.backend.hidden_size
         )
 
     def test_token_classification_uses_unpooled_per_token_embeddings(
@@ -1144,18 +1148,15 @@ class TestPrepareStepWithEmbeddingCache:
             model_family,
             embedding_cache=EmbeddingCacheConfig(enabled=True),
         )
-
-        assert isinstance(artifacts.model, EmbeddingProbeHead)
-        # 4 examples per split (see build_raw_dataset_dict); more rows than
-        # examples confirms rows are per-token, not per-example.
-        assert len(artifacts.train_dataloader.dataset) > 4
-
-        batch = next(iter(artifacts.train_dataloader))
+        assert isinstance(artifacts.predictor.model, EmbeddingProbeHead)
+        assert len(artifacts.training.train_dataloader.dataset) > 4
+        batch = next(iter(artifacts.training.train_dataloader))
         assert "inputs_embeds" in batch
         assert batch["labels"].shape == (batch["inputs_embeds"].shape[0],)
-        output = artifacts.model(**{k: v for k, v in batch.items() if k != "id"})
+        output = artifacts.predictor.model(
+            **{k: v for k, v in batch.items() if k != "id"}
+        )
         assert output.loss is not None
-
         workspace = get_evaluation_workspace(
             EvaluationWorkspaceConfig(
                 run_id="test",
@@ -1173,12 +1174,7 @@ class TestPrepareStepWithEmbeddingCache:
         assert list(workspace.embeddings_path.glob("*.safetensors")) == []
 
 
-# ---------------------------------------------------------------------------
-# EvaluationConfig cross-step validation
-# ---------------------------------------------------------------------------
-
-
-class TestEmbeddingCacheCrossStepValidation:
+class TestEmbeddingCacheConfiguration:
     def test_rejects_embedding_cache_outside_tune_probe(self):
         with pytest.raises(Exception, match="mode='finetune'.*embedding_cache"):
             EvaluationConfig(

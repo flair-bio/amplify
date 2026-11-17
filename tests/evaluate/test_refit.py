@@ -10,17 +10,20 @@ from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
 from modules.core.utils.config_loader import load_and_parse
-from modules.evaluate.src.contracts.config import EvaluationConfig
-from modules.evaluate.src.model.heads import EmbeddingProbeHead
-from modules.evaluate.src.contracts.config import HeadConfig
-from modules.evaluate.src.contracts.artifacts import PreparedArtifacts
-from modules.evaluate.src.contracts.config import HyperparameterSearchConfig, HyperparameterSearchSpaceConfig, TuneConfig
-from modules.evaluate.src.steps.tune import TuneStep
-from modules.evaluate.src.trainers.selection import PredictorSelection
-from modules.evaluate.src.trainers.torch import TorchProbeTrainer
+from modules.evaluate.src.config.evaluation import (
+    EvaluationConfig,
+    HeadConfig,
+    HyperparameterSearchConfig,
+    HyperparameterSearchSpaceConfig,
+    TuneConfig,
+)
 from modules.evaluate.src.dataset.embeddings import EmbeddingDataset
+from modules.evaluate.src.model.heads import EmbeddingProbeHead
+from modules.evaluate.src.trainers.fitting import _report_torch_seed_variance
 from modules.evaluate.src.trainers.selection_helpers import build_scheduler
+from modules.evaluate.src.trainers.torch import train_torch
 
+from .helpers import fit_inputs, fitting_state, make_inputs, patch_function
 from .test_prepare import _make_workspace
 
 TRAIN = torch.tensor([[0.0, 2.0], [2.0, 4.0], [4.0, 6.0]])
@@ -29,6 +32,7 @@ TEST = torch.full((2, 2), 10000.0)
 
 
 def prepared_splits(task_type="sequence_classification"):
+
     def loader(features, labels, prefix):
         return DataLoader(
             EmbeddingDataset(
@@ -39,7 +43,7 @@ def prepared_splits(task_type="sequence_classification"):
             batch_size=2,
         )
 
-    return PreparedArtifacts(
+    return make_inputs(
         model=EmbeddingProbeHead(2, 2, task_type),
         tokenizer=None,
         train_dataloader=loader(TRAIN, [0, 1, 0], "train"),
@@ -57,17 +61,19 @@ def test_fresh_refit_uses_selected_architecture_budget_and_development_statistic
     prepared = prepared_splits()
     accelerator = Accelerator(cpu=True)
     if wrapped:
-        prepared.train_dataloader, prepared.val_dataloader, prepared.test_dataloader = (
-            accelerator.prepare(
-                prepared.train_dataloader,
-                prepared.val_dataloader,
-                prepared.test_dataloader,
-            )
+        (
+            prepared.training.train_dataloader,
+            prepared.training.val_dataloader,
+            prepared.test.test_dataloader,
+        ) = accelerator.prepare(
+            prepared.training.train_dataloader,
+            prepared.training.val_dataloader,
+            prepared.test.test_dataloader,
         )
     original_loaders = (
-        prepared.train_dataloader,
-        prepared.val_dataloader,
-        prepared.test_dataloader,
+        prepared.training.train_dataloader,
+        prepared.training.val_dataloader,
+        prepared.test.test_dataloader,
     )
     workspace = _make_workspace(tmp_path, "sequence_classification")
     config = TuneConfig(
@@ -85,19 +91,20 @@ def test_fresh_refit_uses_selected_architecture_budget_and_development_statistic
                 hidden_size=[3, 5] if head_type == "mlp" else None,
                 hidden_depth=[1, 2] if head_type == "mlp" else None,
                 batch_size=[2, 4] if head_type == "mlp" else None,
-                learning_rate=[1e-3],
+                learning_rate=[0.001],
                 weight_decay=[0.0],
                 max_epochs=[1, 2],
             ),
         ),
     )
-    train = TorchProbeTrainer.train
-    trials, refits, schedules = [], [], []
+    trials, refits, schedules = ([], [], [])
 
-    def record_train(self, ws, artifacts, accelerator, hparams, **kwargs):
-        model = artifacts.model
-        if artifacts.val_dataloader is not None:
-            assert artifacts.train_dataloader is original_loaders[0]
+    def record_train(
+        config, train_trunk, ws, predictor, training, accelerator, hparams, **kwargs
+    ):
+        model = predictor.model
+        if training.val_dataloader is not None:
+            assert training.train_dataloader is original_loaders[0]
             torch.testing.assert_close(model.feature_mean, TRAIN.mean(dim=0))
             with torch.no_grad():
                 for parameter in model.parameters():
@@ -109,10 +116,9 @@ def test_fresh_refit_uses_selected_architecture_budget_and_development_statistic
                 + hparams.get("batch_size", 0)
                 + hparams["max_epochs"]
             )
-        assert artifacts.test_dataloader is None
-        assert self.config.early_stopping_patience is None
+        assert config.early_stopping_patience is None
         assert model not in trials
-        dataset = artifacts.train_dataloader.dataset
+        dataset = training.train_dataloader.dataset
         torch.testing.assert_close(dataset.embeddings, torch.cat([TRAIN, VALIDATION]))
         assert dataset.ids == ["train-0", "train-1", "train-2", "val-0", "val-1"]
         assert dataset.labels.tolist() == [0, 1, 0, 1, 0]
@@ -122,28 +128,30 @@ def test_fresh_refit_uses_selected_architecture_budget_and_development_statistic
         )
         assert not torch.all(model.classifier.weight == 0.25)
         refits.append((model, dict(hparams)))
-        return train(self, ws, artifacts, accelerator, hparams, **kwargs)
+        return train_torch(
+            config, train_trunk, ws, predictor, training, accelerator, hparams, **kwargs
+        )
 
     def scheduler(*args, **kwargs):
         schedules.append(kwargs["num_training_steps"])
         return build_scheduler(*args, **kwargs)
 
-    def variance(self, ws, artifacts, accelerator, hparams):
-        assert artifacts.train_dataloader is original_loaders[0]
-        assert artifacts.val_dataloader is original_loaders[1]
-        torch.testing.assert_close(artifacts.model.feature_mean, TRAIN.mean(dim=0))
+    def variance(
+        config, train_trunk, _fit_result, ws, predictor, training, accelerator, hparams
+    ):
+        assert training.train_dataloader is original_loaders[0]
+        assert training.val_dataloader is original_loaders[1]
+        torch.testing.assert_close(predictor.model.feature_mean, TRAIN.mean(dim=0))
 
-    monkeypatch.setattr(TorchProbeTrainer, "train", record_train)
-    monkeypatch.setattr(PredictorSelection, "_report_torch_seed_variance", variance)
+    patch_function(monkeypatch, train_torch, record_train)
+    patch_function(monkeypatch, _report_torch_seed_variance, variance)
     monkeypatch.setattr(
         "modules.evaluate.src.trainers.torch.build_scheduler", scheduler
     )
-    result = TuneStep(config).run(
-        workspace, prepared, seed=42, accelerator=accelerator
-    )
+    result = fit_inputs(config, workspace, prepared, seed=42, accelerator=accelerator)
     assert len(refits) == 1
     model, hparams = refits[0]
-    assert result.model is model
+    assert result.predictor.model is model
     if head_type == "mlp" and search_enabled:
         assert model.probe_hidden_size == 5
         assert model.probe_hidden_depth == 2
@@ -151,9 +159,9 @@ def test_fresh_refit_uses_selected_architecture_budget_and_development_statistic
     assert hparams["max_epochs"] == 2
     assert schedules == [math.ceil(5 / hparams.get("batch_size", 2)) * 2]
     assert (
-        result.train_dataloader,
-        result.val_dataloader,
-        result.test_dataloader,
+        result.training.train_dataloader,
+        result.training.val_dataloader,
+        result.test.test_dataloader,
     ) == original_loaders
     assert config.early_stopping_patience == 1
     metadata = json.loads((workspace.model_path / "probe_head_config.json").read_text())
@@ -178,7 +186,7 @@ def test_fresh_refit_uses_selected_architecture_budget_and_development_statistic
 def test_classical_refit_rebuilds_estimator_and_scaler_on_development_data(
     monkeypatch, tmp_path
 ):
-    from modules.evaluate.src.model.heads import build_estimator
+    from modules.evaluate.src.model.classical import build_estimator
 
     estimators = []
 
@@ -187,29 +195,30 @@ def test_classical_refit_rebuilds_estimator_and_scaler_on_development_data(
         estimators.append(estimator)
         return estimator
 
-    monkeypatch.setattr("modules.evaluate.src.model.heads.build_estimator", build)
-    monkeypatch.setattr("modules.evaluate.src.trainers.selection.build_estimator", build)
+    monkeypatch.setattr(
+        "modules.evaluate.src.trainers.classical.build_estimator", build
+    )
     prepared = prepared_splits()
     workspace = _make_workspace(tmp_path, "sequence_classification")
     config = TuneConfig(
-            head=HeadConfig(head_type="sklearn_linear", search_space={"C": [0.1, 1.0]}),
-            refit_on_train_validation=True,
-            metric_aggregation="macro",
+        head=HeadConfig(head_type="sklearn_linear", search_space={"C": [0.1, 1.0]}),
+        refit_on_train_validation=True,
+        metric_aggregation="macro",
     )
-    result = TuneStep(config).run(
-        workspace, prepared, seed=42, accelerator=Accelerator(cpu=True)
+    result = fit_inputs(
+        config, workspace, prepared, seed=42, accelerator=Accelerator(cpu=True)
     )
     assert len(estimators) == 3
-    assert result.model is estimators[-1]
+    assert result.predictor.model is estimators[-1]
     for estimator in estimators[:-1]:
         np.testing.assert_allclose(estimator[0].mean_, TRAIN.mean(dim=0))
     np.testing.assert_allclose(
-        result.model[0].mean_, torch.cat([TRAIN, VALIDATION]).mean(dim=0)
+        result.predictor.model[0].mean_, torch.cat([TRAIN, VALIDATION]).mean(dim=0)
     )
-    assert result.model[0].n_samples_seen_ == 5
+    assert result.predictor.model[0].n_samples_seen_ == 5
     metadata = json.loads((workspace.model_path / "tune_config.json").read_text())
     assert metadata["final_fit_split"] == "train+validation"
-    assert result.model[-1].C == metadata["best_hyperparameters"]["C"]
+    assert result.predictor.model[-1].C == metadata["best_hyperparameters"]["C"]
 
 
 def test_final_refit_includes_additional_split_after_hyperparameter_selection(
@@ -217,31 +226,42 @@ def test_final_refit_includes_additional_split_after_hyperparameter_selection(
 ):
     prepared = prepared_splits()
     excluded = DataLoader(
-        EmbeddingDataset(
-            torch.tensor([[20.0, 22.0]]),
-            ["tuning-excluded"],
-            [1],
-        ),
+        EmbeddingDataset(torch.tensor([[20.0, 22.0]]), ["tuning-excluded"], [1]),
         batch_size=2,
     )
-    prepared.refit_dataloaders = {"tuning_excluded": excluded}
-    prepared.refit_token_dataloaders = {"tuning_excluded": excluded}
-    original_train = TorchProbeTrainer.train
+    prepared.training.refit_dataloaders = {"tuning_excluded": excluded}
+    prepared.training.refit_token_dataloaders = {"tuning_excluded": excluded}
     selection_sizes = []
     refit_ids = []
 
-    def record_train(self, workspace, artifacts, accelerator, hparams, **kwargs):
-        train = artifacts.train_dataloader.dataset
-        if artifacts.val_dataloader is not None:
+    def record_train(
+        config,
+        train_trunk,
+        workspace,
+        predictor,
+        training,
+        accelerator,
+        hparams,
+        **kwargs,
+    ):
+        train = training.train_dataloader.dataset
+        if training.val_dataloader is not None:
             selection_sizes.append(len(train))
             assert "tuning-excluded" not in train.ids
             return 0.5
         refit_ids.extend(train.ids)
-        return original_train(
-            self, workspace, artifacts, accelerator, hparams, **kwargs
+        return train_torch(
+            config,
+            train_trunk,
+            workspace,
+            predictor,
+            training,
+            accelerator,
+            hparams,
+            **kwargs,
         )
 
-    monkeypatch.setattr(TorchProbeTrainer, "train", record_train)
+    patch_function(monkeypatch, train_torch, record_train)
     config = TuneConfig(
         head=HeadConfig(head_type="mlp", hidden_size=3),
         refit_on_train_validation=True,
@@ -252,20 +272,19 @@ def test_final_refit_includes_additional_split_after_hyperparameter_selection(
             enabled=True,
             search_pattern="grid",
             search_space=HyperparameterSearchSpaceConfig(
-                learning_rate=[1e-3],
-                weight_decay=[0.0],
-                max_epochs=[1],
+                learning_rate=[0.001], weight_decay=[0.0], max_epochs=[1]
             ),
         ),
     )
-
-    PredictorSelection(config).run(
+    fit_inputs(
+        config,
         _make_workspace(tmp_path, "sequence_classification"),
         prepared,
         seed=42,
         accelerator=Accelerator(cpu=True),
+        publish=False,
+        state=fitting_state(config),
     )
-
     assert selection_sizes == [len(TRAIN)]
     assert refit_ids == [
         "train-0",
@@ -292,13 +311,13 @@ def test_refit_preserves_target_shapes_masks_and_seed_reproducibility(
     for _ in range(2):
         prepared = prepared_splits(task_type)
         num_labels = 1 if task_type == "sequence_regression" else 2
-        prepared.model = EmbeddingProbeHead(2, num_labels, task_type)
+        prepared.predictor.model = EmbeddingProbeHead(2, num_labels, task_type)
         if task_type == "sequence_multilabel_classification":
-            prepared.train_dataloader.dataset.labels = [[1, 0], [0, 1], [1, 1]]
-            prepared.val_dataloader.dataset.labels = [[1, 1], [0, 0]]
+            prepared.training.train_dataloader.dataset.labels = [[1, 0], [0, 1], [1, 1]]
+            prepared.training.val_dataloader.dataset.labels = [[1, 1], [0, 0]]
         elif task_type == "token_classification":
-            prepared.val_dataloader.dataset.labels = [-100, 0]
-        step = PredictorSelection(
+            prepared.training.val_dataloader.dataset.labels = [-100, 0]
+        step = fitting_state(
             TuneConfig(
                 refit_on_train_validation=True,
                 max_epochs=2,
@@ -307,19 +326,28 @@ def test_refit_preserves_target_shapes_masks_and_seed_reproducibility(
                 head=HeadConfig(hidden_size=3, hidden_depth=2),
             )
         )
-        result = step.run(
+        result = fit_inputs(
+            step.config,
             _make_workspace(tmp_path, task_type),
             prepared,
             seed=42,
             accelerator=Accelerator(cpu=True),
+            mode="finetune" if step.train_trunk else "tune_probe",
+            publish=False,
+            state=step,
         )
         features = torch.cat([TRAIN, VALIDATION])
         if task_type == "token_classification":
             features = features[[0, 1, 2, 4]]
-        torch.testing.assert_close(result.model.feature_mean, features.mean(dim=0))
-        assert torch.isfinite(result.model(inputs_embeds=TEST).logits).all()
+        torch.testing.assert_close(
+            result.predictor.model.feature_mean, features.mean(dim=0)
+        )
+        assert torch.isfinite(result.predictor.model(inputs_embeds=TEST).logits).all()
         states.append(
-            {key: value.clone() for key, value in result.model.state_dict().items()}
+            {
+                key: value.clone()
+                for key, value in result.predictor.model.state_dict().items()
+            }
         )
     for name, value in states[0].items():
         torch.testing.assert_close(states[1][name], value, rtol=0, atol=0)
@@ -330,16 +358,19 @@ def test_refit_rejects_missing_or_empty_validation_before_training(
     tmp_path, validation
 ):
     prepared = prepared_splits()
-    prepared.val_dataloader = (
+    prepared.training.val_dataloader = (
         None
         if validation is None
         else DataLoader(EmbeddingDataset(torch.empty(0, 2), [], []))
     )
     with pytest.raises(ValueError, match="requires nonempty train and validation"):
-        PredictorSelection(TuneConfig(refit_on_train_validation=True)).run(
+        fit_inputs(
+            TuneConfig(refit_on_train_validation=True),
             _make_workspace(tmp_path, "sequence_classification"),
             prepared,
             accelerator=Accelerator(cpu=True),
+            publish=False,
+            state=fitting_state(TuneConfig(refit_on_train_validation=True)),
         )
 
 

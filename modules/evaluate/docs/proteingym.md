@@ -108,14 +108,15 @@ sourced `is_indel` flag. Because it does not train, zero-shot scoring does not
 require train/validation/test splits:
 
 ```bash
-uv run modules/evaluate/src/run_proteingym_zero_shot.py \
+uv run modules/evaluate/src/run_evaluate.py \
     modules/evaluate/configs/proteingym_zero_shot.yaml \
     workspace.model_repo_id=flair-bio/amplify-120m
 ```
 
-The dedicated runners accept the same `workspace.*` input/output settings as
-`run_evaluate.py`; ProteinGym scoring does not run through the ordinary
-Prepare/Tune/Predict/Score pipeline. The shipped presets use
+All evaluation commands use `run_evaluate.py`. The ProteinGym presets declare
+`workflow: proteingym_zero_shot` or `workflow: proteingym_supervised`, selecting
+assay-specific functions with the shared runtime and artifact services rather
+than the ordinary flat-data workflow. The shipped presets use
 `flair-bio/evaluation-suite` and its `proteingym-dms_substitutions` subfolder.
 `workspace.dataset_repo_id` may instead point to a local **suite root**;
 `workspace.dataset_revision` must then be null. For Hub inputs, set a commit
@@ -131,7 +132,7 @@ accelerate launch \
     --config_file modules/evaluate/configs/accelerate/local.yaml \
     --num_processes 1 \
     --num_cpu_threads_per_process 4 \
-    modules/evaluate/src/run_proteingym_zero_shot.py \
+    modules/evaluate/src/run_evaluate.py \
     modules/evaluate/configs/proteingym_zero_shot.yaml \
     workspace.model_name=amplify-120m_checkpoint_100000 \
     workspace.model_repo_id=/checkpoints/checkpoint_100000 \
@@ -178,7 +179,7 @@ all available training rows. Splits can use an official fold column
 `split=custom_kfold` for a reproducible generated k-fold split:
 
 ```bash
-uv run modules/evaluate/src/run_proteingym_supervised.py \
+uv run modules/evaluate/src/run_evaluate.py \
     modules/evaluate/configs/proteingym_supervised.yaml \
     workspace.model_repo_id=flair-bio/amplify-120m
 ```

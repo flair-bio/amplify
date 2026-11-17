@@ -9,37 +9,28 @@ from typing import Any, ClassVar
 import numpy as np
 import polars as pl
 import torch
-from transformers import AutoModelForSequenceClassification
 
-from modules.evaluate.src.contracts.artifacts import PredictOutput
-from modules.evaluate.src.contracts.config import ScoreConfig
+from modules.evaluate.src.artifacts.results import PredictOutput
+from modules.evaluate.src.config.evaluation import ScoreConfig
 from modules.evaluate.src.metrics import metrics
 from modules.evaluate.src.metrics.bootstrap import mean_per_example_scores
 from modules.evaluate.src.metrics.metrics import UndefinedMetricError
-from modules.evaluate.src.tasks.base import FlatMetricsTask, MetricFn
-from modules.evaluate.src.tasks.registry import register_task
+from modules.evaluate.src.tasks.base import FlatTask, MetricFn
 
-# Undefined on a single example, so they are rejected up front rather than
-# returning NaN.
 _METRICS_REQUIRING_TWO_EXAMPLES = frozenset({"r2", "pearsonr", "spearmanr"})
 _CORRELATION_METRICS = frozenset({"pearsonr", "spearmanr"})
 
 
-@register_task
-class SequenceRegressionTask(FlatMetricsTask):
+class SequenceRegressionTask(FlatTask):
     """One continuous target per sequence with regression metrics."""
 
     supports_layerwise = True
     dataset_baselines = frozenset({"train_mean", "composition", "mmseqs_knn"})
     prediction_baselines = frozenset({"train_mean"})
-
     name = "sequence_regression"
-    # Same wrapper class as classification; problem_type switches the loss.
-    auto_model_class = AutoModelForSequenceClassification
     label_dtype = torch.float
     accepted_target_types = frozenset({"continuous"})
     accepted_label_formats = frozenset({"scalar"})
-
     metrics: ClassVar[dict[str, MetricFn]] = {
         "mse": metrics.mse,
         "mae": metrics.mae,
@@ -51,19 +42,18 @@ class SequenceRegressionTask(FlatMetricsTask):
 
     def prepare_scoring(
         self, predictions: PredictOutput, config: ScoreConfig
-    ) -> tuple[FlatMetricsTask, PredictOutput]:
+    ) -> tuple[FlatTask, PredictOutput]:
         group_column = config.group_column
         if group_column is None:
-            return self, predictions
+            return (self, predictions)
         frame = predictions.predictions
         if group_column not in frame.columns:
             raise ValueError(
-                f"Grouped regression scoring requires '{group_column}' in predictions; "
-                "rerun preparation and prediction with the annotated data."
+                f"Grouped regression scoring requires '{group_column}' in predictions; rerun preparation and prediction with the annotated data."
             )
         cluster_ids = frame[group_column]
         if cluster_ids.null_count() or (
-            cluster_ids.dtype.is_float() and not cluster_ids.is_finite().all()
+            cluster_ids.dtype.is_float() and (not cluster_ids.is_finite().all())
         ):
             raise ValueError("Metric group IDs must be non-null and finite.")
         if frame["id"].n_unique() != frame.height:
@@ -96,8 +86,9 @@ class SequenceRegressionTask(FlatMetricsTask):
                 maintain_order="left",
             )
             controls[name] = grouped(aligned)
-        return _ClusteredRegressionScoring(), replace(
-            predictions, predictions=grouped(frame), controls=controls
+        return (
+            _ClusteredRegressionScoring(),
+            replace(predictions, predictions=grouped(frame), controls=controls),
         )
 
     def compute_grouped_metrics(
@@ -115,11 +106,7 @@ class SequenceRegressionTask(FlatMetricsTask):
         if len(predictions) == 0:
             raise ValueError("Cannot compute grouped metrics from empty predictions.")
         frame = pl.DataFrame(
-            {
-                "group": group_ids,
-                "prediction": predictions,
-                "label": labels,
-            }
+            {"group": group_ids, "prediction": predictions, "label": labels}
         )
         grouped = frame.group_by("group", maintain_order=True).agg(
             "prediction", "label"
@@ -135,11 +122,6 @@ class SequenceRegressionTask(FlatMetricsTask):
         self, labels: list[Any], batch_size: int, seq_len: int
     ) -> torch.Tensor:
         return torch.tensor([float(label) for label in labels], dtype=self.label_dtype)
-
-    def model_kwargs(self) -> dict[str, Any]:
-        # HF uses problem_type to switch the head/loss to a regression
-        # objective even though the wrapper class is the same.
-        return {"problem_type": "regression"}
 
     def resolve_num_labels(self, num_labels: int | None, dataset_name: str) -> int:
         return 1
@@ -167,8 +149,7 @@ class SequenceRegressionTask(FlatMetricsTask):
             np.ptp(np.asarray(predictions)) == 0 or np.ptp(np.asarray(labels)) == 0
         ):
             raise UndefinedMetricError(
-                "Pearson and Spearman correlations are undefined when "
-                "predictions or labels are constant."
+                "Pearson and Spearman correlations are undefined when predictions or labels are constant."
             )
         return super().compute_metrics(
             predictions, labels, metric_names, average, probabilities
@@ -182,8 +163,8 @@ class _ClusteredRegressionScoring(SequenceRegressionTask):
 
     def prepare_scoring(
         self, predictions: PredictOutput, config: ScoreConfig
-    ) -> tuple[FlatMetricsTask, PredictOutput]:
-        return self, predictions
+    ) -> tuple[FlatTask, PredictOutput]:
+        return (self, predictions)
 
     def compute_per_example_metrics(
         self,
