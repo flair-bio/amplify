@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
@@ -25,7 +26,10 @@ from modules.evaluate.src.contracts.artifacts import (
 )
 from modules.evaluate.src.dataset.embedding_cache import weights_fingerprint
 from modules.evaluate.src.metrics import contact_metrics
-from modules.evaluate.src.model.adapters import contact_position_ids
+from modules.evaluate.src.model.adapters import (
+    absolute_position_limit,
+    contact_position_ids,
+)
 from modules.evaluate.src.model.contact_attention import (
     ATTENTION_PROTOCOL,
     ContactAttentionModel,
@@ -71,10 +75,13 @@ from modules.evaluate.src.dataset.contact import (
     ContactChain,
     ContactDataset,
     ContactTokens,
+    filter_contact_lengths,
     load_contact_dataset,
     prepare_contact_dataset,
     tokenize_contact_chain,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def contact_development_feature_identity(
@@ -218,6 +225,17 @@ class ContactPredictionTask(StructuredTask):
             predictor=predictor,
             tokenizer=tokenizer,
         )
+        contacts = filter_contact_lengths(
+            contacts,
+            tokenizer,
+            absolute_position_limit(model.trunk.config),
+            policy=config.contact_overlength_policy,
+        )
+        if contacts.length_selection:
+            logger.warning(
+                "Contact evaluation uses a supported-length subset: %s",
+                json.dumps(contacts.length_selection, sort_keys=True),
+            )
         for chains in contacts.splits.values():
             for chain in chains:
                 tokens = tokenize_contact_chain(chain, tokenizer)
@@ -630,6 +648,16 @@ class ContactPredictionTask(StructuredTask):
                 "dataset_fingerprint": dataset.fingerprint,
                 "schema_version": SCHEMA_VERSION,
                 "protocol_version": PROTOCOL_VERSION,
+                "contact_dataset_scope": (
+                    "supported_length_subset"
+                    if dataset.length_selection
+                    else "full_dataset"
+                ),
+                "contact_length_selection": (
+                    json.dumps(dataset.length_selection, sort_keys=True)
+                    if dataset.length_selection
+                    else None
+                ),
             }
         )
         rows_by_chain = {}

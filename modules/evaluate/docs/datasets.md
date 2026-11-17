@@ -324,6 +324,22 @@ tokens, so the supplied residues are not cropped.
 
 ##### `contact_prediction_casp`
 
+For absolute-position backbones such as ESM-1b, opt in to
+`steps.prepare.contact_overlength_policy=filter` to evaluate only supported-length
+whole chains. The default (`error`) rejects oversized chains. Filtering checks
+original-coordinate token positions, including special tokens and unresolved
+residues, in train, validation, and each named test subset. It never truncates,
+windows, renumbers, or moves chains between splits; an empty split is an error.
+Prediction metadata and score tables label this as
+`contact_dataset_scope=supported_length_subset` and record retained counts and
+excluded chain/scoring-unit IDs in `contact_length_selection` (JSON). These scores
+are not directly comparable to other models' full-dataset results; compare on the
+same retained chains instead. The external full/retry benchmark launcher enables
+this option only for ESM-1b contacts.
+Use a new `workspace.run_id` when switching protocols. The external launcher and
+retry checker use `esm1b-supported-length-1117` for these runs, preserving
+full-protocol attempts.
+
 **Question:** which pairs of residues touch in the folded protein?
 
 - **Readout:** self-contained global and intra-EU rows with original chain

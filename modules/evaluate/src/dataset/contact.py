@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from itertools import pairwise
 from numbers import Integral
 from pathlib import Path
@@ -108,6 +108,7 @@ class ContactDataset:
     source: str
     revision: str | None
     schema_version: str = SCHEMA_VERSION
+    length_selection: dict[str, Any] = field(default_factory=dict)
 
     @property
     def development_fingerprint(self) -> str:
@@ -130,6 +131,60 @@ class ContactTokens:
     attention_mask: tuple[int, ...]
     position_ids: tuple[int, ...]
     residue_token_indices: tuple[int, ...]
+
+
+def filter_contact_lengths(
+    dataset: ContactDataset,
+    tokenizer: PreTrainedTokenizerBase,
+    position_limit: int | None,
+    *,
+    policy: str,
+) -> ContactDataset:
+    """Keep whole chains whose original-coordinate tokens fit the backbone."""
+    if policy == "error" or position_limit is None:
+        return dataset
+    if policy != "filter":
+        raise ValueError(f"Unknown contact overlength policy: {policy}")
+    splits = {}
+    report: dict[str, Any] = {
+        "scope": "supported_length_subset",
+        "position_limit": position_limit,
+        "splits": {},
+    }
+    for split, chains in dataset.splits.items():
+        retained = []
+        excluded = []
+        for chain in chains:
+            tokens = tokenize_contact_chain(chain, tokenizer)
+            required = max(tokens.position_ids) + 1
+            if required > position_limit:
+                excluded.append(
+                    {
+                        "record_id": chain.record_id,
+                        "required_positions": required,
+                        "unit_ids": [unit.id for unit in chain.units],
+                    }
+                )
+            else:
+                retained.append(chain)
+        if not retained:
+            raise ValueError(
+                f"Supported-length contact subset is empty for split '{split}'."
+            )
+        splits[split] = tuple(retained)
+        report["splits"][split] = {
+            "retained_chains": len(retained),
+            "excluded_chains": excluded,
+        }
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {"source_fingerprint": dataset.fingerprint, "length_selection": report},
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    return replace(
+        dataset, splits=splits, fingerprint=fingerprint, length_selection=report
+    )
 
 
 def align_contact_sequence(sequence: str) -> ContactAlignment:

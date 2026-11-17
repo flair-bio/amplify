@@ -88,7 +88,19 @@ def build_control_model(
         model = type(trained_model)(copy.deepcopy(trained_model.config)).to(
             next(trained_model.parameters()).device
         )
-        base_prefix = model.base_model_prefix
+        base_prefix = getattr(model, "base_model_prefix", None)
+        if (
+            base_prefix is None
+            and getattr(model.config, "model_type", None) == "esmc"
+            and isinstance(getattr(model, "esmc", None), torch.nn.Module)
+        ):
+            # Native esm wrappers expose the encoder without HF's prefix attribute.
+            base_prefix = "esmc"
+        if control != RANDOM_BOTH_CONTROL and not base_prefix:
+            raise ValueError(
+                f"Cannot identify the backbone for {type(model).__name__} "
+                f"control '{control}'."
+            )
         trained_state = trained_model.state_dict()
         if control == RANDOM_TRUNK_CONTROL:
             state_to_copy = {

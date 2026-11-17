@@ -150,6 +150,8 @@ def aggregate_contact_scores(records: Iterable[dict[str, Any]]) -> list[dict[str
         "dataset_fingerprint",
         "schema_version",
         "protocol_version",
+        "contact_dataset_scope",
+        "contact_length_selection",
         "model_name",
         "model_repo_id",
         "task_type",

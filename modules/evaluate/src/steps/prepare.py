@@ -713,6 +713,18 @@ class PrepareStep:
                 source=workspace.dataset_repo_id or workspace.dataset_name,
                 revision=workspace.config.dataset_revision,
             )
+            from modules.evaluate.src.dataset.contact import filter_contact_lengths
+
+            contacts = filter_contact_lengths(
+                contacts,
+                prepared.tokenizer,
+                (
+                    prepared.contact.dataset.length_selection["position_limit"]
+                    if prepared.contact.dataset.length_selection
+                    else None
+                ),
+                policy=self.config.contact_overlength_policy,
+            )
             context = (
                 contact_baseline_context(
                     workspace.config, contacts, prepared.baseline_context["names"]

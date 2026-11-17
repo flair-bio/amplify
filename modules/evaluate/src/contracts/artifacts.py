@@ -219,6 +219,8 @@ class ContactEvaluationMetadata(EvaluationMetadata):
     dataset_fingerprint: str
     schema_version: str
     protocol_version: str
+    contact_dataset_scope: str = "full_dataset"
+    contact_length_selection: str | None = None
 
 
 @dataclass

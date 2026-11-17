@@ -40,6 +40,63 @@ class _ControlTrunk(nn.Module):
         self.projection = nn.Linear(width, width)
 
 
+class _NativeEsmcLikeMaskedLM(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.esmc = nn.Linear(config.hidden_size, config.hidden_size)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size)
+
+
+@pytest.mark.parametrize("implementation", ["stub", "native"])
+@pytest.mark.parametrize("control", ["random_trunk", "random_head", "random_both"])
+def test_native_esmc_controls_preserve_only_requested_weights(implementation, control):
+    from modules.evaluate.src.model.controls import build_control_model
+
+    if implementation == "native":
+        esmc = pytest.importorskip("esm.models.esmc")
+        trained = esmc.EsmcForMaskedLM(
+            esmc.EsmcConfig(
+                hidden_size=32, num_attention_heads=4, num_hidden_layers=1
+            )
+        )
+    else:
+        trained = _NativeEsmcLikeMaskedLM(
+            SimpleNamespace(model_type="esmc", hidden_size=4, vocab_size=8)
+        )
+    with torch.no_grad():
+        for parameter in trained.parameters():
+            parameter.fill_(1.5)
+    original = {name: value.clone() for name, value in trained.state_dict().items()}
+
+    model = build_control_model(control, trained, seed=42)
+    repeated = build_control_model(control, trained, seed=42)
+    state = model.state_dict()
+    trunk_names = {name for name in state if name.startswith("esmc.")}
+    head_names = set(state) - trunk_names
+    preserved = (
+        head_names if control == "random_trunk"
+        else trunk_names if control == "random_head"
+        else set()
+    )
+    for name in preserved:
+        torch.testing.assert_close(state[name], original[name], rtol=0, atol=0)
+    for names in (trunk_names, head_names):
+        if not names <= preserved:
+            assert any(not torch.equal(state[name], original[name]) for name in names)
+    for name, value in state.items():
+        torch.testing.assert_close(value, repeated.state_dict()[name], rtol=0, atol=0)
+        torch.testing.assert_close(
+            trained.state_dict()[name], original[name], rtol=0, atol=0
+        )
+    assert not model.training
+    if implementation == "native":
+        with torch.inference_mode():
+            logits = model(input_ids=torch.tensor([[0, 4, 5, 32, 2]])).logits
+        assert logits.shape == (1, 5, trained.config.vocab_size)
+        assert torch.isfinite(logits).all()
+
+
 @pytest.mark.parametrize("control", ["untrained", "random_head", "random_both"])
 @pytest.mark.parametrize("probe_hidden_size", [None, 3])
 @pytest.mark.parametrize("standardize_features", [False, True])

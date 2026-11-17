@@ -429,6 +429,7 @@ class PrepareConfig(BaseModel):
     batch_size: int = 8
     packed: bool = False
     max_tokens_per_batch: int | None = Field(None, gt=0)
+    contact_overlength_policy: Literal["error", "filter"] = "error"
     embedding_batch_size: int = Field(
         8,
         gt=0,

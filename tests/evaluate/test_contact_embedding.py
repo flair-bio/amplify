@@ -109,8 +109,9 @@ def config_for(tmp_path, model_path, seed=13):
 
 @pytest.mark.parametrize("predictor", ["bilinear512", "attention_l1", "categorical_jacobian"])
 @pytest.mark.parametrize("controls", [[], ["random_trunk"]])
+@pytest.mark.parametrize("supported_length", [False, True])
 def test_contact_predictor_pipeline_roundtrip(
-    tmp_path, esm2_tokenizer, predictor, controls, monkeypatch
+    tmp_path, esm2_tokenizer, predictor, controls, supported_length, monkeypatch
 ):
     from transformers import EsmForMaskedLM
 
@@ -122,7 +123,11 @@ def test_contact_predictor_pipeline_roundtrip(
     import polars as pl
 
     model_path = tmp_path / "trunk"
-    EsmForMaskedLM(small_trunk().config).save_pretrained(model_path)
+    trunk_config = small_trunk().config
+    if supported_length:
+        trunk_config.position_embedding_type = "absolute"
+        trunk_config.max_position_embeddings = 18
+    EsmForMaskedLM(trunk_config).save_pretrained(model_path)
     esm2_tokenizer.save_pretrained(model_path)
     hf = development_dataset()
     # Logistic fitting requires both positive and negative training pairs.
@@ -140,6 +145,14 @@ def test_contact_predictor_pipeline_roundtrip(
         ],
         features=FEATURES,
     )
+    if supported_length:
+        hf["test"] = Dataset.from_list(
+            hf["test"].to_list() + [
+                row(f"casp{edition}-long", edition=edition, sequence="A" * 15)
+                for edition in (14, 15, 16)
+            ],
+            features=FEATURES,
+        )
     preset = {
         "bilinear512": "contact_embedding",
         "attention_l1": "contact_attention",
@@ -159,6 +172,7 @@ def test_contact_predictor_pipeline_roundtrip(
             "seed=13",
             f"steps.predict.controls={json.dumps(controls)}",
             "steps.tune.max_epochs=12",
+            f"steps.prepare.contact_overlength_policy={'filter' if supported_length else 'error'}",
     ]
     config = load_evaluation_config(paths, overrides=overrides)
     baselines = run_baselines(
@@ -192,6 +206,12 @@ def test_contact_predictor_pipeline_roundtrip(
         assert set(prediction.controls) == set(controls)
         assert all(frame["edition"].unique().to_list() == [edition] for frame in prediction.controls.values())
         assert scored.summaries.height > 0
+        if supported_length:
+            assert scored.summaries["contact_dataset_scope"].unique().to_list() == ["supported_length_subset"]
+            selection = json.loads(prediction.metadata.contact_length_selection)
+            assert selection["splits"]["test"]["excluded_chains"][0]["record_id"] == f"{name}-long"
+            assert prediction.predictions["record_id"].to_list() == [name]
+            assert all(frame["record_id"].to_list() == [name] for frame in prediction.controls.values())
         assert set(scored.control_summaries) == set(controls)
         assert scored.summaries["edition"].unique().to_list() == [edition]
         assert subset_workspace.scores_path.joinpath("scores.parquet").is_file()
@@ -398,6 +418,61 @@ def test_native_esmc_contact_loader_supports_original_positions(
     assert torch.isfinite(features).all()
 
 
+@pytest.mark.parametrize("predictor", ["bilinear512", "attention_l1", "categorical_jacobian"])
+def test_absolute_esm_contact_filters_whole_chains_and_labels_results(
+    monkeypatch, tmp_path, esm2_tokenizer, predictor
+):
+    from modules.evaluate.src.tasks import contact_prediction
+    from modules.evaluate.src.contracts.artifacts import EvaluationMetadata
+    from modules.evaluate.src.contracts.config import PrepareConfig
+
+    config = small_trunk().config
+    config.position_embedding_type = "absolute"
+    config.max_position_embeddings = 18
+    model = ContactPredictionModel(EsmModel(config))
+    monkeypatch.setattr(contact_prediction, "build_contact_model", lambda *a, **k: model)
+    monkeypatch.setattr(
+        contact_prediction.AutoTokenizer, "from_pretrained",
+        lambda *a, **k: esm2_tokenizer,
+    )
+    raw = DatasetDict({
+        split: Dataset.from_list([
+            row(f"{split}-short", split, sequence="A" * 14),
+            row(f"{split}-long", split, sequence="A" * 15),
+            row(f"{split}-gapped", split, sequence="A" * 7 + "X" * 8),
+        ], features=FEATURES)
+        for split in ("train", "validation", "test")
+    })
+    task = get_task("contact_prediction")
+    prepared = task.prepare_inputs(
+        inputs=config_for(tmp_path, tmp_path / "model").workspace,
+        config=PrepareConfig(contact_overlength_policy="filter"),
+        device=torch.device("cpu"), dataset=raw, predictor=predictor,
+    )
+    contacts = prepared.contact.dataset
+    for split, chains in contacts.splits.items():
+        assert [c.record_id for c in chains] == [f"{split}-short"]
+        assert chains[0].alignment.sequence == "A" * 14
+        excluded = contacts.length_selection["splits"][split]["excluded_chains"]
+        assert [c["record_id"] for c in excluded] == [f"{split}-long", f"{split}-gapped"]
+        assert all(c["required_positions"] == 17 for c in excluded)
+        assert all(c["unit_ids"] for c in excluded)
+    assert contacts.fingerprint != prepare_contact_dataset(raw).fingerprint
+    output = task.predict_units(
+        contacts, lambda chain: np.zeros((14, 14)),
+        EvaluationMetadata(
+            model_name="esm1b", dataset_name="casp", task_type="contact_prediction", seed=13
+        ),
+    )
+    assert output.metadata.contact_dataset_scope == "supported_length_subset"
+    assert json.loads(output.metadata.contact_length_selection) == contacts.length_selection
+    scored = task.score_units(output)
+    assert scored.summaries["contact_dataset_scope"].unique().to_list() == ["supported_length_subset"]
+    assert scored.summaries["contact_length_selection"].unique().to_list() == [output.metadata.contact_length_selection]
+    assert output.predictions["record_id"].to_list() == ["test-short"]
+    assert len(raw["test"]) == 3
+
+
 def test_absolute_esm_contact_preflight_rejects_long_test_chain(
     monkeypatch, tmp_path, esm2_tokenizer
 ):
@@ -423,6 +498,13 @@ def test_absolute_esm_contact_preflight_rejects_long_test_chain(
     with pytest.raises(ValueError, match="test: full-chain contact input"):
         get_task("contact_prediction").prepare_inputs(
             inputs=evaluation.workspace, config=evaluation.steps.prepare,
+            device=torch.device("cpu"), dataset=dataset, predictor="bilinear512",
+        )
+    from modules.evaluate.src.contracts.config import PrepareConfig
+    with pytest.raises(ValueError, match="subset is empty for split 'test'"):
+        get_task("contact_prediction").prepare_inputs(
+            inputs=evaluation.workspace,
+            config=PrepareConfig(contact_overlength_policy="filter"),
             device=torch.device("cpu"), dataset=dataset, predictor="bilinear512",
         )
 
