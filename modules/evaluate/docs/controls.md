@@ -287,7 +287,7 @@ Per (control, metric), Score reports:
   Calibration fits each condition's temperatures once, before resampling.
 
 Column layout and a loading snippet: [Reading results](../README.md#reading-results).
-Settings: [Step 4 — Score](../README.md#step-4--score). Implementation:
+Settings: [Scoring](../README.md#scoring). Implementation:
 [`metrics/bootstrap.py`](../src/metrics/bootstrap.py) and
 [`metrics/comparisons.py`](../src/metrics/comparisons.py).
 

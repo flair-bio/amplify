@@ -188,8 +188,10 @@ To use a downloaded suite, keep the dataset overlay and override
 `workspace.dataset_repo_id=/path/to/evaluation-suite` and
 `workspace.dataset_revision=null`. For a standalone Hub repository, select its
 ID and set `workspace.dataset_config_name=null` if it has no named config.
-Local loading supports the suite layout or split Parquet artifacts; see
-[dataset sourcing](docs/dataset-sourcing.md).
+Local loading supports the suite layout or split Parquet artifacts. Dataset
+sourcing, standardization, and publication are maintained in
+[amplify-downstream-data-prep](https://github.com/flair-bio/amplify-downstream-data-prep/tree/main);
+this module consumes the prepared artifacts.
 
 ### Named benchmark splits
 
@@ -452,8 +454,7 @@ Do not concatenate contact or ProteinGym tables into this flat-task schema.
 ```text
 modules/evaluate/
 ├── configs/             # runnable presets and overlays
-├── docs/                # controls, datasets, sourcing, ProteinGym guides
-├── scripts/             # dataset-sourcing tools
+├── docs/                # controls, dataset catalog, ProteinGym guide
 └── src/
     ├── run_evaluate.py  # sole CLI
     ├── config/          # schemas, composition, validation
@@ -561,8 +562,8 @@ changing distributed code.
 
 Copy an existing YAML in the matching config directory. Dataset overlays
 declare the source, default task, target type, label format, and class count
-where applicable. For new source data, follow the
-[sourcing guide](docs/dataset-sourcing.md#adding-a-new-source).
+where applicable. Prepare new source data in
+[amplify-downstream-data-prep](https://github.com/flair-bio/amplify-downstream-data-prep/tree/main).
 Adding a dataset or checkpoint normally does not require another Python task.
 
 ### Adding a Task Type

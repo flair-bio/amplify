@@ -1,7 +1,7 @@
 # Evaluation Docs
 
 Start with the [evaluation README](../README.md) for the
-Prepare → Tune → Predict → Score pipeline, task types, controls, and config
+prepare, fit, predict, score, and save workflow, task types, controls, and config
 reference. The guides below cover datasets and dataset-specific workflows.
 
 | I want to... | Read |
@@ -9,11 +9,13 @@ reference. The guides below cover datasets and dataset-specific workflows.
 | Run an evaluation or add a task type | [Evaluation README](../README.md) |
 | Choose controls, or judge what a model learned from them | [Controls](controls.md) |
 | Pick a dataset, or learn what its targets mean and which task uses it | [Dataset catalog](datasets.md) |
-| Build or publish a dataset artifact, or check its provenance | [Dataset sourcing](dataset-sourcing.md) |
-| Source or score ProteinGym assays | [ProteinGym](proteingym.md) |
+| Build or publish a dataset artifact | [Downstream data preparation](https://github.com/flair-bio/amplify-downstream-data-prep/tree/main) (separate repository) |
+| Run or understand ProteinGym evaluation | [ProteinGym](proteingym.md) |
 
-Dataset overlays live in [`configs/datasets/`](../configs/datasets/); sourcing
-configs live in [`scripts/dataset_sourcing/configs/`](../scripts/dataset_sourcing/configs/).
+Dataset overlays live in [`configs/datasets/`](../configs/datasets/). This
+module loads prepared artifacts; dataset sourcing, standardization, and
+publication live in the separate data-preparation repository. Keep dataset
+cards and pinned artifact revisions with your experiment for provenance.
 
 ## Common questions
 
@@ -27,6 +29,6 @@ configs live in [`scripts/dataset_sourcing/configs/`](../scripts/dataset_sourcin
 | Did the model learn anything beyond a baseline? | [Interpreting controls](controls.md#interpreting-results) |
 | Which layer carries the signal? | [Layerwise linear probes](../README.md#layerwise-linear-probes) |
 | Why did one run overwrite another? | [Output disk layout](../README.md#output-disk-layout): seeds and variants are isolated; replacing an existing run requires `--overwrite` |
-| How do I add a dataset? | [Adding a new source](dataset-sourcing.md#adding-a-new-source), then a [dataset overlay](../README.md#new-dataset-task-or-model-overlay) |
+| How do I add a dataset? | Prepare the artifact in the [data-preparation repository](https://github.com/flair-bio/amplify-downstream-data-prep/tree/main), then add a [dataset overlay](../README.md#new-dataset-task-or-model-overlay) |
 | How do I add a task type? | [Adding a task type](../README.md#adding-a-task-type) |
-| My run failed or hung | [Troubleshooting](../README.md#troubleshooting), [sourcing gotchas](dataset-sourcing.md#gotchas) |
+| My run failed or hung | [Troubleshooting](../README.md#troubleshooting) |
