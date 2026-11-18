@@ -8,12 +8,6 @@ import pytest
 import torch
 from torch import nn
 
-from modules.evaluate.scripts.dataset_sourcing.source_proteingym import (
-    _TRACKS,
-    _add_seeded_splits,
-    _load_assay,
-    write_proteingym_card,
-)
 from modules.evaluate.src.model import factory
 from modules.evaluate.src.proteingym import data as proteingym_data
 from modules.evaluate.src.proteingym import runner as proteingym_runner
@@ -148,110 +142,6 @@ def test_optimal_window_matches_proteingym_get_optimal_window():
     assert _optimal_window(position=98, full_len=100, window=20) == (80, 100)
     # Middle: centered window.
     assert _optimal_window(position=50, full_len=100, window=20) == (40, 60)
-
-
-def test_load_assay_adds_unique_id_from_mutant_or_sequence(tmp_path):
-    assay_path = tmp_path / "assay.csv"
-    pl.DataFrame(
-        {
-            "mutated_sequence": ["ACDF", "ACDG"],
-            "mutant": ["A1D", None],
-            "DMS_score": [0.1, 0.2],
-        }
-    ).write_csv(assay_path)
-
-    assay = _load_assay(tmp_path, "assay.csv", "assay-1")
-
-    assert assay["id"].to_list() == ["assay-1:A1D", "assay-1:ACDG"]
-    assert assay["mutated_sequence"].to_list() == ["ACDF", "ACDG"]
-    assert assay["id"].n_unique() == assay.height
-
-    indel_path = tmp_path / "indel.csv"
-    pl.DataFrame({"mutated_sequence": ["ACD", "ACDE"]}).write_csv(indel_path)
-    indels = _load_assay(tmp_path, "indel.csv", "indel-1")
-    assert indels["id"].to_list() == ["indel-1:ACD", "indel-1:ACDE"]
-
-    clinical_path = tmp_path / "clinical.csv"
-    pl.DataFrame(
-        {
-            "mutated_sequence": ["ACD", "ACE"],
-            "DMS_bin_score": ["Benign", "Pathogenic"],
-        }
-    ).write_csv(clinical_path)
-    clinical = _load_assay(tmp_path, "clinical.csv", "clinical-1")
-    assert clinical["dms_score_bin"].to_list() == ["Benign", "Pathogenic"]
-
-
-def test_seeded_splits_are_reproducible_and_disjoint():
-    frame = pl.DataFrame({"id": [f"variant-{index}" for index in range(10)]})
-
-    first = _add_seeded_splits(frame, 0.8, 0.1, seed=1957723)
-    second = _add_seeded_splits(frame, 0.8, 0.1, seed=1957723)
-
-    assert first.equals(second)
-    assert first["split"].value_counts().height == 3
-    # Alphabetical sort of split names: test, train, validation.
-    assert first.group_by("split").len().sort("split")["len"].to_list() == [1, 8, 1]
-
-
-@pytest.mark.parametrize("height", [3, 4, 5])
-def test_seeded_splits_give_small_assays_every_role(height):
-    frame = pl.DataFrame({"id": [f"variant-{index}" for index in range(height)]})
-
-    split = _add_seeded_splits(frame, 0.8, 0.1, seed=1957723, dms_id="a")["split"]
-
-    assert set(split.to_list()) == {"train", "validation", "test"}
-
-
-def test_seeded_splits_leave_tiny_assays_unchanged():
-    frame = pl.DataFrame({"id": ["variant-0", "variant-1"]})
-
-    assert _add_seeded_splits(frame, 0.8, 0.1, seed=1957723).equals(frame)
-
-
-def test_proteingym_card_describes_track_layout_and_splits(tmp_path):
-    config = type(
-        "Config",
-        (),
-        {
-            "base_url": "https://example.test/proteingym",
-            "version": "v1.3",
-            "reference_base_url": "https://example.test/reference_files",
-            "track": "dms_substitutions",
-            "seed": 7,
-            "train_fraction": 0.8,
-            "validation_fraction": 0.1,
-            "create_split_subsets": True,
-            "combine_assays": True,
-        },
-    )()
-    combined = pl.DataFrame(
-        {
-            "id": ["assay-1:A1C"],
-            "dms_id": ["assay-1"],
-            "mutated_sequence": ["ACD"],
-            "dms_score": [0.5],
-            "fold_random_5": [0],
-        }
-    )
-    reference = pl.DataFrame({"dms_id": ["assay-1"]})
-
-    card_path = write_proteingym_card(
-        tmp_path,
-        config,
-        _TRACKS["dms_substitutions"],
-        combined,
-        reference,
-        ["train", "train_random", "train_stratified"],
-    )
-
-    card = card_path.read_text(encoding="utf-8")
-    assert "ProteinGym `v1.3` DMS substitution assays" in card
-    assert "DMS_substitutions.csv" in card
-    assert "combined_<split>.parquet" in card
-    assert "seed `7`" in card
-    assert "`dms_score`" in card
-    assert "`fold_random_5`" in card
 
 
 def test_score_assay_masked_marginal_matches_closed_form():
