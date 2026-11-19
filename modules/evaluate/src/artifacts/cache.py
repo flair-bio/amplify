@@ -16,7 +16,7 @@ from torch import nn
 from modules.evaluate.src.artifacts.files import atomic_output, cache_lock
 
 if TYPE_CHECKING:
-    from modules.evaluate.src.config.shared import (
+    from modules.evaluate.src.config import (
         EmbeddingAutocastDtype,
         EmbeddingDtype,
         EmbeddingPooling,

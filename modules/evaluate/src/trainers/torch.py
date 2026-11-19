@@ -15,8 +15,7 @@ from accelerate.utils import broadcast
 from torch import nn
 from transformers import get_scheduler
 
-from modules.evaluate.src.config.evaluation import TuneConfig
-from modules.evaluate.src.config.shared import EvaluationWorkspaceConfig
+from modules.evaluate.src.config import EvaluationWorkspaceConfig, TuneConfig
 from modules.evaluate.src.dataset.dataloader import metric_groups_for_ids
 from modules.evaluate.src.dataset.embeddings import find_embedding_dataset
 from modules.evaluate.src.dataset.types import TrainingData

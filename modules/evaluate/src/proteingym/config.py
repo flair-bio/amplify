@@ -8,11 +8,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
-from modules.evaluate.src.config.shared import (
+from modules.evaluate.src.config import (
     EvaluationWorkspaceConfig,
     WandbConfig,
-    validate_directory_label,
 )
+from modules.evaluate.src.utils.config_utils import validate_directory_label
 
 ProteinGymDtype = Literal["float32", "float16", "bfloat16"]
 

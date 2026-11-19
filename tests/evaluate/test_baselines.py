@@ -18,15 +18,15 @@ from modules.evaluate.src.artifacts.baselines import (
 from modules.evaluate.src.artifacts.predictions import persist_predictions
 from modules.evaluate.src.artifacts.results import EvaluationMetadata, PredictOutput
 from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
-from modules.evaluate.src.config.evaluation import (
+from modules.evaluate.src.config import (
     BaselineRunConfig,
     ExternalTestSetConfig,
     LayerwiseConfig,
     PredictConfig,
     ScoreConfig,
 )
-from modules.evaluate.src.config.load import load_baseline_config
-from modules.evaluate.src.config.shared import DatasetWorkspaceConfig
+from modules.evaluate.src.utils.config_utils import load_baseline_config
+from modules.evaluate.src.config import DatasetWorkspaceConfig
 from modules.evaluate.src.dataset import loading as dataloader
 from modules.evaluate.src.dataset.baseline_data import (
     align_baseline,

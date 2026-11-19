@@ -113,8 +113,7 @@ workspace:
 checkpoint directories.
 
 The configuration is validated with Pydantic in
-[`config/evaluation.py`](src/config/evaluation.py) and
-[`config/shared.py`](src/config/shared.py). Unsupported combinations fail
+[`config.py`](src/config.py). Unsupported combinations fail
 early. The descriptions here refer to shipped presets; schema fallback
 defaults can differ from `configs/config.yaml`.
 
@@ -482,7 +481,7 @@ run_evaluate.main()
     select runner; validate contact protocol if applicable
     reserve_outputs()
       _prepare_test_subsets()
-      run_flat_evaluation()                  runners/flat.py
+      run_flat_evaluation()                  runners/flat_evaluation.py
         get_flat_task()
         build_predictor() + load_tokenizer()
         prepare_training_data()

@@ -15,7 +15,7 @@ from modules.evaluate.src.tasks.contact_prediction import (
 
 if TYPE_CHECKING:
     from modules.evaluate.src.artifacts.results import EvaluationMetadata
-    from modules.evaluate.src.config.evaluation import PredictConfig
+    from modules.evaluate.src.config import PredictConfig
 
 
 def predict_contact(

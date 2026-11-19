@@ -12,8 +12,8 @@ from datasets import Dataset, DatasetDict
 from torch import nn
 
 from modules.evaluate.src.artifacts.cache import EmbeddingCache
-from modules.evaluate.src.config.evaluation import HeadConfig, PredictConfig, TuneConfig
-from modules.evaluate.src.config.shared import EmbeddingCacheConfig
+from modules.evaluate.src.config import HeadConfig, PredictConfig, TuneConfig
+from modules.evaluate.src.config import EmbeddingCacheConfig
 from modules.evaluate.src.dataset.collator import (
     EvaluationCollator,
     EvaluationCollatorConfig,

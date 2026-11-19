@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from transformers import get_scheduler
 
 from modules.core.utils.config_loader import load_and_parse
-from modules.evaluate.src.config.evaluation import (
+from modules.evaluate.src.config import (
     EvaluationConfig,
     HeadConfig,
     HyperparameterSearchConfig,

@@ -13,18 +13,18 @@ from transformers import get_scheduler
 from modules.evaluate.src.artifacts.cache import EmbeddingCache
 from modules.evaluate.src.artifacts.results import FitResult
 from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
-from modules.evaluate.src.config.evaluation import (
+from modules.evaluate.src.config import (
     HeadConfig,
     HyperparameterSearchConfig,
     HyperparameterSearchSpaceConfig,
     LayerwiseConfig,
     TuneConfig,
 )
-from modules.evaluate.src.config.shared import EmbeddingCacheConfig
+from modules.evaluate.src.config import EmbeddingCacheConfig
 from modules.evaluate.src.dataset.embeddings import EmbeddingDataset
 from modules.evaluate.src.model.heads import EmbeddingProbeHead
 from modules.evaluate.src.model.layerwise import LayerwiseProbeModel
-from modules.evaluate.src.trainers.classical import _gather_embeddings, fit_candidates
+from modules.evaluate.src.trainers.classical_estimators import _gather_embeddings, fit_candidates
 from modules.evaluate.src.trainers.fitting import _report_torch_seed_variance
 from modules.evaluate.src.trainers.layerwise import fit_layerwise, improves
 from modules.evaluate.src.trainers.selection import (
@@ -195,7 +195,7 @@ def test_classical_hpo_uses_grouped_regression_metric(monkeypatch):
             return features[:, 0]
 
     monkeypatch.setattr(
-        "modules.evaluate.src.trainers.classical.build_estimator",
+        "modules.evaluate.src.trainers.classical_estimators.build_estimator",
         lambda *args, **kwargs: Estimator(),
     )
     _, _, score = fit_candidates(
@@ -215,7 +215,7 @@ def test_classical_hpo_uses_grouped_regression_metric(monkeypatch):
 
 
 def test_classical_selection_uses_fixed_class_macro_f1(monkeypatch):
-    from modules.evaluate.src.trainers.classical import (
+    from modules.evaluate.src.trainers.classical_estimators import (
         fit_candidates as sweep_classical_head,
     )
 
@@ -231,7 +231,7 @@ def test_classical_selection_uses_fixed_class_macro_f1(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "modules.evaluate.src.trainers.classical.build_estimator", build
+        "modules.evaluate.src.trainers.classical_estimators.build_estimator", build
     )
     _, best, score = sweep_classical_head(
         "knn",

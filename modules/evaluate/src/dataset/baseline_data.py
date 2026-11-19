@@ -12,12 +12,12 @@ from typing import Any
 import polars as pl
 from datasets import Dataset, DatasetDict
 
-from modules.evaluate.src.config.evaluation import BaselinesConfig
-from modules.evaluate.src.config.shared import (
+from modules.evaluate.src.config import (
     BaselineName,
+    BaselinesConfig,
     DatasetWorkspaceConfig,
-    dataset_source_identity,
 )
+from modules.evaluate.src.utils.config_utils import dataset_source_identity
 
 BASELINE_PROTOCOLS = {
     "majority_class": "train-majority-v1",

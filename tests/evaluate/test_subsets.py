@@ -15,8 +15,8 @@ from modules.evaluate.src.artifacts.results import (
     PredictOutput,
 )
 from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
-from modules.evaluate.src.config.evaluation import EvaluationConfig, PredictConfig
-from modules.evaluate.src.config.load import (
+from modules.evaluate.src.config import EvaluationConfig, PredictConfig
+from modules.evaluate.src.utils.config_utils import (
     load_baseline_config,
     load_evaluation_config,
 )
@@ -30,7 +30,8 @@ from modules.evaluate.src.model.contact_features import (
 )
 from modules.evaluate.src.model.controls import ControlPredictors
 from modules.evaluate.src.model.factory import Predictor
-from modules.evaluate.src.runners import flat, pipeline
+from modules.evaluate.src.runners import flat_evaluation as flat
+from modules.evaluate.src.runners import pipeline
 from modules.evaluate.src.runners.runtime import Runtime
 
 from .test_contact_data import hf_data, row
@@ -115,7 +116,7 @@ def test_selection_preserves_development_and_all_chain_units():
 def test_generic_baselines_use_matching_subset_artifacts(tmp_path):
     import polars as pl
 
-    from modules.evaluate.src.config.evaluation import BaselineRunConfig
+    from modules.evaluate.src.config import BaselineRunConfig
     from modules.evaluate.src.runners.baselines import run_baselines
 
     data = DatasetDict(

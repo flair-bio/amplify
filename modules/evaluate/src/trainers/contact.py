@@ -35,7 +35,7 @@ from modules.evaluate.src.model.contact_model import (
 from modules.evaluate.src.model.factory import Predictor
 
 if TYPE_CHECKING:
-    from modules.evaluate.src.config.evaluation import TuneConfig
+    from modules.evaluate.src.config import TuneConfig
 logger = logging.getLogger(__name__)
 
 

@@ -15,7 +15,7 @@ import torch
 import yaml
 from datasets import Dataset, DatasetDict
 
-from modules.evaluate.src.config.evaluation import DatasetSplitConfig
+from modules.evaluate.src.config import DatasetSplitConfig
 from modules.evaluate.src.dataset import loading as dataloader_module
 from modules.evaluate.src.dataset.collator import (
     EvaluationCollator,

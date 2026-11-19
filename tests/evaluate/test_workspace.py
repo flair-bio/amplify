@@ -10,8 +10,8 @@ import pytest
 
 from modules.core.utils.config_loader import load_and_parse
 from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
-from modules.evaluate.src.config.evaluation import EvaluationConfig
-from modules.evaluate.src.config.shared import EvaluationWorkspaceConfig
+from modules.evaluate.src.config import EvaluationConfig
+from modules.evaluate.src.config import EvaluationWorkspaceConfig
 
 
 def workspace_config(base_dir, **overrides):

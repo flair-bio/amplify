@@ -17,7 +17,7 @@ from modules.evaluate.src.artifacts.results import (
     PredictOutput,
     ScoreOutput,
 )
-from modules.evaluate.src.config.evaluation import ScoreConfig
+from modules.evaluate.src.config import ScoreConfig
 from modules.evaluate.src.metrics.bootstrap import (
     as_indexable_array,
     bootstrap_confusion_scores,

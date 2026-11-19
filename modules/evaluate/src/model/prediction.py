@@ -16,18 +16,18 @@ from modules.evaluate.src.artifacts.results import EvaluationMetadata, PredictOu
 from modules.evaluate.src.artifacts.workspace import (
     EvaluationWorkspace,
 )
-from modules.evaluate.src.config.evaluation import PredictConfig
-from modules.evaluate.src.config.shared import (
+from modules.evaluate.src.config import (
     BASELINE_NAMES,
     CLASSICAL_HEAD_TYPES,
     BaselineName,
+    PredictConfig,
 )
 from modules.evaluate.src.controls.inference import predict_control
 from modules.evaluate.src.dataset.dataloader import attach_metric_groups
 from modules.evaluate.src.dataset.embeddings import find_embedding_dataset
 from modules.evaluate.src.dataset.types import TestData, TrainingData
 from modules.evaluate.src.model.baselines import build_prediction_baseline
-from modules.evaluate.src.model.classical import run_classical_inference
+from modules.evaluate.src.model.classical_estimators import run_classical_inference
 from modules.evaluate.src.model.controls import NO_INFERENCE_CONTROLS, ControlPredictors
 from modules.evaluate.src.model.factory import Predictor
 from modules.evaluate.src.model.inference import (

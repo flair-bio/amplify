@@ -6,8 +6,8 @@ import pytest
 from omegaconf import OmegaConf
 
 from modules.core.utils.config_loader import load_and_parse
-from modules.evaluate.src.config.evaluation import EvaluationConfig
-from modules.evaluate.src.config.load import (
+from modules.evaluate.src.config import EvaluationConfig
+from modules.evaluate.src.utils.config_utils import (
     load_baseline_config,
     load_evaluation_config,
 )

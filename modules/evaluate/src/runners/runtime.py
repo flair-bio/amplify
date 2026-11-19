@@ -11,8 +11,8 @@ from dataclasses import dataclass
 import torch
 from accelerate import Accelerator, PartialState
 
-from modules.evaluate.src.config.evaluation import BaselineRunConfig, EvaluationConfig
-from modules.evaluate.src.config.load import RunConfig
+from modules.evaluate.src.config import BaselineRunConfig, EvaluationConfig
+from modules.evaluate.src.utils.config_utils import RunConfig
 from modules.evaluate.src.utils.seed import seed_everything
 
 

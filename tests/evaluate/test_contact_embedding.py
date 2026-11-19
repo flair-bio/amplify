@@ -18,7 +18,7 @@ from transformers import EsmConfig, EsmModel
 from modules.evaluate.src import run_evaluate
 from modules.evaluate.src.artifacts.checkpoints import save_predictor
 from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
-from modules.evaluate.src.config.load import load_evaluation_config
+from modules.evaluate.src.utils.config_utils import load_evaluation_config
 from modules.evaluate.src.dataset.contact import (
     candidate_pairs,
     prepare_contact_dataset,
@@ -130,7 +130,7 @@ def test_contact_predictor_pipeline_roundtrip(
     import polars as pl
     from transformers import EsmForMaskedLM
 
-    from modules.evaluate.src.config.load import load_baseline_config
+    from modules.evaluate.src.utils.config_utils import load_baseline_config
     from modules.evaluate.src.runners.baselines import run_baselines
     from modules.evaluate.src.trainers import contact as contact_training
 

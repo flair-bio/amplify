@@ -9,8 +9,7 @@ from typing import Any
 
 from datasets import DatasetDict, load_dataset  # type: ignore[attr-defined]
 
-from modules.evaluate.src.config.evaluation import DatasetSplitConfig
-from modules.evaluate.src.config.shared import DEFAULT_SPLIT_NAME
+from modules.evaluate.src.config import DEFAULT_SPLIT_NAME, DatasetSplitConfig
 from modules.evaluate.src.dataset.contact import prepare_contact_dataset
 
 logger = logging.getLogger(__name__)

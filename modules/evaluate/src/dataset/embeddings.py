@@ -24,7 +24,7 @@ from modules.evaluate.src.dataset.dataloader import LengthGroupedSampler, token_
 from modules.evaluate.src.model.embeddings import AUTOCAST_DTYPES, extract_embeddings
 
 if TYPE_CHECKING:
-    from modules.evaluate.src.config.shared import (
+    from modules.evaluate.src.config import (
         EmbeddingAutocastDtype,
         EmbeddingCacheConfig,
         EmbeddingDtype,

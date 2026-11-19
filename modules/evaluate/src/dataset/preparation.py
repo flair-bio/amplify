@@ -19,11 +19,11 @@ from modules.evaluate.src.artifacts.cache import (
     weights_fingerprint,
 )
 from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace, TaskType
-from modules.evaluate.src.config.evaluation import ExternalTestSetConfig, PrepareConfig
-from modules.evaluate.src.config.shared import (
+from modules.evaluate.src.config import (
     BaselineName,
     EmbeddingCacheConfig,
-    dataset_source_identity,
+    ExternalTestSetConfig,
+    PrepareConfig,
 )
 from modules.evaluate.src.dataset.baseline_data import (
     baseline_context,
@@ -57,9 +57,10 @@ from modules.evaluate.src.dataset.types import (
 from modules.evaluate.src.model.embeddings import validate_embedding_cache_compat
 from modules.evaluate.src.model.layerwise import resolve_layers
 from modules.evaluate.src.tasks.registry import get_flat_task
+from modules.evaluate.src.utils.config_utils import dataset_source_identity
 
 if TYPE_CHECKING:
-    from modules.evaluate.src.config.evaluation import LayerwiseConfig
+    from modules.evaluate.src.config import LayerwiseConfig
 logger = get_logger(__name__)
 
 

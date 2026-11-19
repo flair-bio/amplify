@@ -23,8 +23,7 @@ from modules.evaluate.src.artifacts.results import (
     PredictOutput,
     StructuredScoreOutput,
 )
-from modules.evaluate.src.config.evaluation import BaselineRunConfig, ScoreConfig
-from modules.evaluate.src.config.shared import BaselineName
+from modules.evaluate.src.config import BaselineName, BaselineRunConfig, ScoreConfig
 from modules.evaluate.src.dataset.baseline_data import (
     artifact_identity,
     baseline_context,

@@ -13,15 +13,14 @@ from sklearn.base import BaseEstimator
 from torch.utils.data import DataLoader, DistributedSampler
 
 from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
-from modules.evaluate.src.config.evaluation import PredictConfig
-from modules.evaluate.src.config.shared import BASELINE_NAMES
+from modules.evaluate.src.config import BASELINE_NAMES, PredictConfig
 from modules.evaluate.src.dataset.embeddings import (
     EmbeddingDataset,
     embedding_collate_fn,
     find_embedding_dataset,
 )
 from modules.evaluate.src.dataset.types import TestData
-from modules.evaluate.src.model.classical import run_classical_inference
+from modules.evaluate.src.model.classical_estimators import run_classical_inference
 from modules.evaluate.src.model.controls import (
     RANDOM_TRUNK_CONTROL,
     RANDOMIZED_HEAD_CONTROLS,

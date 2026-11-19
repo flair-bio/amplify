@@ -16,11 +16,12 @@ from modules.evaluate.src.artifacts.results import (
     ScoreOutput,
 )
 from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
-from modules.evaluate.src.config.evaluation import EvaluationConfig
+from modules.evaluate.src.config import EvaluationConfig
 from modules.evaluate.src.dataset.types import TestData as HeldOutData
 from modules.evaluate.src.dataset.types import TrainingData
 from modules.evaluate.src.model.controls import ControlPredictors
-from modules.evaluate.src.runners import flat, pipeline
+from modules.evaluate.src.runners import flat_evaluation as flat
+from modules.evaluate.src.runners import pipeline
 from modules.evaluate.src.runners.runtime import Runtime
 
 

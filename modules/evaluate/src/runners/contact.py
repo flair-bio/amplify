@@ -17,7 +17,7 @@ from modules.evaluate.src.artifacts.predictions import persist_predictions
 from modules.evaluate.src.artifacts.reports import publish_structured_scores
 from modules.evaluate.src.artifacts.results import EvaluationResult, PipelineResult
 from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
-from modules.evaluate.src.config.evaluation import EvaluationConfig, PrepareConfig
+from modules.evaluate.src.config import EvaluationConfig, PrepareConfig
 from modules.evaluate.src.controls.contact import (
     build_contact_controls,
     contact_control_settings,

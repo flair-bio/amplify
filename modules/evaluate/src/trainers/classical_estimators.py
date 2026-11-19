@@ -12,12 +12,11 @@ from sklearn.base import BaseEstimator
 from sklearn.model_selection import ParameterGrid
 
 from modules.evaluate.src.artifacts.results import FitResult
-from modules.evaluate.src.config.evaluation import TuneConfig
-from modules.evaluate.src.config.shared import EvaluationWorkspaceConfig, HeadType
+from modules.evaluate.src.config import EvaluationWorkspaceConfig, HeadType, TuneConfig
 from modules.evaluate.src.dataset.dataloader import metric_groups_for_ids
 from modules.evaluate.src.dataset.embeddings import find_embedding_dataset
 from modules.evaluate.src.dataset.types import TrainingData
-from modules.evaluate.src.model.classical import (
+from modules.evaluate.src.model.classical_estimators import (
     build_estimator,
     classical_search_space,
     has_classical_search_space,

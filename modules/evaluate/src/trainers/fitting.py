@@ -10,10 +10,10 @@ from accelerate import Accelerator
 from torch import nn
 
 from modules.evaluate.src.artifacts.results import FitResult
-from modules.evaluate.src.config.evaluation import TuneConfig
-from modules.evaluate.src.config.shared import (
+from modules.evaluate.src.config import (
     CLASSICAL_HEAD_TYPES,
     EvaluationWorkspaceConfig,
+    TuneConfig,
 )
 from modules.evaluate.src.dataset.embeddings import find_embedding_dataset
 from modules.evaluate.src.dataset.types import TrainingData
@@ -24,7 +24,7 @@ from modules.evaluate.src.model.heads import (
 )
 from modules.evaluate.src.model.layerwise import LayerwiseProbeModel
 from modules.evaluate.src.tasks.token_classification import IGNORE_INDEX
-from modules.evaluate.src.trainers.classical import _run_classical_head
+from modules.evaluate.src.trainers.classical_estimators import _run_classical_head
 from modules.evaluate.src.trainers.layerwise import _run_layerwise
 from modules.evaluate.src.trainers.refit import _final_fit_split, _finalize_torch_probe
 from modules.evaluate.src.trainers.selection import _search_hyperparameters

@@ -16,7 +16,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from torch import nn
 
-from modules.evaluate.src.config.shared import HeadType
+from modules.evaluate.src.config import HeadType
 
 logger = logging.getLogger(__name__)
 _ESTIMATOR_REGISTRY = {

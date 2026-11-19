@@ -12,8 +12,7 @@ from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 
 from modules.evaluate.src.artifacts.results import FitResult
-from modules.evaluate.src.config.evaluation import TuneConfig
-from modules.evaluate.src.config.shared import EvaluationWorkspaceConfig
+from modules.evaluate.src.config import EvaluationWorkspaceConfig, TuneConfig
 from modules.evaluate.src.dataset.types import TrainingData
 from modules.evaluate.src.model.factory import Predictor
 from modules.evaluate.src.model.heads import EmbeddingProbeHead

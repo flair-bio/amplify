@@ -14,7 +14,7 @@ from datasets import DatasetDict
 
 from modules.evaluate.src.artifacts.reports import publish_layer_comparison
 from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
-from modules.evaluate.src.config.evaluation import (
+from modules.evaluate.src.config import (
     EvaluationConfig,
     HeadConfig,
     LayerwiseConfig,
@@ -22,7 +22,7 @@ from modules.evaluate.src.config.evaluation import (
     ScoreConfig,
     TuneConfig,
 )
-from modules.evaluate.src.config.shared import (
+from modules.evaluate.src.config import (
     EmbeddingCacheConfig,
     EvaluationWorkspaceConfig,
 )
@@ -149,7 +149,7 @@ def test_prediction_batch_progress_is_scoped_and_throttled(
 
 def test_online_layerwise_cli_branch(monkeypatch, tmp_path, model_family):
     from modules.evaluate.src import run_evaluate
-    from modules.evaluate.src.runners import flat
+    from modules.evaluate.src.runners import flat_evaluation as flat
     from modules.evaluate.src.runners import runtime as runtime_module
 
     prepared = _run_prepare(

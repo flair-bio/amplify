@@ -6,7 +6,7 @@ from accelerate import Accelerator
 from datasets import Dataset, DatasetDict
 from transformers import EsmForMaskedLM
 
-from modules.evaluate.src.config.evaluation import EvaluationConfig
+from modules.evaluate.src.config import EvaluationConfig
 from modules.evaluate.src.runners.pipeline import run_evaluation
 from modules.evaluate.src.runners.runtime import Runtime
 from modules.evaluate.src.tasks.sequence_regression import SequenceRegressionTask

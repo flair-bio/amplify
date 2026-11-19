@@ -8,7 +8,7 @@ import torch
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
-from modules.evaluate.src.config.evaluation import (
+from modules.evaluate.src.config import (
     HeadConfig,
     HyperparameterSearchConfig,
     HyperparameterSearchSpaceConfig,

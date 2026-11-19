@@ -10,7 +10,7 @@ from accelerate import Accelerator
 
 from modules.evaluate.src.artifacts.checkpoints import save_predictor
 from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
-from modules.evaluate.src.config.shared import EmbeddingCacheConfig
+from modules.evaluate.src.config import EmbeddingCacheConfig
 from modules.evaluate.src.dataset.embeddings import build_embedding_dataloaders
 from modules.evaluate.src.dataset.types import TrainingData
 from modules.evaluate.src.model.controls import ControlPredictors, build_random_trunk
@@ -24,7 +24,7 @@ from modules.evaluate.src.trainers.layerwise import fit_layerwise_random_trunk
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from modules.evaluate.src.config.evaluation import TuneConfig
+    from modules.evaluate.src.config import TuneConfig
 logger = logging.getLogger(__name__)
 
 

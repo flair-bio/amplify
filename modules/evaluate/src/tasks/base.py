@@ -17,7 +17,7 @@ if TYPE_CHECKING:
         PredictOutput,
         ScoreOutput,
     )
-    from modules.evaluate.src.config.evaluation import (
+    from modules.evaluate.src.config import (
         ScoreConfig,
     )
 MetricFn = Callable[[Any, Any, str], float]

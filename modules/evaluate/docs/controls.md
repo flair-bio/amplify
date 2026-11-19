@@ -235,7 +235,7 @@ performance. The versioned MMseqs protocol uses new artifacts; existing constant
 and composition artifacts remain reusable. Both sequence methods are deterministic
 and use no validation/test labels.
 
-Config validation ([`config/validation.py`](../src/config/validation.py))
+Config validation ([`config_utils.py`](../src/utils/config_utils.py))
 rejects these combinations before any work starts:
 
 - `scrambled_sequences` on ragged tasks (`token_classification`, contact
@@ -294,7 +294,7 @@ Settings: [Scoring](../README.md#scoring). Implementation:
 ## Adding a control
 
 1. Declare the name in `ControlCondition` in
-   [`config/shared.py`](../src/config/shared.py), with weight-ablation
+   [`config.py`](../src/config.py), with weight-ablation
    constants in [`model/controls.py`](../src/model/controls.py) where applicable.
 2. Coordinate independent fitting in [`controls/fitting.py`](../src/controls/fitting.py)
    and predictions in [`controls/inference.py`](../src/controls/inference.py),
@@ -303,7 +303,7 @@ Settings: [Scoring](../README.md#scoring). Implementation:
    [`dataset/baseline_data.py`](../src/dataset/baseline_data.py);
    the baseline workflow is [`runners/baselines.py`](../src/runners/baselines.py).
 3. Declare task support in its handler. Generic head/workflow compatibility checks
-   remain in [`config/validation.py`](../src/config/validation.py).
+   remain in [`config_utils.py`](../src/utils/config_utils.py).
 4. Support or explicitly reject it in layerwise mode
    ([`model/layerwise.py`](../src/model/layerwise.py)).
 5. Add it to the relevant task presets in `configs/tasks/`.

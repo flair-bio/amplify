@@ -20,8 +20,8 @@ from modules.evaluate.src.artifacts.workspace import (
     EvaluationWorkspace,
     reserve_run_outputs,
 )
-from modules.evaluate.src.config.shared import HeadType
-from modules.evaluate.src.model.classical import build_estimator
+from modules.evaluate.src.config import HeadType
+from modules.evaluate.src.model.classical_estimators import build_estimator
 from modules.evaluate.src.model.embeddings import pool_hidden_states
 from modules.evaluate.src.model.factory import (
     TORCH_DTYPES,
@@ -37,7 +37,7 @@ from modules.evaluate.src.proteingym.config import ProteinGymSupervisedConfig
 from modules.evaluate.src.proteingym.data import resolve_suite
 from modules.evaluate.src.proteingym.runner import AssayResult, run_assay_loop
 from modules.evaluate.src.runners.runtime import Runtime
-from modules.evaluate.src.trainers.classical import (
+from modules.evaluate.src.trainers.classical_estimators import (
     fit_candidates as sweep_classical_head,
 )
 

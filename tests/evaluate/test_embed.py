@@ -14,8 +14,8 @@ from torch.utils.data import DataLoader
 
 from modules.evaluate.src.artifacts.cache import EmbeddingCache, embedding_cache_key
 from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
-from modules.evaluate.src.config.evaluation import EvaluationConfig, LayerwiseConfig
-from modules.evaluate.src.config.shared import (
+from modules.evaluate.src.config import EvaluationConfig, LayerwiseConfig
+from modules.evaluate.src.config import (
     EmbeddingCacheConfig,
     EvaluationWorkspaceConfig,
 )

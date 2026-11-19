@@ -16,7 +16,7 @@ from modules.evaluate.src.artifacts.results import (
     StructuredScoreOutput,
 )
 from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
-from modules.evaluate.src.config.evaluation import ScoreConfig
+from modules.evaluate.src.config import ScoreConfig
 from modules.evaluate.src.metrics.scoring import compare_layer_scores
 from modules.evaluate.src.metrics.tables import merge_long_df
 from modules.evaluate.src.tasks.registry import get_flat_task

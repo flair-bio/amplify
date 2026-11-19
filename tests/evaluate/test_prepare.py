@@ -11,12 +11,12 @@ from accelerate.state import AcceleratorState
 from datasets import Dataset, DatasetDict
 
 from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
-from modules.evaluate.src.config.evaluation import (
+from modules.evaluate.src.config import (
     DatasetSplitConfig,
     ExternalTestSetConfig,
     PrepareConfig,
 )
-from modules.evaluate.src.config.shared import EvaluationWorkspaceConfig
+from modules.evaluate.src.config import EvaluationWorkspaceConfig
 from modules.evaluate.src.dataset import loading as resolution_module
 from modules.evaluate.src.dataset import preparation as prepare_module
 from modules.evaluate.src.dataset.embeddings import find_embedding_dataset

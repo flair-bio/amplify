@@ -8,12 +8,12 @@ from typing import ClassVar
 import pytest
 
 from modules.core.utils.config_loader import load_and_parse
-from modules.evaluate.src.config.evaluation import (
+from modules.evaluate.src.config import (
     EvaluationConfig,
     LayerwiseConfig,
     PrepareConfig,
 )
-from modules.evaluate.src.config.shared import EmbeddingCacheConfig
+from modules.evaluate.src.config import EmbeddingCacheConfig
 
 
 def _base_config_dict() -> dict:

@@ -18,7 +18,7 @@ from transformers import (
 )
 
 if TYPE_CHECKING:
-    from modules.evaluate.src.config.evaluation import LayerwiseConfig
+    from modules.evaluate.src.config import LayerwiseConfig
 
 TORCH_DTYPES = {
     "float32": torch.float32,

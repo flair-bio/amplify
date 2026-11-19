@@ -3,7 +3,7 @@
 import torch
 from transformers import EsmConfig, EsmModel
 
-from modules.evaluate.src.config.evaluation import TuneConfig
+from modules.evaluate.src.config import TuneConfig
 from modules.evaluate.src.controls.contact import (
     build_contact_controls,
     contact_control_settings,

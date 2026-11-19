@@ -26,7 +26,7 @@ from modules.evaluate.src.trainers.contact import BILINEAR_PROTOCOL
 
 if TYPE_CHECKING:
     from modules.evaluate.src.artifacts.results import EvaluationMetadata
-    from modules.evaluate.src.config.evaluation import EvaluationConfig, ScoreConfig
+    from modules.evaluate.src.config import EvaluationConfig, ScoreConfig
 class_labels = None
 uses_predictor_identity = True
 supports_packing = False

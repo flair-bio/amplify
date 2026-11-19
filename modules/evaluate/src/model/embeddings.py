@@ -16,7 +16,7 @@ from modules.evaluate.src.dataset.collator import input_id_rows, unpack_packed
 from modules.evaluate.src.model.inference import pad_for_gather
 
 if TYPE_CHECKING:
-    from modules.evaluate.src.config.shared import EmbeddingDtype, EmbeddingPooling
+    from modules.evaluate.src.config import EmbeddingDtype, EmbeddingPooling
 
 _TORCH_DTYPE = {"float16": torch.float16, "float32": torch.float32}
 AUTOCAST_DTYPES = {

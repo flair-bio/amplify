@@ -6,12 +6,11 @@ world, and which task consumes it. Ordinary datasets have an overlay YAML in
 [`configs/datasets/`](../configs/datasets/) that plugs it into the
 `run_evaluate.py` pipeline; how overlays are combined with the base, model,
 and task configs is covered in the evaluation README's
-[Config files](../README.md#config-files) section. How the underlying
-artifacts are built is maintained in
-[amplify-downstream-data-prep](https://github.com/flair-bio/amplify-downstream-data-prep/tree/main),
-not this evaluation module. This catalog retains dataset meanings, label
-contracts, and evaluation caveats; consult each artifact's dataset card for
-release-specific provenance, filters, and splits.
+[Config files](../README.md#config-files) section. Find the datasets on
+[FLAIR-bio's Hugging Face page](https://huggingface.co/datasets/flair-bio).
+This catalog describes dataset meanings, label contracts, and evaluation
+caveats; consult each dataset card for release-specific provenance, filters,
+and splits.
 
 **New here?** Read [Evaluation Tasks](#evaluation-tasks) for the seven kinds
 of prediction, then skim the cartoon at the top of each source in

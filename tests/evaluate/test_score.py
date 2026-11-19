@@ -25,8 +25,8 @@ from modules.evaluate.src.artifacts.results import (
     StructuredScoreOutput,
 )
 from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
-from modules.evaluate.src.config.evaluation import PredictConfig, ScoreConfig
-from modules.evaluate.src.config.shared import EvaluationWorkspaceConfig
+from modules.evaluate.src.config import PredictConfig, ScoreConfig
+from modules.evaluate.src.config import EvaluationWorkspaceConfig
 from modules.evaluate.src.dataset.collator import (
     EvaluationCollator,
     EvaluationCollatorConfig,

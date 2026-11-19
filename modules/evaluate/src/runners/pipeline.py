@@ -14,11 +14,11 @@ from datasets import DatasetDict
 from modules.evaluate.src.artifacts.manifests import update_run_manifest
 from modules.evaluate.src.artifacts.results import PipelineResult
 from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
-from modules.evaluate.src.config.evaluation import EvaluationConfig
+from modules.evaluate.src.config import EvaluationConfig
 from modules.evaluate.src.dataset.loading import resolve_evaluation_data
 from modules.evaluate.src.dataset.subsets import select_test_subsets
 from modules.evaluate.src.runners.contact import run_contact_evaluation
-from modules.evaluate.src.runners.flat import run_flat_evaluation
+from modules.evaluate.src.runners.flat_evaluation import run_flat_evaluation
 from modules.evaluate.src.runners.runtime import Runtime
 from modules.evaluate.src.tasks.contact_prediction import validate_pipeline
 

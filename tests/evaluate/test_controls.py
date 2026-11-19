@@ -11,14 +11,14 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from modules.evaluate.src.artifacts.cache import weights_fingerprint
-from modules.evaluate.src.config.evaluation import (
+from modules.evaluate.src.config import (
     HeadConfig,
     HyperparameterSearchConfig,
     HyperparameterSearchSpaceConfig,
     PredictConfig,
     TuneConfig,
 )
-from modules.evaluate.src.config.shared import EmbeddingCacheConfig
+from modules.evaluate.src.config import EmbeddingCacheConfig
 from modules.evaluate.src.controls.inference import (
     _get_or_build_control_embeddings,
     _run_embedding_control_inference,

@@ -14,7 +14,7 @@ from modules.evaluate.src.artifacts.results import FitResult
 from modules.evaluate.src.artifacts.workspace import (
     EvaluationWorkspace,
 )
-from modules.evaluate.src.config.evaluation import TuneConfig
+from modules.evaluate.src.config import TuneConfig
 from modules.evaluate.src.model.factory import Predictor
 from modules.evaluate.src.model.heads import EmbeddingProbeHead
 from modules.evaluate.src.model.layerwise import LayerwiseProbeModel

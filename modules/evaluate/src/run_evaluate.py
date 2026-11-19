@@ -6,9 +6,9 @@ import argparse
 import logging
 from collections.abc import Sequence
 
-from modules.evaluate.src.config.evaluation import BaselineRunConfig
-from modules.evaluate.src.config.load import load_run_config
+from modules.evaluate.src.config import BaselineRunConfig
 from modules.evaluate.src.runners.runtime import initialize_runtime
+from modules.evaluate.src.utils.config_utils import load_run_config
 
 logger = logging.getLogger(__name__)
 

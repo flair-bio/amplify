@@ -15,15 +15,15 @@ from typing import TYPE_CHECKING, Any
 
 from modules.evaluate.src.artifacts.files import write_json
 from modules.evaluate.src.artifacts.manifests import update_run_manifest
-from modules.evaluate.src.config.shared import (
+from modules.evaluate.src.config import (
     DatasetWorkspaceConfig,
     EvaluationWorkspaceConfig,
-    validate_directory_label,
 )
 from modules.evaluate.src.tasks import TaskType
+from modules.evaluate.src.utils.config_utils import validate_directory_label
 
 if TYPE_CHECKING:
-    from modules.evaluate.src.config.evaluation import ExternalTestSetConfig
+    from modules.evaluate.src.config import ExternalTestSetConfig
 
 __all__ = [
     "DatasetWorkspaceConfig",

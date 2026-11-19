@@ -11,7 +11,7 @@ from datasets import Dataset, DatasetDict
 from scipy.special import softmax
 
 from modules.evaluate.src.artifacts.results import EvaluationMetadata, PredictOutput
-from modules.evaluate.src.config.evaluation import BaselineRunConfig, ScoreConfig
+from modules.evaluate.src.config import BaselineRunConfig, ScoreConfig
 from modules.evaluate.src.dataset.tokenization import tokenize_dataset
 from modules.evaluate.src.metrics.bootstrap import id_groups
 from modules.evaluate.src.metrics.calibration_metrics import (

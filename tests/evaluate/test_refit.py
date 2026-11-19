@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from transformers import get_scheduler
 
 from modules.core.utils.config_loader import load_and_parse
-from modules.evaluate.src.config.evaluation import (
+from modules.evaluate.src.config import (
     EvaluationConfig,
     HeadConfig,
     HyperparameterSearchConfig,
@@ -184,7 +184,7 @@ def test_fresh_refit_uses_selected_architecture_budget_and_development_statistic
 def test_classical_refit_rebuilds_estimator_and_scaler_on_development_data(
     monkeypatch, tmp_path
 ):
-    from modules.evaluate.src.model.classical import build_estimator
+    from modules.evaluate.src.model.classical_estimators import build_estimator
 
     estimators = []
 
@@ -194,7 +194,7 @@ def test_classical_refit_rebuilds_estimator_and_scaler_on_development_data(
         return estimator
 
     monkeypatch.setattr(
-        "modules.evaluate.src.trainers.classical.build_estimator", build
+        "modules.evaluate.src.trainers.classical_estimators.build_estimator", build
     )
     prepared = prepared_splits()
     workspace = _make_workspace(tmp_path, "sequence_classification")

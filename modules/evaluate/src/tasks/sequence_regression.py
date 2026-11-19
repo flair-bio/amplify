@@ -11,7 +11,7 @@ import polars as pl
 import torch
 
 from modules.evaluate.src.artifacts.results import PredictOutput
-from modules.evaluate.src.config.evaluation import ScoreConfig
+from modules.evaluate.src.config import ScoreConfig
 from modules.evaluate.src.metrics import metrics
 from modules.evaluate.src.metrics.bootstrap import mean_per_example_scores
 from modules.evaluate.src.metrics.metrics import UndefinedMetricError

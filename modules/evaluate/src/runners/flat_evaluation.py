@@ -22,7 +22,7 @@ from modules.evaluate.src.artifacts.results import (
 from modules.evaluate.src.artifacts.workspace import (
     EvaluationWorkspace,
 )
-from modules.evaluate.src.config.evaluation import (
+from modules.evaluate.src.config import (
     EvaluationConfig,
     ExternalTestSetConfig,
 )

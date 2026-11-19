@@ -33,7 +33,7 @@ from modules.evaluate.src.tasks.registry import get_flat_task
 from modules.evaluate.src.tasks.token_classification import IGNORE_INDEX
 
 if TYPE_CHECKING:
-    from modules.evaluate.src.config.evaluation import LayerwiseConfig, PredictConfig
+    from modules.evaluate.src.config import LayerwiseConfig, PredictConfig
 MIN_STANDARD_DEVIATION = 1e-06
 
 

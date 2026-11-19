@@ -1,19 +1,76 @@
-"""Cross-step validation/defaulting for EvaluationConfig, kept out of
-config.py since it's plain validation logic rather than schema definition."""
+"""Evaluation configuration composition, validation, and source helpers."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
+import math
+import re
+from collections.abc import Sequence
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Union
 
-from modules.evaluate.src.config.shared import (
-    CLASSICAL_HEAD_TYPES,
-    TORCH_EMBEDDING_HEAD_TYPES,
-)
-from modules.evaluate.src.metrics.metrics import LOWER_IS_BETTER_METRICS
-from modules.evaluate.src.tasks import get_task
+from omegaconf import DictConfig, OmegaConf
+
+from modules.core.utils.config_loader import load_config, parse_config
 
 if TYPE_CHECKING:
-    from modules.evaluate.src.config.evaluation import EvaluationConfig
+    from modules.evaluate.src.config import (
+        BaselineRunConfig,
+        EvaluationConfig,
+        TestSubsets,
+    )
+    from modules.evaluate.src.proteingym.config import (
+        ProteinGymSupervisedConfig,
+        ProteinGymZeroShotConfig,
+    )
+
+RunConfig = Union[
+    "EvaluationConfig",
+    "BaselineRunConfig",
+    "ProteinGymSupervisedConfig",
+    "ProteinGymZeroShotConfig",
+]
+
+
+def validate_directory_label(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
+        raise ValueError(
+            "Output labels must start with a letter or digit and contain "
+            "only letters, digits, '.', '_', or '-'."
+        )
+    return value
+
+
+def validate_metric_group_column(value: str | None) -> str | None:
+    if value is not None and (
+        not value.strip() or value in {"id", "prediction", "label", "probability"}
+    ):
+        raise ValueError("group_column must name a non-reserved source column.")
+    return value
+
+
+def validate_test_subsets(value: TestSubsets | None) -> TestSubsets:
+    if value is None:
+        return {}
+    for name, filters in value.items():
+        validate_directory_label(name)
+        if not filters or any(not column.strip() for column in filters):
+            raise ValueError("Test subsets require nonempty column-equality filters.")
+        if any(
+            isinstance(item, float) and not math.isfinite(item)
+            for item in filters.values()
+        ):
+            raise ValueError("Test subset filter values must be finite.")
+    return value
+
+
+def dataset_source_identity(
+    dataset_id: str, config_name: str | None = None, revision: str | None = None
+) -> str:
+    """Distinguish configurations/revisions sharing the same repo or suite root."""
+    if config_name is None and revision is None:
+        return dataset_id
+    return json.dumps([dataset_id, config_name, revision])
 
 
 def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConfig:
@@ -21,6 +78,13 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
     mutating *config* in place. Raises ``ValueError`` on an invalid
     combination. Returns *config*, so this doubles as a pydantic
     ``model_validator(mode="after")`` function directly (see config.py)."""
+    from modules.evaluate.src.config import (
+        CLASSICAL_HEAD_TYPES,
+        TORCH_EMBEDDING_HEAD_TYPES,
+    )
+    from modules.evaluate.src.metrics.metrics import LOWER_IS_BETTER_METRICS
+    from modules.evaluate.src.tasks import get_task
+
     steps = config.steps
     task = get_task(config.workspace.task_type)
     steps.score.validate_task(config.workspace.task_type)
@@ -240,3 +304,125 @@ def validate_cross_step_dependencies(config: EvaluationConfig) -> EvaluationConf
         # also valid: it trains an equivalent standalone linear probe over
         # cached per-token embeddings instead of the native head.
     return config
+
+
+def load_run_config(
+    paths: Sequence[str | Path],
+    overrides: Sequence[str] | None = None,
+    *,
+    baseline_only: bool = False,
+) -> RunConfig:
+    """Select the workflow schema before ordinary task-overlay composition."""
+    from modules.evaluate.src.proteingym.config import (
+        ProteinGymSupervisedConfig,
+        ProteinGymZeroShotConfig,
+    )
+
+    raw = load_config(paths, overrides=overrides)
+    reject_removed_options(raw)
+    workflow = OmegaConf.select(raw, "workflow", default="evaluation")
+    if workflow == "evaluation":
+        return (
+            load_baseline_config(paths, overrides)
+            if baseline_only
+            else load_evaluation_config(paths, overrides)
+        )
+    if baseline_only:
+        raise ValueError(
+            "--baselines is only supported for ordinary evaluation; configure "
+            "ProteinGym reference scorers with baselines instead."
+        )
+    if workflow == "proteingym_supervised":
+        return parse_config(raw, ProteinGymSupervisedConfig)
+    if workflow == "proteingym_zero_shot":
+        return parse_config(raw, ProteinGymZeroShotConfig)
+    raise ValueError(f"Unknown evaluation workflow: {workflow!r}.")
+
+
+def load_evaluation_config(
+    path: str | Path | Sequence[str | Path],
+    overrides: Sequence[str] | None = None,
+) -> EvaluationConfig:
+    from modules.evaluate.src.config import EvaluationConfig
+
+    return parse_config(compose_evaluation_config(path, overrides), EvaluationConfig)
+
+
+def compose_evaluation_config(
+    path: str | Path | Sequence[str | Path],
+    overrides: Sequence[str] | None = None,
+) -> DictConfig:
+    """Load a selected task overlay when no explicit task YAML was supplied.
+
+    Insert the task next to the dataset declaring the default. For the dataset's
+    own task, insert before it so dataset-specific protocol settings win. When
+    an explicit task override selects a different task, insert after the dataset
+    so the selected task's settings replace incompatible dataset defaults.
+    Explicit task overlays retain the usual left-to-right merge semantics.
+    """
+    from modules.evaluate.src.tasks import available_tasks
+
+    paths = [path] if isinstance(path, (str, Path)) else list(path)
+    yaml_config = load_config(paths)
+    config = load_config(paths, overrides=overrides)
+    reject_removed_options(config)
+    default_task = OmegaConf.select(config, "workspace.default_task_type")
+    task = OmegaConf.select(config, "workspace.task_type") or default_task
+    if OmegaConf.select(yaml_config, "workspace.task_type") is None and task:
+        if task not in available_tasks():
+            raise ValueError(
+                f"Unknown task type '{task}'. Available: {available_tasks()}."
+            )
+        task_path = (
+            Path(__file__).resolve().parents[2] / "configs/tasks" / f"{task}.yaml"
+        )
+        insertion = len(paths)
+        for index, config_path in enumerate(paths):
+            declared_task = OmegaConf.select(
+                OmegaConf.load(config_path), "workspace.default_task_type"
+            )
+            if declared_task:
+                insertion = index + int(task != declared_task)
+        paths.insert(insertion, task_path)
+        config = load_config(paths, overrides=overrides)
+        reject_removed_options(config)
+    return config
+
+
+def load_baseline_config(
+    paths: Sequence[str | Path], overrides: Sequence[str] | None = None
+) -> BaselineRunConfig:
+    """Compose the dataset/task config with an explicit baseline-only overlay."""
+    from modules.evaluate.src.config import BaselineRunConfig, DatasetWorkspaceConfig
+
+    raw: Any = OmegaConf.to_container(
+        compose_evaluation_config(paths, overrides), resolve=True
+    )
+    # Model and tuning settings do not apply to the baseline route.
+    workspace = {
+        key: value
+        for key, value in raw["workspace"].items()
+        if key in DatasetWorkspaceConfig.model_fields
+    }
+    return BaselineRunConfig.model_validate(
+        {
+            "workspace": workspace,
+            "prepare": raw.get("steps", {}).get("prepare", {}),
+            "score": raw.get("steps", {}).get("score", {}),
+            "baselines": raw.get("baselines", {}),
+            "external_test_sets": raw.get("external_test_sets", []),
+            "seed": raw.get("seed", 710019),
+            "test_subsets": raw.get("steps", {}).get("predict", {}).get("test_subsets"),
+        }
+    )
+
+
+def reject_removed_options(config: DictConfig) -> None:
+    if "multi_target" not in config:
+        return
+    if config.multi_target is not None:
+        raise ValueError(
+            "multi_target evaluation has been removed. Configure one label_column "
+            "and run one scalar-target evaluation per invocation."
+        )
+    del config["multi_target"]

@@ -23,12 +23,12 @@ from modules.evaluate.src.artifacts.results import (
     PredictOutput,
 )
 from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
-from modules.evaluate.src.config.evaluation import (
+from modules.evaluate.src.config import (
     BaselineRunConfig,
     PredictConfig,
     ScoreConfig,
 )
-from modules.evaluate.src.config.shared import EvaluationWorkspaceConfig
+from modules.evaluate.src.config import EvaluationWorkspaceConfig
 from modules.evaluate.src.dataset import contact, loading, tokenization
 from modules.evaluate.src.dataset.baseline_data import contact_baseline_context
 from modules.evaluate.src.dataset.contact import (

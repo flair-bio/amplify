@@ -11,8 +11,7 @@ from accelerate import Accelerator
 from torch import nn
 from torch.utils.data import DataLoader
 
-from modules.evaluate.src.config.evaluation import TuneConfig
-from modules.evaluate.src.config.shared import EvaluationWorkspaceConfig
+from modules.evaluate.src.config import EvaluationWorkspaceConfig, TuneConfig
 from modules.evaluate.src.dataset.embeddings import (
     EmbeddingDataset,
     find_embedding_dataset,

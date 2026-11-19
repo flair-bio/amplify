@@ -18,7 +18,7 @@ import polars as pl
 import torch
 
 from modules.evaluate.src.artifacts.results import PredictOutput, ScoreOutput
-from modules.evaluate.src.config.evaluation import ScoreConfig
+from modules.evaluate.src.config import ScoreConfig
 from modules.evaluate.src.metrics import calibration_metrics
 from modules.evaluate.src.metrics.calibration_metrics import COHORTS, NUM_BINS
 from modules.evaluate.src.tasks.base import FlatTask, MetricFn
