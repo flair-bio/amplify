@@ -72,6 +72,12 @@ pretrain = [
     "wandb>=0.25.0",
 ]
 
+# Prepared per-residue Parquet targets; no structure-extraction dependencies.
+post_train = [
+    "pyarrow>=22.0.0",
+    "wandb>=0.25.0",
+]
+
 # Specific to Evaluation
 evaluate = [
     "accelerate>=1.13.0",
@@ -104,7 +110,7 @@ dev = [
 # NOTE: `all` intentionally excludes `compute` to avoid installing
 # CUDA-specific FlashAttention 4 on machines that do not need it.
 all = [
-    "flair-plm[data,pretrain,evaluate,dev]"
+    "flair-plm[data,pretrain,post_train,evaluate,dev]"
 ]
 
 [project.urls]
