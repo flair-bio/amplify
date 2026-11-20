@@ -1,56 +1,25 @@
-"""
-Task-type abstraction for the evaluation pipeline.
-
-A :class:`TaskHandler` owns scientific semantics: model selection, label
-alignment/collation, prediction interpretation, supported capabilities and
-control transformations. All tasks expose a common scoring entry point,
-returning flat or structured results. Stages own caching and publication.
-
-The base class defaults describe the most common shape: a single scalar label
-per example, a Hugging Face ``Auto*`` wrapper around the trunk, and dense
-(non-ragged) per-example predictions. Handlers override only what differs.
-"""
+"""Flat task semantics: labels, decoding, metric units and scientific scoring."""
 
 from __future__ import annotations
 
 import warnings
-from abc import ABC, abstractmethod
+from abc import ABC
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import torch
-from torch import nn
 
 from modules.evaluate.src.metrics import metrics as metric_functions
 
 if TYPE_CHECKING:
-    from accelerate import Accelerator
-    from datasets import DatasetDict
-
-    from modules.evaluate.src.contracts.artifacts import (
-        ControlInputs,
-        EvaluationMetadata,
-        FeatureRequest,
-        FitResult,
+    from modules.evaluate.src.artifacts.results import (
         PredictOutput,
-        PreparedArtifacts,
         ScoreOutput,
-        StructuredScoreOutput,
     )
-    from modules.evaluate.src.contracts.config import (
-        EvaluationConfig,
-        EvaluationWorkspaceConfig,
-        PredictConfig,
-        PrepareConfig,
+    from modules.evaluate.src.config import (
         ScoreConfig,
-        TuneConfig,
     )
-
-# Every metric callable takes the same (values, labels, average) signature so
-# the base compute_metrics() can dispatch without knowing the metric. ``values``
-# is normally the predictions, but is the per-class probability matrix for
-# metrics listed in ``metrics_requiring_probabilities`` (e.g. roc_auc).
 MetricFn = Callable[[Any, Any, str], float]
 
 
@@ -61,16 +30,15 @@ def _flatten_label_values(dataset: Any, label_column: str) -> set[int]:
     for split in dataset.values():
         for label in split[label_column]:
             if isinstance(label, (list, tuple)):
-                values.update(int(v) for v in label)
+                values.update((int(v) for v in label))
             else:
                 values.add(int(label))
     return values
 
 
-class TaskHandler(ABC):
+class FlatTask(ABC):
     """Base class for a downstream evaluation task type."""
 
-    #: Value of ``workspace.task_type`` that selects this handler.
     name: ClassVar[str]
     class_labels: tuple[int, ...] | None = None
     uses_predictor_identity: ClassVar[bool] = False
@@ -95,48 +63,17 @@ class TaskHandler(ABC):
     )
     dataset_baselines: ClassVar[frozenset[str]] = frozenset()
     prediction_baselines: ClassVar[frozenset[str]] = frozenset()
-
-    #: Hugging Face ``Auto*`` class used to wrap the trunk. Works with any Hub
-    #: model repo rather than depending on a specific model module. Subclasses
-    #: that need a non-HF head override :meth:`build_model` instead.
-    auto_model_class: ClassVar[Any]
-
-    #: dtype of the collated ``labels`` tensor.
     label_dtype: ClassVar[torch.dtype] = torch.long
-
-    #: Whether per-example predictions/labels are variable-length sequences.
-    #: Ragged columns need object arrays for bootstrap fancy indexing.
     is_ragged: ClassVar[bool] = False
-
-    #: Whether predictions/labels are per-*pair* (e.g. contact maps) rather
-    #: than per-token/per-sequence.
     pairwise: ClassVar[bool] = False
-
-    #: Whether tokenization must rewrite the label column to stay aligned with
-    #: the tokenized (and possibly cropped) residue span.
     aligns_labels: ClassVar[bool] = False
-
-    #: Human-readable unit for rows reported by prediction progress logs.
     prediction_progress_unit: ClassVar[str] = "examples"
-
-    #: Whether the raw dataset must provide the configured label column.
     requires_source_labels: ClassVar[bool] = True
-
-    #: Source examples per map batch; expanding tasks can lower this to bound RAM.
     tokenization_batch_size: ClassVar[int] = 1000
-
     accepted_target_types: ClassVar[frozenset[str]] = frozenset()
     accepted_label_formats: ClassVar[frozenset[str]] = frozenset()
-
-    #: Metric name -> callable. Defines the full set this task supports.
     metrics: ClassVar[Mapping[str, MetricFn]] = {}
-
-    #: Metrics that receive per-class probabilities instead of predictions.
     metrics_requiring_probabilities: ClassVar[frozenset[str]] = frozenset()
-
-    #: Metrics computed when ``score.metrics`` is not set. Defaults to every
-    #: supported metric: ``score.metrics`` is an exceptional override, not the
-    #: primary way users discover the metric set.
     default_metric_names: ClassVar[tuple[str, ...]] = ()
 
     def __init_subclass__(cls, *, abstract: bool = False, **kwargs: Any) -> None:
@@ -147,23 +84,15 @@ class TaskHandler(ABC):
             return
         if not getattr(cls, "name", None):
             warnings.warn(f"{cls.__name__} must set a non-empty 'name'.", stacklevel=2)
-        if cls.build_model is TaskHandler.build_model and not getattr(
-            cls, "auto_model_class", None
-        ):
-            warnings.warn(
-                f"{cls.__name__} must set 'auto_model_class' or override build_model().",
-                stacklevel=2,
-            )
         if not cls.metrics:
             warnings.warn(
                 f"{cls.__name__} must define at least one metric.", stacklevel=2
             )
-        if cls.requires_source_labels and not (
-            cls.accepted_target_types and cls.accepted_label_formats
+        if cls.requires_source_labels and (
+            not (cls.accepted_target_types and cls.accepted_label_formats)
         ):
             warnings.warn(
-                f"{cls.__name__} consumes source labels, so it must set "
-                "'accepted_target_types' and 'accepted_label_formats'.",
+                f"{cls.__name__} consumes source labels, so it must set 'accepted_target_types' and 'accepted_label_formats'.",
                 stacklevel=2,
             )
         if not cls.default_metric_names:
@@ -171,124 +100,11 @@ class TaskHandler(ABC):
                 f"{cls.__name__} must set 'default_metric_names'.", stacklevel=2
             )
 
-    # -- model ---------------------------------------------------------------
-
-    def model_kwargs(self) -> dict[str, Any]:
-        """Extra ``from_pretrained`` kwargs beyond the common ones."""
-        return {}
-
-    def validate_pipeline(
-        self,
-        config: EvaluationConfig,
-        *,
-        workspace_seed: int | None,
-        num_processes: int,
-    ) -> None:
-        """Validate task-specific execution constraints before reserving outputs."""
-
-    def validate_config(self, config: EvaluationConfig) -> None:
-        """Validate scientific constraints beyond generic stage compatibility."""
-
     def validate_head(self, head_type: str) -> None:
         if head_type not in self.supported_head_types:
             raise ValueError(
                 f"head_type='{head_type}' is not supported for task_type='{self.name}'."
             )
-
-    def feature_requests(
-        self, prepared: PreparedArtifacts
-    ) -> dict[str, FeatureRequest]:
-        """Declare extra fitting features; ordinary loader-based tasks need none."""
-        return {}
-
-    def fitting_identity(self, prepared: PreparedArtifacts) -> dict[str, Any]:
-        """Protocol identities that must match before fitting starts."""
-        return {}
-
-    def fit(
-        self,
-        prepared: PreparedArtifacts,
-        config: TuneConfig,
-        inputs: EvaluationWorkspaceConfig,
-        accelerator: Accelerator,
-        *,
-        seed: int,
-        mode: Literal["tune_probe", "finetune"] = "tune_probe",
-    ) -> FitResult:
-        """Execute the shared loader-based scientific fitting protocol."""
-        from modules.evaluate.src.trainers.selection import fit_predictor
-
-        return fit_predictor(
-            workspace=inputs,
-            prepared=prepared,
-            config=config,
-            accelerator=accelerator,
-            seed=seed,
-            mode=mode,
-        )
-
-    def independent_controls(
-        self,
-        prepared: PreparedArtifacts,
-        controls: Sequence[str],
-        *,
-        seed: int,
-        device: torch.device,
-    ) -> dict[str, ControlInputs]:
-        """Describe additional protocol controls, separate from inference ablations."""
-        return {}
-
-    def control_settings(
-        self,
-        inputs: ControlInputs,
-        result: FitResult,
-    ) -> dict[str, Any]:
-        """Describe an independent control's fitting result without publishing it."""
-        return {**inputs.metadata, "fit": result.checkpoint_settings}
-
-    def prediction_metadata(self, values: Mapping[str, Any]) -> EvaluationMetadata:
-        from modules.evaluate.src.contracts.artifacts import EvaluationMetadata
-
-        return EvaluationMetadata.model_validate(values)
-
-    @abstractmethod
-    def score(
-        self,
-        predictions: PredictOutput,
-        config: ScoreConfig,
-        *,
-        seed: int = 710019,
-    ) -> ScoreOutput | StructuredScoreOutput:
-        """Compute scientific scores and supported uncertainty without publishing."""
-        ...
-
-    def build_model(
-        self,
-        model_id: str,
-        num_labels: int,
-        model_kwargs: dict[str, Any] | None = None,
-    ) -> nn.Module:
-        """Load a fresh (pretrained-trunk, freshly-initialized-head) model.
-
-        ``model_kwargs`` (from ``workspace.model_kwargs``) overrides this
-        task's own :meth:`model_kwargs` defaults, e.g. to sweep a
-        task-specific hyperparameter from the YAML config.
-        """
-        return self.auto_model_class.from_pretrained(
-            model_id,
-            num_labels=num_labels,
-            ignore_mismatched_sizes=True,
-            trust_remote_code=True,
-            **{**self.model_kwargs(), **(model_kwargs or {})},
-        )
-
-    def load_finetuned_model(self, model_path: str) -> nn.Module:
-        """Reload a previously saved, fine-tuned model.
-
-        The head/label configuration is read back from the saved
-        ``config.json``, so it doesn't need to be re-derived here.
-        """
-        return self.auto_model_class.from_pretrained(model_path, trust_remote_code=True)
 
     def resolve_num_labels(self, num_labels: int | None, dataset_name: str) -> int:
         """Resolve the effective label count from the workspace config.
@@ -298,22 +114,16 @@ class TaskHandler(ABC):
         """
         if num_labels is None:
             raise ValueError(
-                f"workspace.num_labels must be set for task_type='{self.name}' "
-                f"(dataset '{dataset_name}')."
+                f"workspace.num_labels must be set for task_type='{self.name}' (dataset '{dataset_name}')."
             )
         if num_labels <= 1:
             raise ValueError(
-                f"workspace.num_labels must be > 1 for task_type='{self.name}' "
-                f"(dataset '{dataset_name}'), got {num_labels}."
+                f"workspace.num_labels must be > 1 for task_type='{self.name}' (dataset '{dataset_name}'), got {num_labels}."
             )
         return num_labels
 
     def validate_num_labels(
-        self,
-        dataset: Any,
-        label_column: str,
-        num_labels: int,
-        dataset_name: str,
+        self, dataset: Any, label_column: str, num_labels: int, dataset_name: str
     ) -> None:
         """Cross-check the resolved ``workspace.num_labels`` against label
         values actually present in the loaded (pre-tokenization) dataset.
@@ -346,15 +156,8 @@ class TaskHandler(ABC):
         max_label = max(values)
         if max_label >= num_labels or min(values) < 0:
             raise ValueError(
-                f"task_type='{self.name}' dataset '{dataset_name}' contains "
-                f"label value(s) outside the valid range for "
-                f"workspace.num_labels={num_labels} (valid indices are "
-                f"0..{num_labels - 1}); found {len(values)} distinct label "
-                f"value(s) with max={max_label}. Set workspace.num_labels to "
-                f"at least {max_label + 1} to match the dataset."
+                f"task_type='{self.name}' dataset '{dataset_name}' contains label value(s) outside the valid range for workspace.num_labels={num_labels} (valid indices are 0..{num_labels - 1}); found {len(values)} distinct label value(s) with max={max_label}. Set workspace.num_labels to at least {max_label + 1} to match the dataset."
             )
-
-    # -- data ----------------------------------------------------------------
 
     def validate_dataset_config(
         self, target_type: str, label_format: str, dataset_name: str
@@ -363,15 +166,11 @@ class TaskHandler(ABC):
             return
         if target_type not in self.accepted_target_types:
             raise ValueError(
-                f"task_type='{self.name}' is incompatible with dataset "
-                f"'{dataset_name}': expected target_type in "
-                f"{sorted(self.accepted_target_types)}, got '{target_type}'."
+                f"task_type='{self.name}' is incompatible with dataset '{dataset_name}': expected target_type in {sorted(self.accepted_target_types)}, got '{target_type}'."
             )
         if label_format not in self.accepted_label_formats:
             raise ValueError(
-                f"task_type='{self.name}' is incompatible with dataset "
-                f"'{dataset_name}': expected label_format in "
-                f"{sorted(self.accepted_label_formats)}, got '{label_format}'."
+                f"task_type='{self.name}' is incompatible with dataset '{dataset_name}': expected label_format in {sorted(self.accepted_label_formats)}, got '{label_format}'."
             )
 
     def align_labels(
@@ -417,8 +216,6 @@ class TaskHandler(ABC):
             {"input_ids": input_ids, "attention_mask": attention_mask, "label": label}
         ]
 
-    # -- prediction ----------------------------------------------------------
-
     def extract_predictions(
         self, logits: torch.Tensor, *, labels: torch.Tensor | None = None
     ) -> torch.Tensor:
@@ -451,8 +248,6 @@ class TaskHandler(ABC):
         """Split rows while accepting optional task-specific batch metadata."""
         return self.split_batch_rows(predictions, labels)
 
-    # -- metrics -------------------------------------------------------------
-
     def bootstrap_group_id(self, row_id: Any) -> Any:
         """Map a row ID to the unit the bootstrap resamples as a whole."""
         return row_id
@@ -468,8 +263,7 @@ class TaskHandler(ABC):
         unknown = sorted(set(metric_names) - set(self.metrics))
         if unknown:
             raise KeyError(
-                f"Unknown metric(s) {unknown} for task_type='{self.name}'. "
-                f"Available metrics: {sorted(self.metrics)}."
+                f"Unknown metric(s) {unknown} for task_type='{self.name}'. Available metrics: {sorted(self.metrics)}."
             )
 
     def compute_per_example_metrics(
@@ -492,7 +286,7 @@ class TaskHandler(ABC):
         """Reject labels outside the configured vocabulary rather than omit them."""
         if self.class_labels is None:
             return
-        pred_array, label_array = np.asarray(predictions), np.asarray(labels)
+        pred_array, label_array = (np.asarray(predictions), np.asarray(labels))
         if pred_array.shape != label_array.shape:
             raise ValueError("Classification prediction and label shapes must match.")
         if self.name == "sequence_multilabel_classification":
@@ -508,14 +302,11 @@ class TaskHandler(ABC):
         elif (
             pred_array.ndim != 1
             or not np.isin(pred_array, self.class_labels).all()
-            or not np.isin(label_array, self.class_labels).all()
+            or (not np.isin(label_array, self.class_labels).all())
         ):
             raise ValueError(
-                "Classification metric inputs contain labels outside the configured "
-                "class vocabulary; token ignore-index positions must be removed first."
+                "Classification metric inputs contain labels outside the configured class vocabulary; token ignore-index positions must be removed first."
             )
-
-    # -- controls ------------------------------------------------------------
 
     def scramble_labels(self, labels: list[Any], rng: np.random.Generator) -> list[Any]:
         """Permute labels to build a chance-level control.
@@ -526,74 +317,6 @@ class TaskHandler(ABC):
         """
         permuted_idx = rng.permutation(len(labels))
         return [labels[j] for j in permuted_idx]
-
-    def make_sequence_scrambler(
-        self, tokenizer: Any, seed: int
-    ) -> Callable[[dict[str, Any]], dict[str, Any]]:
-        """Build a batch_transform that shuffles token order within each sequence
-        (leaving padding/special-token positions, as well as each sequence's
-        first amino acid, in place), destroying sequence/positional
-        information while preserving token composition.
-
-        Loops over rows in Python (batch_size is small relative to a training
-        loop, so this isn't performance-critical) and permutes each row's
-        shufflable positions in place via ``torch.randperm``, rather than a
-        single vectorized argsort over the whole batch. Uses its own
-        ``torch.Generator`` seeded from `seed` (rather than torch's global
-        RNG) so the shuffling is fully deterministic and independent of any
-        other randomness consumed elsewhere in the run.
-        """
-        special_ids_list = list(tokenizer.all_special_ids)
-        # Lazily bound to the first batch's device and reused (its state
-        # advances) across subsequent batches, so calls draw from a single
-        # continuing random stream instead of repeating the same values.
-        state: dict[str, Any] = {"generator": None, "device": None}
-
-        def _scramble(batch: dict[str, Any]) -> dict[str, Any]:
-            batch = dict(batch)
-            input_ids = batch["input_ids"]
-            device = input_ids.device
-            batch_size, _ = input_ids.shape
-
-            if state["generator"] is None or state["device"] != device:
-                state["generator"] = torch.Generator(device=device).manual_seed(seed)
-                state["device"] = device
-            generator = state["generator"]
-            special_ids = torch.tensor(
-                special_ids_list, device=device, dtype=input_ids.dtype
-            )
-            movable = ~torch.isin(input_ids, special_ids)
-
-            scrambled = input_ids.clone()
-            if "cu_seqlens" in batch:
-                offsets = batch["cu_seqlens"][: batch["num_sequences"] + 1].tolist()
-                spans = [
-                    (0, start, end) for start, end in zip(offsets[:-1], offsets[1:])
-                ]
-            else:
-                spans = [(row, 0, input_ids.shape[1]) for row in range(batch_size)]
-            for row, start, end in spans:
-                movable_idx = movable[row, start:end].nonzero(as_tuple=True)[0] + start
-                if movable_idx.numel() <= 1:
-                    continue
-                # Keep the first movable position (first amino acid) in
-                # place; only the remaining movable positions are shuffled.
-                shufflable_idx = movable_idx[1:]
-                perm = shufflable_idx[
-                    torch.randperm(
-                        shufflable_idx.numel(), generator=generator, device=device
-                    )
-                ]
-                scrambled[row, shufflable_idx] = input_ids[row, perm]
-
-            batch["input_ids"] = scrambled
-            return batch
-
-        return _scramble
-
-
-class FlatMetricsTask(TaskHandler, abstract=True):
-    """Tasks scored from aligned prediction and label rows."""
 
     def compute_grouped_metrics(
         self,
@@ -608,17 +331,13 @@ class FlatMetricsTask(TaskHandler, abstract=True):
 
     def prepare_scoring(
         self, predictions: PredictOutput, config: ScoreConfig
-    ) -> tuple[FlatMetricsTask, PredictOutput]:
+    ) -> tuple[FlatTask, PredictOutput]:
         """Resolve scoring units without changing persisted prediction rows."""
         config.validate_task(self.name)
-        return self, predictions
+        return (self, predictions)
 
     def score(
-        self,
-        predictions: PredictOutput,
-        config: ScoreConfig,
-        *,
-        seed: int = 710019,
+        self, predictions: PredictOutput, config: ScoreConfig, *, seed: int = 710019
     ) -> ScoreOutput:
         from modules.evaluate.src.metrics.scoring import score_flat
 
@@ -641,20 +360,18 @@ class FlatMetricsTask(TaskHandler, abstract=True):
             raise ValueError("Cannot compute metrics from an empty predictions list.")
         self.validate_metric_names(metric_names)
         self.validate_metric_inputs(predictions, labels)
-
         scores: dict[str, float] = {}
         for name in metric_names:
             if name in self.metrics_requiring_probabilities:
                 if probabilities is None:
                     raise ValueError(
-                        f"Metric '{name}' requires per-class probabilities, but "
-                        "none were provided."
+                        f"Metric '{name}' requires per-class probabilities, but none were provided."
                     )
                 scores[name] = float(self.metrics[name](probabilities, labels, average))
             elif (
                 self.class_labels is not None
                 and name in {"f1", "precision", "recall"}
-                and self.metrics[name] is getattr(metric_functions, name)
+                and (self.metrics[name] is getattr(metric_functions, name))
             ):
                 scores[name] = float(
                     getattr(metric_functions, name)(
@@ -664,41 +381,3 @@ class FlatMetricsTask(TaskHandler, abstract=True):
             else:
                 scores[name] = float(self.metrics[name](predictions, labels, average))
         return scores
-
-
-class StructuredTask(TaskHandler, abstract=True):
-    """Tasks scored using structured prediction records."""
-
-    @abstractmethod
-    def prepare_inputs(
-        self,
-        *,
-        inputs: EvaluationWorkspaceConfig,
-        config: PrepareConfig,
-        dataset: DatasetDict | None,
-        predictor: str | None,
-        device: torch.device,
-    ) -> PreparedArtifacts:
-        """Construct scientific inputs without cache or workspace operations."""
-        ...
-
-    @abstractmethod
-    def predict(
-        self,
-        prepared: PreparedArtifacts,
-        metadata: EvaluationMetadata,
-        config: PredictConfig,
-    ) -> PredictOutput:
-        """Construct structured observations for the primary and requested controls."""
-        ...
-
-    @abstractmethod
-    def score(
-        self,
-        predictions: PredictOutput,
-        config: ScoreConfig,
-        *,
-        seed: int = 710019,
-    ) -> StructuredScoreOutput:
-        """Validate the scoring protocol and return tables for publication."""
-        ...

@@ -49,7 +49,7 @@ def load_contact_dataset(
     cache_dir: str | Path | None = None,
 ) -> ContactDataset:
     """Load fixed HF scoring splits without synthesis or coordinate dependencies."""
-    from modules.evaluate.src.dataset.dataloader import load_raw_evaluation_dataset
+    from modules.evaluate.src.dataset.loading import load_raw_evaluation_dataset
 
     path = Path(path_or_repo)
     if not path.is_dir():

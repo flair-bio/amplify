@@ -1,37 +1,38 @@
-"""Registry mapping ``workspace.task_type`` values to their handler."""
+"""Lazy, explicit built-in task lookup with per-run classification vocabularies."""
 
 from __future__ import annotations
 
-from modules.evaluate.src.tasks.base import FlatMetricsTask, TaskHandler
+from importlib import import_module
+from typing import Any
 
-_TASK_REGISTRY: dict[str, type[TaskHandler]] = {}
+from modules.evaluate.src.tasks.base import FlatTask
 
-
-def register_task(handler_cls: type[TaskHandler]) -> type[TaskHandler]:
-    """Class decorator that makes a handler selectable via ``task_type``."""
-    name = handler_cls.name
-    existing = _TASK_REGISTRY.get(name)
-    if existing is not None and existing is not handler_cls:
-        raise ValueError(
-            f"Task type '{name}' is already registered to {existing.__name__}."
-        )
-    _TASK_REGISTRY[name] = handler_cls
-    return handler_cls
+_TASKS = {
+    "calibration": "CalibrationTask",
+    "pseudo_perplexity": "PseudoPerplexityTask",
+    "sequence_classification": "SequenceClassificationTask",
+    "sequence_multilabel_classification": "SequenceMultilabelClassificationTask",
+    "sequence_regression": "SequenceRegressionTask",
+    "token_classification": "TokenClassificationTask",
+    "contact_prediction": None,
+}
 
 
 def available_tasks() -> list[str]:
-    return sorted(_TASK_REGISTRY)
+    return sorted(_TASKS)
 
 
-def get_task(task_type: str, num_labels: int | None = None) -> TaskHandler:
-    """Instantiate a handler, optionally fixing its classification vocabulary."""
-    try:
-        handler_cls = _TASK_REGISTRY[task_type]
-    except KeyError:
+def get_task(task_type: str, num_labels: int | None = None) -> Any:
+    """Resolve flat semantics or the independent contact protocol module."""
+    if task_type not in _TASKS:
         raise KeyError(
             f"Unknown task_type '{task_type}'. Available: {available_tasks()}."
-        ) from None
-    task = handler_cls()
+        )
+    module = import_module(f"modules.evaluate.src.tasks.{task_type}")
+    class_name = _TASKS[task_type]
+    if class_name is None:
+        return module
+    task = getattr(module, class_name)()
     if num_labels is not None and task_type in {
         "sequence_classification",
         "sequence_multilabel_classification",
@@ -42,9 +43,9 @@ def get_task(task_type: str, num_labels: int | None = None) -> TaskHandler:
     return task
 
 
-def get_flat_task(task_type: str, num_labels: int | None = None) -> FlatMetricsTask:
+def get_flat_task(task_type: str, num_labels: int | None = None) -> FlatTask:
     """Resolve the flat scoring capability or reject structured tasks."""
     task = get_task(task_type, num_labels)
-    if not isinstance(task, FlatMetricsTask):
+    if not isinstance(task, FlatTask):
         raise TypeError(f"Task '{task_type}' requires structured scoring.")
     return task

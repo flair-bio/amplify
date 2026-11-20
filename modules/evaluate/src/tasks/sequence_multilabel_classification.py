@@ -7,15 +7,12 @@ from typing import Any, ClassVar
 
 import numpy as np
 import torch
-from transformers import AutoModelForSequenceClassification
 
 from modules.evaluate.src.metrics import metrics
-from modules.evaluate.src.tasks.base import FlatMetricsTask, MetricFn
-from modules.evaluate.src.tasks.registry import register_task
+from modules.evaluate.src.tasks.base import FlatTask, MetricFn
 
 
-@register_task
-class SequenceMultilabelClassificationTask(FlatMetricsTask):
+class SequenceMultilabelClassificationTask(FlatTask):
     """Multiple independent binary labels per sequence.
 
     Each source label is a fixed-width binary indicator vector, collated as a
@@ -25,13 +22,10 @@ class SequenceMultilabelClassificationTask(FlatMetricsTask):
     """
 
     supports_layerwise = True
-
     name = "sequence_multilabel_classification"
-    auto_model_class = AutoModelForSequenceClassification
     label_dtype = torch.float
     accepted_target_types = frozenset({"categorical"})
     accepted_label_formats = frozenset({"multilabel"})
-
     metrics: ClassVar[dict[str, MetricFn]] = {
         "f1": metrics.f1,
         "fmax": metrics.fmax,
@@ -46,30 +40,19 @@ class SequenceMultilabelClassificationTask(FlatMetricsTask):
     )
     default_metric_names = ("f1", "multilabel_mcc", "average_precision")
 
-    def model_kwargs(self) -> dict[str, Any]:
-        return {"problem_type": "multi_label_classification"}
-
     def validate_num_labels(
-        self,
-        dataset: Any,
-        label_column: str,
-        num_labels: int,
-        dataset_name: str,
+        self, dataset: Any, label_column: str, num_labels: int, dataset_name: str
     ) -> None:
         for split_name, split in dataset.items():
             for row_index, label in enumerate(split[label_column]):
                 vector = np.asarray(label)
                 if vector.shape != (num_labels,):
                     raise ValueError(
-                        f"task_type='{self.name}' dataset '{dataset_name}' split "
-                        f"'{split_name}' row {row_index} must contain a multilabel "
-                        f"vector of length {num_labels}, got shape {vector.shape}."
+                        f"task_type='{self.name}' dataset '{dataset_name}' split '{split_name}' row {row_index} must contain a multilabel vector of length {num_labels}, got shape {vector.shape}."
                     )
                 if not np.isin(vector, (0, 1)).all():
                     raise ValueError(
-                        f"task_type='{self.name}' dataset '{dataset_name}' split "
-                        f"'{split_name}' row {row_index} must contain only binary "
-                        "values (0 or 1)."
+                        f"task_type='{self.name}' dataset '{dataset_name}' split '{split_name}' row {row_index} must contain only binary values (0 or 1)."
                     )
 
     def extract_predictions(

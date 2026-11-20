@@ -8,20 +8,54 @@ import pytest
 import torch
 from torch import nn
 
-from modules.evaluate.scripts.dataset_sourcing.source_proteingym import (
-    _add_seeded_splits,
-    _load_assay,
-    _TRACKS,
-    write_proteingym_card,
-)
-from modules.evaluate.src.proteingym.aggregate import aggregate_proteingym_metrics, aggregate_proteingym_scores, bootstrap_standard_error_by_category, compute_all_assay_metrics, compute_assay_auc, compute_assay_mcc, compute_assay_metric, compute_assay_ndcg, compute_assay_spearman, compute_assay_top_recall
-from modules.evaluate.src.proteingym.baselines import score_assay_blosum62, score_assay_random
-from modules.evaluate.src.proteingym.masked_marginal import _optimal_window, _sequence_log_likelihood, parse_mutant, score_assay_indel, score_assay_masked_marginal
-from modules.evaluate.src.proteingym.supervised import OFFICIAL_CV_SCHEMES, pool_embeddings, resolve_folds, run_cv
+from modules.evaluate.src.model import factory
+from modules.evaluate.src.proteingym import data as proteingym_data
 from modules.evaluate.src.proteingym import runner as proteingym_runner
-from modules.evaluate.src.proteingym.runner import run_assay_loop
+from modules.evaluate.src.proteingym.aggregate import (
+    aggregate_proteingym_metrics,
+    aggregate_proteingym_scores,
+    bootstrap_standard_error_by_category,
+    compute_all_assay_metrics,
+    compute_assay_auc,
+    compute_assay_mcc,
+    compute_assay_metric,
+    compute_assay_ndcg,
+    compute_assay_spearman,
+    compute_assay_top_recall,
+)
+from modules.evaluate.src.proteingym.baselines import (
+    score_assay_blosum62,
+    score_assay_random,
+)
+from modules.evaluate.src.proteingym.masked_marginal import (
+    _optimal_window,
+    _sequence_log_likelihood,
+    parse_mutant,
+    score_assay_indel,
+    score_assay_masked_marginal,
+)
+from modules.evaluate.src.proteingym.runner import AssayResult, run_assay_loop
+from modules.evaluate.src.proteingym.supervised import (
+    OFFICIAL_CV_SCHEMES,
+    pool_embeddings,
+    resolve_folds,
+    run_cv,
+    run_supervised,
+)
+from modules.evaluate.src.proteingym.zero_shot import run_zero_shot
+from modules.evaluate.src.runners.runtime import initialize_runtime
 
 _ALPHABET = "ACDEFGHIKLMNPQRSTVWY"
+
+
+def run(config):
+    with initialize_runtime(config) as runtime:
+        runner = (
+            run_supervised
+            if config.workflow == "proteingym_supervised"
+            else run_zero_shot
+        )
+        return runner(config, runtime)
 
 
 class _FakeTokenizer:
@@ -108,110 +142,6 @@ def test_optimal_window_matches_proteingym_get_optimal_window():
     assert _optimal_window(position=98, full_len=100, window=20) == (80, 100)
     # Middle: centered window.
     assert _optimal_window(position=50, full_len=100, window=20) == (40, 60)
-
-
-def test_load_assay_adds_unique_id_from_mutant_or_sequence(tmp_path):
-    assay_path = tmp_path / "assay.csv"
-    pl.DataFrame(
-        {
-            "mutated_sequence": ["ACDF", "ACDG"],
-            "mutant": ["A1D", None],
-            "DMS_score": [0.1, 0.2],
-        }
-    ).write_csv(assay_path)
-
-    assay = _load_assay(tmp_path, "assay.csv", "assay-1")
-
-    assert assay["id"].to_list() == ["assay-1:A1D", "assay-1:ACDG"]
-    assert assay["mutated_sequence"].to_list() == ["ACDF", "ACDG"]
-    assert assay["id"].n_unique() == assay.height
-
-    indel_path = tmp_path / "indel.csv"
-    pl.DataFrame({"mutated_sequence": ["ACD", "ACDE"]}).write_csv(indel_path)
-    indels = _load_assay(tmp_path, "indel.csv", "indel-1")
-    assert indels["id"].to_list() == ["indel-1:ACD", "indel-1:ACDE"]
-
-    clinical_path = tmp_path / "clinical.csv"
-    pl.DataFrame(
-        {
-            "mutated_sequence": ["ACD", "ACE"],
-            "DMS_bin_score": ["Benign", "Pathogenic"],
-        }
-    ).write_csv(clinical_path)
-    clinical = _load_assay(tmp_path, "clinical.csv", "clinical-1")
-    assert clinical["dms_score_bin"].to_list() == ["Benign", "Pathogenic"]
-
-
-def test_seeded_splits_are_reproducible_and_disjoint():
-    frame = pl.DataFrame({"id": [f"variant-{index}" for index in range(10)]})
-
-    first = _add_seeded_splits(frame, 0.8, 0.1, seed=1957723)
-    second = _add_seeded_splits(frame, 0.8, 0.1, seed=1957723)
-
-    assert first.equals(second)
-    assert first["split"].value_counts().height == 3
-    # Alphabetical sort of split names: test, train, validation.
-    assert first.group_by("split").len().sort("split")["len"].to_list() == [1, 8, 1]
-
-
-@pytest.mark.parametrize("height", [3, 4, 5])
-def test_seeded_splits_give_small_assays_every_role(height):
-    frame = pl.DataFrame({"id": [f"variant-{index}" for index in range(height)]})
-
-    split = _add_seeded_splits(frame, 0.8, 0.1, seed=1957723, dms_id="a")["split"]
-
-    assert set(split.to_list()) == {"train", "validation", "test"}
-
-
-def test_seeded_splits_leave_tiny_assays_unchanged():
-    frame = pl.DataFrame({"id": ["variant-0", "variant-1"]})
-
-    assert _add_seeded_splits(frame, 0.8, 0.1, seed=1957723).equals(frame)
-
-
-def test_proteingym_card_describes_track_layout_and_splits(tmp_path):
-    config = type(
-        "Config",
-        (),
-        {
-            "base_url": "https://example.test/proteingym",
-            "version": "v1.3",
-            "reference_base_url": "https://example.test/reference_files",
-            "track": "dms_substitutions",
-            "seed": 7,
-            "train_fraction": 0.8,
-            "validation_fraction": 0.1,
-            "create_split_subsets": True,
-            "combine_assays": True,
-        },
-    )()
-    combined = pl.DataFrame(
-        {
-            "id": ["assay-1:A1C"],
-            "dms_id": ["assay-1"],
-            "mutated_sequence": ["ACD"],
-            "dms_score": [0.5],
-            "fold_random_5": [0],
-        }
-    )
-    reference = pl.DataFrame({"dms_id": ["assay-1"]})
-
-    card_path = write_proteingym_card(
-        tmp_path,
-        config,
-        _TRACKS["dms_substitutions"],
-        combined,
-        reference,
-        ["train", "train_random", "train_stratified"],
-    )
-
-    card = card_path.read_text(encoding="utf-8")
-    assert "ProteinGym `v1.3` DMS substitution assays" in card
-    assert "DMS_substitutions.csv" in card
-    assert "combined_<split>.parquet" in card
-    assert "seed `7`" in card
-    assert "`dms_score`" in card
-    assert "`fold_random_5`" in card
 
 
 def test_score_assay_masked_marginal_matches_closed_form():
@@ -363,7 +293,9 @@ def test_proteingym_aggregation_excludes_undefined_metrics_before_grouping():
             "score": [np.nan, None, np.nan],
         }
     )
-    expected = aggregate_proteingym_scores(clean, compute_uncertainty=True, n_bootstrap=50)
+    expected = aggregate_proteingym_scores(
+        clean, compute_uncertainty=True, n_bootstrap=50
+    )
     actual = aggregate_proteingym_scores(
         pl.concat([clean, undefined]), compute_uncertainty=True, n_bootstrap=50
     )
@@ -385,7 +317,9 @@ def test_proteingym_aggregation_with_no_defined_metrics_returns_nan():
     assert np.isnan(summary["overall"])
     assert np.isnan(summary["bootstrap_standard_error"])
     assert summary["per_category"] == {}
-    assert np.isnan(aggregate_proteingym_metrics(undefined, ["score"])["score"]["overall"])
+    assert np.isnan(
+        aggregate_proteingym_metrics(undefined, ["score"])["score"]["overall"]
+    )
 
 
 def test_bootstrap_standard_error_is_deterministic_given_seed():
@@ -399,7 +333,9 @@ def test_bootstrap_standard_error_is_deterministic_given_seed():
     )
 
     first = bootstrap_standard_error_by_category(assay_results, n_resamples=200, seed=0)
-    second = bootstrap_standard_error_by_category(assay_results, n_resamples=200, seed=0)
+    second = bootstrap_standard_error_by_category(
+        assay_results, n_resamples=200, seed=0
+    )
 
     assert first == second
     assert first >= 0.0
@@ -419,7 +355,11 @@ def test_score_assay_blosum62_matches_manual_lookup():
 
 
 def test_official_cv_schemes_are_the_three_proteingym_folds():
-    assert OFFICIAL_CV_SCHEMES == ("fold_random_5", "fold_modulo_5", "fold_contiguous_5")
+    assert OFFICIAL_CV_SCHEMES == (
+        "fold_random_5",
+        "fold_modulo_5",
+        "fold_contiguous_5",
+    )
 
 
 def test_compute_assay_auc_perfect_separation():
@@ -436,10 +376,14 @@ def test_compute_assay_auc_nan_with_single_class():
 
 def test_compute_assay_metric_dispatches_on_available_columns():
     model_scores = np.array([0.1, 0.5, 0.9])
-    metric_name, _ = compute_assay_metric(model_scores, dms_scores=np.array([1.0, 2.0, 3.0]))
+    metric_name, _ = compute_assay_metric(
+        model_scores, dms_scores=np.array([1.0, 2.0, 3.0])
+    )
     assert metric_name == "spearman"
 
-    metric_name, _ = compute_assay_metric(model_scores, dms_score_bin=np.array([0, 0, 1]))
+    metric_name, _ = compute_assay_metric(
+        model_scores, dms_score_bin=np.array([0, 0, 1])
+    )
     assert metric_name == "auc"
 
 
@@ -458,7 +402,10 @@ def test_compute_assay_ndcg_nan_when_scores_are_constant():
 def test_compute_assay_top_recall_perfect_agreement():
     model_scores = np.arange(10, dtype=float)
     dms_scores = np.arange(10, dtype=float)
-    assert compute_assay_top_recall(model_scores, dms_scores, top_true=10, top_model=10) == 1.0
+    assert (
+        compute_assay_top_recall(model_scores, dms_scores, top_true=10, top_model=10)
+        == 1.0
+    )
 
 
 def test_compute_assay_mcc_perfect_agreement():
@@ -530,7 +477,9 @@ class _FakeBatchTokenizer:
         if add_special_tokens:
             encoded = [[self.cls_token_id] + ids for ids in encoded]
         width = max(len(ids) for ids in encoded)
-        input_ids = torch.full((len(encoded), width), self.pad_token_id, dtype=torch.long)
+        input_ids = torch.full(
+            (len(encoded), width), self.pad_token_id, dtype=torch.long
+        )
         attention_mask = torch.zeros((len(encoded), width), dtype=torch.long)
         for row, ids in enumerate(encoded):
             input_ids[row, : len(ids)] = torch.tensor(ids)
@@ -551,7 +500,12 @@ def test_score_assay_indel_matches_closed_form():
     mutated_sequences = ["ACDEFGG", "ACDE"]  # an insertion and a deletion
 
     scores = score_assay_indel(
-        model, tokenizer, wt_sequence, mutated_sequences, device=torch.device("cpu"), batch_size=2
+        model,
+        tokenizer,
+        wt_sequence,
+        mutated_sequences,
+        device=torch.device("cpu"),
+        batch_size=2,
     )
 
     expected_log_probs = torch.log_softmax(
@@ -559,11 +513,16 @@ def test_score_assay_indel_matches_closed_form():
     )
 
     def expected_log_likelihood(sequence: str) -> float:
-        ids = [tokenizer.cls_token_id] + [tokenizer.convert_tokens_to_ids(c) for c in sequence]
+        ids = [tokenizer.cls_token_id] + [
+            tokenizer.convert_tokens_to_ids(c) for c in sequence
+        ]
         return sum(expected_log_probs[i].item() for i in ids)
 
     expected = np.array(
-        [expected_log_likelihood(s) - expected_log_likelihood(wt_sequence) for s in mutated_sequences]
+        [
+            expected_log_likelihood(s) - expected_log_likelihood(wt_sequence)
+            for s in mutated_sequences
+        ]
     )
     np.testing.assert_allclose(scores, expected, atol=1e-4)
 
@@ -583,7 +542,9 @@ def test_score_assay_indel_excludes_cls_from_masked_likelihood():
     log_probs = torch.log_softmax(
         torch.arange(tokenizer.vocab_size, dtype=torch.float32), dim=-1
     )
-    assert scores[0] == pytest.approx(log_probs[tokenizer.convert_tokens_to_ids("D")].item())
+    assert scores[0] == pytest.approx(
+        log_probs[tokenizer.convert_tokens_to_ids("D")].item()
+    )
 
 
 def test_score_assay_indel_truncates_residue_positions_with_input():
@@ -613,7 +574,9 @@ class _FakeEncoderModel(nn.Module):
         self.hidden_size = hidden_size
 
     def forward(self, input_ids, attention_mask=None, output_hidden_states=False):
-        hidden = input_ids.unsqueeze(-1).float().expand(*input_ids.shape, self.hidden_size)
+        hidden = (
+            input_ids.unsqueeze(-1).float().expand(*input_ids.shape, self.hidden_size)
+        )
 
         class _Output:
             pass
@@ -637,7 +600,9 @@ def test_pool_embeddings_mean_pools_valid_tokens_only():
 
 
 def test_resolve_folds_custom_kfold_partitions_all_variants():
-    folds = resolve_folds(10, official_folds=None, strategy="custom_kfold", n_splits=5, seed=0)
+    folds = resolve_folds(
+        10, official_folds=None, strategy="custom_kfold", n_splits=5, seed=0
+    )
     assert folds.shape == (10,)
     assert set(folds.tolist()) == set(range(5))
 
@@ -657,7 +622,7 @@ def test_run_assay_loop_uses_metric_override_from_score_assay(tmp_path):
     def score_assay(row, assay):
         # Real predictions would give a perfect (1.0) Spearman; the override
         # simulates a metric averaged across multiple CV schemes instead.
-        return np.array([0.1, 0.2]), 0.42
+        return AssayResult(np.array([0.1, 0.2]), 0.42)
 
     summary = proteingym_runner.run_assay_loop(
         data_dir, tmp_path / "out", None, score_assay
@@ -825,7 +790,7 @@ def test_clinical_substitution_mean_preserves_metric_overrides(tmp_path):
         data_dir,
         tmp_path / "out",
         None,
-        lambda row, assay: (np.array([0.1, 0.9]), overrides[row["dms_id"]]),
+        lambda row, assay: AssayResult(np.array([0.1, 0.9]), overrides[row["dms_id"]]),
     )
     assert summary["overall"] == pytest.approx(0.375)
     assert summary["num_genes"] == 2
@@ -873,7 +838,7 @@ def test_dms_tracks_keep_protein_and_function_weighting(tmp_path, is_indel):
         data_dir,
         tmp_path / "out",
         None,
-        lambda row, assay: (np.zeros(assay.height), row["expected"]),
+        lambda row, assay: AssayResult(np.zeros(assay.height), row["expected"]),
     )
     # Assay mean 0.5 and variant-weighted mean 5/14 are both incorrect.
     # P1=0.5, P2=0.8 -> Activity=0.65; Binding=0.2 -> overall=0.425.
@@ -887,7 +852,9 @@ def test_run_cv_recovers_a_linear_relationship():
     embeddings = rng.normal(size=(60, 3))
     true_weights = np.array([1.0, -2.0, 0.5])
     targets = embeddings @ true_weights
-    folds = resolve_folds(60, official_folds=None, strategy="custom_kfold", n_splits=5, seed=0)
+    folds = resolve_folds(
+        60, official_folds=None, strategy="custom_kfold", n_splits=5, seed=0
+    )
 
     predictions = run_cv(embeddings, targets, folds, task="regression")
 
@@ -899,9 +866,13 @@ def test_run_cv_supports_mlp_probe_type():
     rng = np.random.default_rng(0)
     embeddings = rng.normal(size=(60, 3))
     targets = embeddings @ np.array([1.0, -2.0, 0.5])
-    folds = resolve_folds(60, official_folds=None, strategy="custom_kfold", n_splits=5, seed=0)
+    folds = resolve_folds(
+        60, official_folds=None, strategy="custom_kfold", n_splits=5, seed=0
+    )
 
-    predictions = run_cv(embeddings, targets, folds, task="regression", probe_type="mlp")
+    predictions = run_cv(
+        embeddings, targets, folds, task="regression", probe_type="mlp"
+    )
 
     assert not np.isnan(predictions).any()
 
@@ -911,7 +882,9 @@ def test_run_cv_supports_torch_linear_probe_type():
     embeddings = rng.normal(size=(60, 3))
     true_weights = np.array([1.0, -2.0, 0.5])
     targets = embeddings @ true_weights
-    folds = resolve_folds(60, official_folds=None, strategy="custom_kfold", n_splits=5, seed=0)
+    folds = resolve_folds(
+        60, official_folds=None, strategy="custom_kfold", n_splits=5, seed=0
+    )
 
     predictions = run_cv(
         embeddings,
@@ -931,7 +904,9 @@ def test_run_cv_search_space_tunes_probe_hyperparameters():
     embeddings = rng.normal(size=(80, 3))
     true_weights = np.array([1.0, -2.0, 0.5])
     targets = embeddings @ true_weights
-    folds = resolve_folds(80, official_folds=None, strategy="custom_kfold", n_splits=5, seed=0)
+    folds = resolve_folds(
+        80, official_folds=None, strategy="custom_kfold", n_splits=5, seed=0
+    )
 
     predictions = run_cv(
         embeddings,
@@ -957,9 +932,9 @@ def _write_sourced_layout(root):
             "coarse_selection_type": ["Activity"],
         }
     ).write_parquet(root / "reference.parquet")
-    pl.DataFrame({"mutated_sequence": ["ACD", "ACE"], "dms_score": [0.1, 0.2]}).write_parquet(
-        root / "data" / "assay-1.parquet"
-    )
+    pl.DataFrame(
+        {"mutated_sequence": ["ACD", "ACE"], "dms_score": [0.1, 0.2]}
+    ).write_parquet(root / "data" / "assay-1.parquet")
 
 
 def test_run_assay_loop_reads_assays_from_the_data_subfolder(tmp_path):
@@ -982,7 +957,7 @@ def test_run_assay_loop_uses_local_data_without_hf_repo(tmp_path, monkeypatch):
     def fail_download(*args, **kwargs):
         raise AssertionError("HF should not be called without data_repo_id")
 
-    monkeypatch.setattr(proteingym_runner, "download_from_hf", fail_download)
+    monkeypatch.setattr(proteingym_data, "download_from_hf", fail_download)
 
     summary = run_assay_loop(
         data_dir,
@@ -1005,7 +980,7 @@ def test_run_assay_loop_uses_local_hf_snapshot_first(tmp_path, monkeypatch):
         _write_sourced_layout(local_dir)
         return local_dir
 
-    monkeypatch.setattr(proteingym_runner, "download_from_hf", fake_download)
+    monkeypatch.setattr(proteingym_data, "download_from_hf", fake_download)
 
     summary = run_assay_loop(
         data_dir,
@@ -1030,7 +1005,7 @@ def test_run_assay_loop_downloads_after_local_hf_cache_miss(tmp_path, monkeypatc
         _write_sourced_layout(local_dir)
         return local_dir
 
-    monkeypatch.setattr(proteingym_runner, "download_from_hf", fake_download)
+    monkeypatch.setattr(proteingym_data, "download_from_hf", fake_download)
 
     summary = run_assay_loop(
         data_dir,
@@ -1045,7 +1020,9 @@ def test_run_assay_loop_downloads_after_local_hf_cache_miss(tmp_path, monkeypatc
     assert calls[1]["force_download"] is False
 
 
-def test_run_assay_loop_falls_back_to_local_data_after_hf_failure(tmp_path, monkeypatch):
+def test_run_assay_loop_falls_back_to_local_data_after_hf_failure(
+    tmp_path, monkeypatch
+):
     data_dir = tmp_path / "sourced"
     _write_sourced_layout(data_dir)
     calls = []
@@ -1054,7 +1031,7 @@ def test_run_assay_loop_falls_back_to_local_data_after_hf_failure(tmp_path, monk
         calls.append(kwargs)
         raise ConnectionError("HF is unavailable")
 
-    monkeypatch.setattr(proteingym_runner, "download_from_hf", fake_download)
+    monkeypatch.setattr(proteingym_data, "download_from_hf", fake_download)
 
     summary = run_assay_loop(
         data_dir,
@@ -1077,7 +1054,7 @@ def test_run_assay_loop_force_download_skips_local_hf_snapshot(tmp_path, monkeyp
         calls.append(kwargs)
         raise ConnectionError("HF is unavailable")
 
-    monkeypatch.setattr(proteingym_runner, "download_from_hf", fake_download)
+    monkeypatch.setattr(proteingym_data, "download_from_hf", fake_download)
 
     summary = run_assay_loop(
         data_dir,
@@ -1096,13 +1073,13 @@ def test_run_assay_loop_force_download_skips_local_hf_snapshot(tmp_path, monkeyp
 
 @pytest.fixture
 def supervised_entrypoint(monkeypatch):
-    from modules.evaluate.src import run_proteingym_supervised as entrypoint
+    from modules.evaluate.src.proteingym import supervised as entrypoint
 
     monkeypatch.setattr(
-        entrypoint.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: object()
+        factory.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: object()
     )
     monkeypatch.setattr(
-        entrypoint.AutoModel, "from_pretrained", lambda *args, **kwargs: nn.Identity()
+        factory.AutoModel, "from_pretrained", lambda *args, **kwargs: nn.Identity()
     )
     # Fixed embeddings make the probe tests independent of model inference.
     monkeypatch.setattr(
@@ -1171,7 +1148,7 @@ def test_supervised_clinical_string_and_numeric_labels_agree(
             split=split,
             device="cpu",
         )
-        summary = supervised_entrypoint.run(config)
+        summary = run(config)
         assert summary["overall"] == pytest.approx(1.0)
         assert summary["aggregation"] == "per_gene"
         assert summary["num_genes"] == 1
@@ -1214,7 +1191,7 @@ def test_supervised_numeric_labels_preserve_missing_targets(
         split="custom_kfold",
         device="cpu",
     )
-    actual = supervised_entrypoint.run(config)
+    actual = run(config)
     np.testing.assert_allclose(
         actual, 1 - targets if clinical else targets, equal_nan=True
     )
@@ -1239,7 +1216,7 @@ def test_supervised_continuous_regression_is_unchanged(
         split=split,
         device="cpu",
     )
-    summary = supervised_entrypoint.run(config)
+    summary = run(config)
     assert summary["overall"] == pytest.approx(1.0)
     scores = pl.read_parquet(tmp_path / "out/assay_scores.parquet")
     assert scores["metric"][0] == "spearman"
@@ -1293,9 +1270,10 @@ def test_indel_batching_preserves_context_scores(batch_size, max_length):
 
 @pytest.mark.parametrize("is_indel", [False, True])
 def test_zero_shot_preserves_ambiguous_residues(monkeypatch, tmp_path, is_indel):
-    from modules.evaluate.src import run_proteingym_zero_shot as entrypoint
+    from modules.evaluate.src.proteingym import zero_shot as entrypoint
     from modules.evaluate.src.proteingym.config import ProteinGymZeroShotConfig
     from modules.pretrain.src.model.tokenizer import ProteinTokenizer, TokenizerConfig
+
     from .conftest import VOCAB
 
     tokenizer = ProteinTokenizer(
@@ -1324,10 +1302,10 @@ def test_zero_shot_preserves_ambiguous_residues(monkeypatch, tmp_path, is_indel)
     assert len(tokenizer(row["target_seq"])["input_ids"]) == 5  # BOS + ACD + EOS
 
     monkeypatch.setattr(
-        entrypoint.AutoTokenizer, "from_pretrained", lambda *a, **k: tokenizer
+        factory.AutoTokenizer, "from_pretrained", lambda *a, **k: tokenizer
     )
     monkeypatch.setattr(
-        entrypoint.AutoModelForMaskedLM, "from_pretrained", lambda *a, **k: model
+        factory.AutoModelForMaskedLM, "from_pretrained", lambda *a, **k: model
     )
 
     def score_one_assay(data_dir, output_dir, max_assays, score_assay, **kwargs):
@@ -1337,7 +1315,7 @@ def test_zero_shot_preserves_ambiguous_residues(monkeypatch, tmp_path, is_indel)
         return {"scores": scores}
 
     monkeypatch.setattr(entrypoint, "run_assay_loop", score_one_assay)
-    entrypoint.run(
+    run(
         ProteinGymZeroShotConfig(
             model_id="offline",
             data_dir=tmp_path,
@@ -1368,9 +1346,9 @@ def test_indel_truncation_preserves_specials_and_scores_a_fixed_prefix(
         masked = original.clone()
         masked[0, position] = tokenizer.mask_token_id
         logits = model(masked, encoding["attention_mask"]).logits
-        expected += logits[0, position].float().log_softmax(-1)[
-            original[0, position]
-        ].item()
+        expected += (
+            logits[0, position].float().log_softmax(-1)[original[0, position]].item()
+        )
 
     class RecordingModel(_ContextMaskedLM):
         def __init__(self):

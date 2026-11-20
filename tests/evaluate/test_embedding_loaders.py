@@ -1,8 +1,6 @@
 """Ordering and cache regressions for frozen-trunk extraction loaders."""
 
 from __future__ import annotations
-from modules.evaluate.src.steps.controls import ControlsStep
-from modules.evaluate.src.contracts.config import PrepareConfig
 
 from dataclasses import replace
 from types import SimpleNamespace
@@ -13,21 +11,21 @@ from accelerate import Accelerator
 from datasets import Dataset, DatasetDict
 from torch import nn
 
-from modules.evaluate.src.dataset.collator import EvaluationCollator, EvaluationCollatorConfig
+from modules.evaluate.src.artifacts.cache import EmbeddingCache
+from modules.evaluate.src.config import HeadConfig, PredictConfig, TuneConfig
+from modules.evaluate.src.config import EmbeddingCacheConfig
+from modules.evaluate.src.dataset.collator import (
+    EvaluationCollator,
+    EvaluationCollatorConfig,
+)
 from modules.evaluate.src.dataset.dataloader import DataLoaderConfig, build_dataloaders
-from modules.evaluate.src.contracts.config import HeadConfig
-from modules.evaluate.src.contracts.config import PredictConfig
-from modules.evaluate.src.steps.predict import PredictStep
-from modules.evaluate.src.contracts.config import TuneConfig
-from modules.evaluate.src.steps.tune import TuneStep
-from modules.evaluate.src.dataset.embedding_cache import EmbeddingCache
 from modules.evaluate.src.dataset.embeddings import (
     build_embedding_dataloaders,
     find_embedding_dataset,
 )
 from modules.evaluate.src.model.embeddings import extract_embeddings
-from modules.evaluate.src.contracts.config import EmbeddingCacheConfig
 
+from .helpers import fit_controls, fit_inputs, predict_inputs
 from .test_prepare import _make_workspace, _run_prepare
 
 
@@ -313,23 +311,41 @@ def test_prepare_and_prediction_controls_use_matching_order(
         embedding_batch_size=3,
         embedding_cache=EmbeddingCacheConfig(enabled=True, dtype="float32"),
     )
-    backend = artifacts.embedding.backend
+    backend = artifacts.test.embedding.backend
     assert backend.length_grouped_sampling == grouped
     other_grouping = replace(backend, length_grouped_sampling=not grouped)
     for transform in (None, "scramble_sequences:v1:seed=710019"):
         assert backend.test_embedding_key(
-            trunk=backend.trunk, seed=710019, input_transform=transform
+            trunk=artifacts.predictor.trunk, seed=710019, input_transform=transform
         ) != other_grouping.test_embedding_key(
-            trunk=backend.trunk, seed=710019, input_transform=transform
+            trunk=artifacts.predictor.trunk, seed=710019, input_transform=transform
         )
     if task_type == "sequence_classification":
         assert backend.cache.exists("test", backend.test_cache_key)
     controls = ["random_trunk", "random_both"]
     if task_type == "sequence_classification":
         controls.append("scrambled_sequences")
-    TuneStep(TuneConfig(head=HeadConfig(head_type='torch_linear'), max_epochs=1, save_best_model=False)).run(_make_workspace(tmp_path, task_type), artifacts)
-    ControlsStep(TuneConfig(head=HeadConfig(head_type='torch_linear'), max_epochs=1, save_best_model=False), PrepareConfig()).run(_make_workspace(tmp_path, task_type), artifacts, controls=controls)
-    output = PredictStep(PredictConfig(controls=controls)).run(
+    fit_inputs(
+        TuneConfig(
+            head=HeadConfig(head_type="torch_linear"),
+            max_epochs=1,
+            save_best_model=False,
+        ),
+        _make_workspace(tmp_path, task_type),
+        artifacts,
+    )
+    fit_controls(
+        TuneConfig(
+            head=HeadConfig(head_type="torch_linear"),
+            max_epochs=1,
+            save_best_model=False,
+        ),
+        _make_workspace(tmp_path, task_type),
+        artifacts,
+        controls=controls,
+    )
+    output = predict_inputs(
+        PredictConfig(controls=controls),
         _make_workspace(tmp_path, task_type),
         artifacts,
     )

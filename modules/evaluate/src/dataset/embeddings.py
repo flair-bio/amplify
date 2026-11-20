@@ -12,8 +12,7 @@ from accelerate import Accelerator
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
-from modules.evaluate.src.dataset.dataloader import LengthGroupedSampler, token_lengths
-from modules.evaluate.src.dataset.embedding_cache import (
+from modules.evaluate.src.artifacts.cache import (
     BYTES_PER_GB,
     CACHEABLE_SPLITS,
     EmbeddingCache,
@@ -21,10 +20,11 @@ from modules.evaluate.src.dataset.embedding_cache import (
     estimate_embedding_bytes,
     weights_fingerprint,
 )
+from modules.evaluate.src.dataset.dataloader import LengthGroupedSampler, token_lengths
 from modules.evaluate.src.model.embeddings import AUTOCAST_DTYPES, extract_embeddings
 
 if TYPE_CHECKING:
-    from modules.evaluate.src.contracts.config import (
+    from modules.evaluate.src.config import (
         EmbeddingAutocastDtype,
         EmbeddingCacheConfig,
         EmbeddingDtype,
@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 class EmbeddingBackend:
     """Retained trunk and token loaders for perturbed-input/model controls."""
 
-    trunk: nn.Module
     token_test_dataloader: DataLoader
     pooling: EmbeddingPooling
     layers: list[int]

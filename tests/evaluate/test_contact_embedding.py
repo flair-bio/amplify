@@ -16,16 +16,29 @@ from datasets import Dataset, DatasetDict
 from transformers import EsmConfig, EsmModel
 
 from modules.evaluate.src import run_evaluate
-from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
-from modules.evaluate.src.steps.prepare import PrepareStep
+from modules.evaluate.src.artifacts.checkpoints import save_predictor
+from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
+from modules.evaluate.src.utils.config_utils import load_evaluation_config
+from modules.evaluate.src.dataset.contact import (
+    candidate_pairs,
+    prepare_contact_dataset,
+    tokenize_contact_chain,
+)
 from modules.evaluate.src.model.adapters import contact_positions
-from modules.evaluate.src.model.contact_model import BilinearHead, ContactPredictionModel
-from modules.evaluate.src.runners.pipeline import run_pipeline
-from modules.evaluate.src.contracts.artifacts import ContactArtifacts, PreparedArtifacts
+from modules.evaluate.src.model.contact_model import (
+    BilinearHead,
+    ContactPredictionModel,
+)
+from modules.evaluate.src.model.factory import Predictor
+from modules.evaluate.src.runners import runtime as runtime_module
+from modules.evaluate.src.runners.contact import prepare_contact_features
+from modules.evaluate.src.runners.pipeline import run_evaluation
+from modules.evaluate.src.runners.runtime import Runtime
 from modules.evaluate.src.tasks import available_tasks, get_task
-from modules.evaluate.src.dataset.contact import candidate_pairs, prepare_contact_dataset, tokenize_contact_chain
-from modules.evaluate.src.trainers.contact import fit_contact_head
-from modules.evaluate.src.contracts.config_loader import load_evaluation_config
+from modules.evaluate.src.trainers.contact import (
+    fit_contact_head,
+    fit_contact_predictor,
+)
 from modules.pretrain.src.model.modeling_amplify import (
     AMPLIFYConfig,
     AMPLIFYModel,
@@ -107,25 +120,24 @@ def config_for(tmp_path, model_path, seed=13):
     )
 
 
-@pytest.mark.parametrize("predictor", ["bilinear512", "attention_l1", "categorical_jacobian"])
+@pytest.mark.parametrize(
+    "predictor", ["bilinear512", "attention_l1", "categorical_jacobian"]
+)
 @pytest.mark.parametrize("controls", [[], ["random_trunk"]])
 def test_contact_predictor_pipeline_roundtrip(
     tmp_path, esm2_tokenizer, predictor, controls, monkeypatch
 ):
+    import polars as pl
     from transformers import EsmForMaskedLM
 
-    from modules.evaluate.src.contracts.config import ScoreConfig
-    from modules.evaluate.src.steps.score import ScoreStep
-    from modules.evaluate.src.contracts.config_loader import load_baseline_config
+    from modules.evaluate.src.utils.config_utils import load_baseline_config
     from modules.evaluate.src.runners.baselines import run_baselines
-    from modules.evaluate.src.tasks import contact_prediction
-    import polars as pl
+    from modules.evaluate.src.trainers import contact as contact_training
 
     model_path = tmp_path / "trunk"
     EsmForMaskedLM(small_trunk().config).save_pretrained(model_path)
     esm2_tokenizer.save_pretrained(model_path)
     hf = development_dataset()
-    # Logistic fitting requires both positive and negative training pairs.
     hf["train"] = Dataset.from_list(
         [
             row(f"train-{i}", "train", sequence="ACDEFGHIK", positive_pairs=[[0, 6]])
@@ -146,19 +158,19 @@ def test_contact_predictor_pipeline_roundtrip(
         "categorical_jacobian": "contact_jacobian",
     }[predictor]
     paths = [
-            CONFIGS / "config.yaml",
-            CONFIGS / "datasets/contact_prediction_casp.yaml",
-            CONFIGS / f"predictors/{preset}.yaml",
+        CONFIGS / "config.yaml",
+        CONFIGS / "datasets/contact_prediction_casp.yaml",
+        CONFIGS / f"predictors/{preset}.yaml",
     ]
     overrides = [
-            f"workspace.output_dir={tmp_path / 'output'}",
-            "workspace.model_name=tiny",
-            f"workspace.model_repo_id={model_path}",
-            f"workspace.dataset_repo_id={tmp_path / 'dataset'}",
-            "workspace.run_id=offline",
-            "seed=13",
-            f"steps.predict.controls={json.dumps(controls)}",
-            "steps.tune.max_epochs=12",
+        f"workspace.output_dir={tmp_path / 'output'}",
+        "workspace.model_name=tiny",
+        f"workspace.model_repo_id={model_path}",
+        f"workspace.dataset_repo_id={tmp_path / 'dataset'}",
+        "workspace.run_id=offline",
+        "seed=13",
+        f"steps.predict.controls={json.dumps(controls)}",
+        "steps.tune.max_epochs=12",
     ]
     config = load_evaluation_config(paths, overrides=overrides)
     baselines = run_baselines(
@@ -168,14 +180,20 @@ def test_contact_predictor_pipeline_roundtrip(
         dataset=hf,
     )
     assert set(baselines) == {"tests/casp14", "tests/casp15", "tests/casp16"}
-    fit_name = "fit_contact_attention_head" if predictor == "attention_l1" else "fit_contact_head"
-    fit = Mock(wraps=getattr(contact_prediction, fit_name))
-    monkeypatch.setattr(contact_prediction, fit_name, fit)
-    workspace = get_evaluation_workspace(
-        config.workspace, config.variant, seed=config.seed
+    fit_name = (
+        "fit_contact_attention_head"
+        if predictor == "attention_l1"
+        else "fit_contact_head"
     )
-    result = run_pipeline(config, workspace, Accelerator(cpu=True), dataset=hf)
-    assert fit.call_count == (0 if predictor == "categorical_jacobian" else 1 + len(controls))
+    fit = Mock(wraps=getattr(contact_training, fit_name))
+    monkeypatch.setattr(contact_training, fit_name, fit)
+    workspace = EvaluationWorkspace(config.workspace, config.variant, seed=config.seed)
+    result = run_evaluation(
+        config, Runtime(torch.device("cpu"), Accelerator(cpu=True)), dataset=hf
+    )
+    assert fit.call_count == (
+        0 if predictor == "categorical_jacobian" else 1 + len(controls)
+    )
     assert result.evaluations == []
     assert set(result.test_subsets) == {"casp14", "casp15", "casp16"}
     predictions = []
@@ -190,7 +208,12 @@ def test_contact_predictor_pipeline_roundtrip(
         assert prediction.metadata.head_type == predictor
         assert prediction.predictions["edition"].unique().to_list() == [edition]
         assert set(prediction.controls) == set(controls)
-        assert all(frame["edition"].unique().to_list() == [edition] for frame in prediction.controls.values())
+        assert all(
+            (
+                frame["edition"].unique().to_list() == [edition]
+                for frame in prediction.controls.values()
+            )
+        )
         assert scored.summaries.height > 0
         assert set(scored.control_summaries) == set(controls)
         assert scored.summaries["edition"].unique().to_list() == [edition]
@@ -206,14 +229,26 @@ def test_contact_predictor_pipeline_roundtrip(
         assert subset_manifest["score"]["scores"] == scored.summaries.to_dicts()
         assert not (subset_workspace.run_root / "contact_score.json").exists()
         assert not (subset_workspace.run_root / "model").exists()
-    from modules.evaluate.src.contracts.artifacts import PredictOutput
+    from modules.evaluate.src.artifacts.results import PredictOutput
+
     pooled = get_task("contact_prediction").score_units(
         PredictOutput(metadata=prediction.metadata, predictions=pl.concat(predictions))
     )
     for edition in (14, 15, 16):
-        columns = ["edition", "kind", "minsep", *get_task("contact_prediction").default_metrics()]
-        assert pooled.summaries.filter(pl.col("edition") == edition).select(columns).equals(
-            result.test_subsets[f"casp{edition}"].scores[None].summaries.select(columns)
+        columns = [
+            "edition",
+            "kind",
+            "minsep",
+            *get_task("contact_prediction").default_metrics(),
+        ]
+        assert (
+            pooled.summaries.filter(pl.col("edition") == edition)
+            .select(columns)
+            .equals(
+                result.test_subsets[f"casp{edition}"]
+                .scores[None]
+                .summaries.select(columns)
+            )
         )
     manifest = json.loads(workspace.run_manifest_path.read_text())
     assert manifest["evaluation"]["status"] == "complete"
@@ -264,26 +299,14 @@ def test_embedding_task_exposes_only_casp_metrics_and_structured_scoring():
     task.validate_metric_names(task.default_metrics())
     with pytest.raises(KeyError):
         task.validate_metric_names(["contact_auc_long"])
-    from modules.evaluate.src.tasks.base import StructuredTask
+    from types import ModuleType
+
     from modules.evaluate.src.tasks.registry import get_flat_task
 
-    assert isinstance(task, StructuredTask)
+    assert isinstance(task, ModuleType)
     assert not hasattr(task, "compute_metrics")
     with pytest.raises(TypeError, match="requires structured scoring"):
         get_flat_task("contact_prediction")
-
-
-def test_prepared_contact_state_rejects_generic_loaders():
-    dataset = prepare_contact_dataset(hf_data([row()]))
-    with pytest.raises(ValueError, match="cannot be combined"):
-        PreparedArtifacts(
-            model=ContactPredictionModel(small_trunk()),
-            tokenizer=None,
-            train_dataloader=None,
-            val_dataloader=None,
-            test_dataloader=torch.utils.data.DataLoader([1]),
-            contact=ContactArtifacts(dataset=dataset),
-        )
 
 
 def test_extraction_native_parity_gaps_growth_and_freezing(model_family):
@@ -424,6 +447,7 @@ def test_legacy_amplify_rotary_growth_tolerates_device_rounding():
 
 
 def test_fixed_fit_determinism_decay_patience_restoration_and_cap(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="modules.evaluate.src.trainers.contact")
     dataset = prepare_contact_dataset(development_dataset())
     model = ContactPredictionModel(small_trunk())
     generator = torch.Generator().manual_seed(7)
@@ -460,8 +484,6 @@ def test_fixed_fit_determinism_decay_patience_restoration_and_cap(monkeypatch, c
     )
     for key, value in first_state.items():
         torch.testing.assert_close(value, model.head.state_dict()[key], rtol=0, atol=0)
-
-    # All-negative validation maps are identically zero; state must be epoch 1.
     torch.manual_seed(88)
     reference = BilinearHead(8)
     opt = original(
@@ -475,7 +497,7 @@ def test_fixed_fit_determinism_decay_patience_restoration_and_cap(monkeypatch, c
         lr=0.001,
     )
     pairs = [candidate_pairs(c.units[0], c.alignment) for c in dataset.splits["train"]]
-    total = sum(len(p.i) for p in pairs)
+    total = sum((len(p.i) for p in pairs))
     for chain, pair in zip(dataset.splits["train"], pairs):
         F.binary_cross_entropy_with_logits(
             reference(features[chain.record_id])[pair.i, pair.j],
@@ -485,7 +507,6 @@ def test_fixed_fit_determinism_decay_patience_restoration_and_cap(monkeypatch, c
     opt.step()
     for key, value in reference.state_dict().items():
         torch.testing.assert_close(first_state[key], value)
-
     score = iter(range(1000))
     monkeypatch.setattr(
         "modules.evaluate.src.metrics.contact_metrics.score_contact_unit",
@@ -499,9 +520,9 @@ def test_fixed_fit_determinism_decay_patience_restoration_and_cap(monkeypatch, c
 
 def test_development_feature_identity_uses_only_development_metadata(esm2_tokenizer):
     from modules.evaluate.src.dataset.contact import tokenize_contact_chain
-    from modules.evaluate.src.tasks.contact_prediction import (
-        contact_development_feature_identity,
+    from modules.evaluate.src.model.contact_features import (
         contact_development_attention_fingerprint,
+        contact_development_feature_identity,
     )
 
     dataset = prepare_contact_dataset(development_dataset())
@@ -519,7 +540,7 @@ def test_development_feature_identity_uses_only_development_metadata(esm2_tokeni
     assert len(identity["chains"]) == len(development)
     with pytest.raises(ValueError, match="token"):
         contact_development_feature_identity(dataset, tokens[:-1], **metadata)
-    training_tokens = tokens[:len(dataset.splits["train"])]
+    training_tokens = tokens[: len(dataset.splits["train"])]
     fingerprint = contact_development_attention_fingerprint(
         dataset, training_tokens, **metadata
     )
@@ -529,9 +550,10 @@ def test_development_feature_identity_uses_only_development_metadata(esm2_tokeni
     assert fingerprint != changed
     dataset.splits["test"] = ()
     assert contact_development_feature_identity(dataset, tokens, **metadata) == identity
-    assert contact_development_attention_fingerprint(
-        dataset, training_tokens, **metadata
-    ) == fingerprint
+    assert (
+        contact_development_attention_fingerprint(dataset, training_tokens, **metadata)
+        == fingerprint
+    )
 
 
 def test_development_cache_is_seed_independent_and_never_contains_test(
@@ -541,29 +563,31 @@ def test_development_cache_is_seed_independent_and_never_contains_test(
     model = ContactPredictionModel(small_trunk())
     model.extract = Mock(wraps=model.extract)
     config = config_for(tmp_path, tmp_path / "trunk")
-    workspace = get_evaluation_workspace(config.workspace, config.variant, seed=config.seed)
+    workspace = EvaluationWorkspace(config.workspace, config.variant, seed=config.seed)
     workspace.setup_directories()
-    prepared = PreparedArtifacts(
-        model=model, tokenizer=esm2_tokenizer, train_dataloader=None,
-        val_dataloader=None, test_dataloader=None, contact=ContactArtifacts(dataset),
+    predictor = Predictor(model, esm2_tokenizer)
+    features, _ = prepare_contact_features(
+        config.steps.prepare, workspace, predictor, dataset
     )
-    step = PrepareStep(config.steps.prepare)
-    step.prepare_features(workspace, prepared)
-    first = prepared.features["development"].values
-    key = prepared.features["development"].fingerprint
+    first = features["development"].values
+    key = features["development"].fingerprint
     assert model.extract.call_count == 40
-    assert all(call.args[0].split != "test" for call in model.extract.call_args_list)
+    assert all((call.args[0].split != "test" for call in model.extract.call_args_list))
     model.extract.reset_mock()
-    step.prepare_features(workspace, prepared)
-    second = prepared.features["development"].values
-    same_key = prepared.features["development"].fingerprint
+    features, _ = prepare_contact_features(
+        config.steps.prepare, workspace, predictor, dataset
+    )
+    second = features["development"].values
+    same_key = features["development"].fingerprint
     assert same_key == key and model.extract.call_count == 0
     for record_id in first:
         torch.testing.assert_close(first[record_id], second[record_id])
     with torch.no_grad():
         next(model.trunk.parameters()).add_(1)
-    step.prepare_features(workspace, prepared)
-    changed_key = prepared.features["development"].fingerprint
+    features, _ = prepare_contact_features(
+        config.steps.prepare, workspace, predictor, dataset
+    )
+    changed_key = features["development"].fingerprint
     assert changed_key != key and model.extract.call_count == 40
 
 
@@ -571,29 +595,41 @@ def test_development_cache_is_seed_independent_and_never_contains_test(
 def test_contact_tuning_requires_prepared_features_and_never_extracts(
     tmp_path, esm2_tokenizer, materialize
 ):
-    from modules.evaluate.src.steps.tune import TuneStep
-
     config = config_for(tmp_path, tmp_path / "trunk")
-    workspace = get_evaluation_workspace(config.workspace, config.variant, seed=config.seed)
+    workspace = EvaluationWorkspace(config.workspace, config.variant, seed=config.seed)
     workspace.setup_directories()
     model = ContactPredictionModel(small_trunk())
-    prepared = PreparedArtifacts(
-        model=model, tokenizer=esm2_tokenizer,
-        train_dataloader=None, val_dataloader=None, test_dataloader=None,
-        contact=ContactArtifacts(prepare_contact_dataset(development_dataset())),
-    )
+    predictor = Predictor(model, esm2_tokenizer)
+    dataset = prepare_contact_dataset(development_dataset())
+    features, identity = ({}, {})
     if materialize:
-        PrepareStep(config.steps.prepare).prepare_features(workspace, prepared)
+        features, identity = prepare_contact_features(
+            config.steps.prepare, workspace, predictor, dataset
+        )
     model.extract = Mock(side_effect=AssertionError("Tune must not extract features"))
-    step = TuneStep(config.steps.tune)
+
+    def fit():
+        return fit_contact_predictor(
+            predictor,
+            dataset,
+            features,
+            identity,
+            config.steps.tune,
+            seed=config.seed,
+            device=torch.device("cpu"),
+        )
+
     if materialize:
-        fitted = step.run(workspace, prepared, seed=config.seed, accelerator=Accelerator(cpu=True))
+        fitted = fit()
+        save_predictor(
+            config.steps.tune, workspace, predictor, fitted, Accelerator(cpu=True)
+        )
         assert fitted.model is model
         manifest = json.loads(workspace.run_manifest_path.read_text())
         assert manifest["fit"]["contact_training"]
     else:
         with pytest.raises(ValueError, match="prepared before fitting"):
-            step.run(workspace, prepared, seed=config.seed, accelerator=Accelerator(cpu=True))
+            fit()
     model.extract.assert_not_called()
 
 
@@ -606,7 +642,6 @@ def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
     family_trunk(model_family).save_pretrained(model_path)
     tokenizer.save_pretrained(model_path)
     hf = development_dataset()
-    # Preserve a missing-label chain and an independently restricted EU output.
     hf["test"] = Dataset.from_list(
         [
             row("scored", positive_pairs=[[0, 6]]),
@@ -628,21 +663,20 @@ def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
     for split, rows in hf.items():
         rows.to_parquet(data / f"{split}-00000-of-00001.parquet")
     config = config_for(tmp_path, model_path)
-    workspace = get_evaluation_workspace(
-        config.workspace, config.variant, seed=config.seed
-    )
+    workspace = EvaluationWorkspace(config.workspace, config.variant, seed=config.seed)
     results = []
 
     def run(*args, **kwargs):
-        result = run_pipeline(*args, **kwargs)
+        kwargs.pop("baseline_only", None)
+        result = run_evaluation(*args, **kwargs)
         results.append(result)
         return result
 
-    monkeypatch.setattr(run_evaluate, "load_evaluation_config", lambda **kwargs: config)
+    monkeypatch.setattr(run_evaluate, "load_run_config", lambda *args, **kwargs: config)
     monkeypatch.setattr(
-        run_evaluate, "Accelerator", lambda **kwargs: Accelerator(cpu=True)
+        runtime_module, "Accelerator", lambda **kwargs: Accelerator(cpu=True)
     )
-    monkeypatch.setattr(run_evaluate, "run_pipeline", run)
+    monkeypatch.setattr("modules.evaluate.src.runners.pipeline.run_evaluation", run)
     monkeypatch.setattr(sys, "argv", ["run_evaluate.py", "config.yaml"])
     run_evaluate.main()
     result = results[0]
@@ -678,23 +712,25 @@ def test_offline_pipeline_checkpoint_and_seed_overwrite_isolation(
     frame = result.predictions[None].predictions
     actual = frame.filter(frame["record_id"] == "scored").to_dicts()[0]
     np.testing.assert_allclose(
-        actual["scores"],
-        predicted[actual["original_i"], actual["original_j"]],
+        actual["scores"], predicted[actual["original_i"], actual["original_j"]]
     )
     config2 = config_for(tmp_path, model_path, seed=14)
-    sibling = get_evaluation_workspace(config2.workspace, config2.variant, seed=14)
-    run_pipeline(config2, sibling, Accelerator(cpu=True))
+    sibling = EvaluationWorkspace(config2.workspace, config2.variant, seed=14)
+    run_evaluation(config2, Runtime(torch.device("cpu"), Accelerator(cpu=True)))
     sibling_content = sibling.run_manifest_path.read_bytes()
     with pytest.raises(FileExistsError):
-        run_pipeline(config, workspace, Accelerator(cpu=True))
-    run_pipeline(config, workspace, Accelerator(cpu=True), overwrite=True)
+        run_evaluation(config, Runtime(torch.device("cpu"), Accelerator(cpu=True)))
+    run_evaluation(
+        config, Runtime(torch.device("cpu"), Accelerator(cpu=True)), overwrite=True
+    )
     assert sibling.run_manifest_path.read_bytes() == sibling_content
     assert len(list(workspace.embeddings_path.glob("*.safetensors"))) == 3
-    # Changing input weights cannot silently share an experiment across seeds.
     different = family_trunk(model_family)
     different.save_pretrained(model_path)
     with pytest.raises(ValueError, match="inputs differs across seeds"):
-        run_pipeline(config, workspace, Accelerator(cpu=True), overwrite=True)
+        run_evaluation(
+            config, Runtime(torch.device("cpu"), Accelerator(cpu=True)), overwrite=True
+        )
 
 
 @pytest.mark.parametrize(

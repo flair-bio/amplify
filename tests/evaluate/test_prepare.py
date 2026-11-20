@@ -1,43 +1,39 @@
-"""Tests for modules.evaluate.src.steps.prepare.PrepareStep.
-
-Parametrized across both model families evaluated in this repo (see eval/):
-``flair-bio/amplify-120m`` (custom ``ProteinTokenizer`` + real AMPLIFY head
-classes) and ``facebook/esm2_t12_35M_UR50D`` (real HF ``EsmTokenizer`` + real
-Esm head classes), both built offline with tiny dimensions via the
-``model_family`` fixture (tests/evaluate/conftest.py).
-
-Only the network-bound calls inside ``PrepareStep.run`` (``AutoTokenizer.
-from_pretrained``, ``load_evaluation_dataset``, and the Hub download in
-``AutoModel*.from_pretrained``) are monkeypatched to these offline, real
-equivalents. Everything else (tokenization, collation, DataLoader
-construction, ``accelerate.prepare``) runs unmocked, and a genuine forward
-pass is run through the real model with the real collated batch.
-"""
+"""Offline training/test preparation using tiny models and real tokenizers."""
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 import torch
-from datasets import Dataset, DatasetDict
 from accelerate import Accelerator as HFAccelerator
 from accelerate.state import AcceleratorState
+from datasets import Dataset, DatasetDict
 
-from modules.evaluate.src.contracts.config import DatasetSplitConfig, ExternalTestSetConfig
-from modules.evaluate.src.contracts.config import EvaluationWorkspaceConfig
-from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
-from modules.evaluate.src.steps import prepare as prepare_module
-from modules.evaluate.src.dataset import dataloader as resolution_module
-from modules.evaluate.src.contracts.artifacts import PreparedArtifacts
-from modules.evaluate.src.contracts.config import PrepareConfig
-from modules.evaluate.src.steps.prepare import PrepareStep
+from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
+from modules.evaluate.src.config import (
+    DatasetSplitConfig,
+    ExternalTestSetConfig,
+    PrepareConfig,
+)
+from modules.evaluate.src.config import EvaluationWorkspaceConfig
+from modules.evaluate.src.dataset import loading as resolution_module
+from modules.evaluate.src.dataset import preparation as prepare_module
 from modules.evaluate.src.dataset.embeddings import find_embedding_dataset
+from modules.evaluate.src.model.factory import Predictor, build_probe
 
 from .conftest import ModelFamily, build_raw_dataset_dict, build_tiny_model
+from .helpers import EvaluationInputs
 
 
 def test_metric_groups_follow_original_prediction_ids():
     import polars as pl
-    from modules.evaluate.src.dataset.dataloader import attach_metric_groups, metric_groups_by_id
+
+    from modules.evaluate.src.dataset.dataloader import (
+        attach_metric_groups,
+        metric_groups_by_id,
+    )
+
     dataset = DatasetDict(
         test=Dataset.from_dict(
             {
@@ -70,13 +66,17 @@ def test_prepare_retains_independent_metric_groups(
 ):
     raw = build_raw_dataset_dict("sequence_regression")
     for split, column in (
-        ("validation", validation_group_column), ("test", group_column)
+        ("validation", validation_group_column),
+        ("test", group_column),
     ):
         if column is not None:
-            raw[split] = raw[split].add_column(
-                "id", [f"{split}-{index}" for index in range(len(raw[split]))]
-            ).add_column(column, [10, 10, 20, 20])
-
+            raw[split] = (
+                raw[split]
+                .add_column(
+                    "id", [f"{split}-{index}" for index in range(len(raw[split]))]
+                )
+                .add_column(column, [10, 10, 20, 20])
+            )
     prepared = _run_prepare(
         monkeypatch,
         tmp_path,
@@ -86,18 +86,18 @@ def test_prepare_retains_independent_metric_groups(
         group_column=group_column,
         validation_group_column=validation_group_column,
     )
-
     if validation_group_column is None:
-        assert prepared.validation_metric_groups is None
+        assert prepared.training.validation_metric_groups is None
     else:
-        assert prepared.validation_metric_groups == {
+        assert prepared.training.validation_metric_groups == {
             f'"validation-{index}"': group
             for index, group in enumerate([10, 10, 20, 20])
         }
-    assert prepared.test_group_column == group_column
-    assert prepared.test_metric_groups == (
+    assert prepared.test.test_group_column == group_column
+    assert prepared.test.test_metric_groups == (
         {f'"test-{index}"': group for index, group in enumerate([10, 10, 20, 20])}
-        if group_column is not None else {}
+        if group_column is not None
+        else {}
     )
 
 
@@ -123,7 +123,7 @@ def _make_workspace(tmp_path, task_type, num_labels=2):
         num_labels=dataset_num_labels,
         base_path=str(tmp_path / "eval"),
     )
-    return get_evaluation_workspace(config)
+    return EvaluationWorkspace(config)
 
 
 def _run_prepare(
@@ -142,62 +142,54 @@ def _run_prepare(
     **config_kwargs,
 ):
     AcceleratorState._reset_state(reset_partial_state=True)
-    monkeypatch.setattr(
-        prepare_module.AutoTokenizer,
-        "from_pretrained",
-        staticmethod(lambda model_id, trust_remote_code=True: model_family.tokenizer),
-    )
-    # Keep this test path CPU-only so it is stable across environments where
-    # CUDA may be visible but not fully compatible with the local PyTorch build.
-    monkeypatch.setattr(
-        prepare_module,
-        "Accelerator",
-        lambda *args, **kwargs: HFAccelerator(cpu=True),
-    )
+    accelerator = HFAccelerator(cpu=True)
     monkeypatch.setattr(
         resolution_module,
         "load_evaluation_dataset",
         lambda repo_id, **kwargs: build_raw_dataset_dict(task_type),
     )
-
     effective_num_labels = 1 if task_type == "sequence_regression" else num_labels
-
-    class _FakeModelCls:
-        @staticmethod
-        def from_pretrained(model_id, **kwargs):
-            return build_tiny_model(model_family, task_type, effective_num_labels)
-
-    # get_task() returns a fresh instance per call, so patch the class
-    # attribute (shared by every instance) rather than one instance's.
-    monkeypatch.setattr(
-        type(prepare_module.get_task(task_type)), "auto_model_class", _FakeModelCls
-    )
-
     config = PrepareConfig(
         batch_size=2,
         dataloader_num_workers=0,
         dataloader_persistent_workers=False,
         dataloader_pin_memory=False,
         max_length=64,
-        # Keep truncation deterministic across splits/families for simpler
-        # assertions.
-        random_truncate_by_split={
-            "train": False,
-            "validation": False,
-            "test": False,
-        },
+        random_truncate_by_split={"train": False, "validation": False, "test": False},
         **config_kwargs,
     )
     workspace = _make_workspace(tmp_path, task_type, num_labels=num_labels)
-    step = PrepareStep(config)
-    prepared = step.run(
+    workspace.setup_directories()
+    model = build_tiny_model(model_family, task_type, effective_num_labels)
+    training, test = prepare_module.prepare_training_data(
+        config,
         workspace,
+        model,
+        model_family.tokenizer,
+        accelerator=accelerator,
         layerwise_config=layerwise_config,
         dataset=dataset,
         baseline_names=baseline_names,
         group_column=group_column,
         validation_group_column=validation_group_column,
     )
+    predictor = Predictor(
+        build_probe(
+            model,
+            model_family.tokenizer,
+            task_type,
+            effective_num_labels,
+            embedding_size=training.embedding.backend.hidden_size
+            if training.embedding
+            else None,
+            layerwise_config=layerwise_config,
+        ),
+        model_family.tokenizer,
+        model if training.embedding is not None else None,
+    )
+    from modules.evaluate.src.model.controls import ControlPredictors
+
+    prepared = EvaluationInputs(predictor, training, test, ControlPredictors())
     if external is None:
         return prepared
     if external_dataset is None:
@@ -211,53 +203,83 @@ def _run_prepare(
     monkeypatch.setattr(
         resolution_module,
         "load_raw_evaluation_dataset",
-        lambda repo_id: external_dataset,
+        lambda repo_id, **kwargs: external_dataset,
     )
-    return prepared, step.prepare_external_test(
+    external_test = prepare_module.prepare_test_data(
+        config,
         workspace,
-        prepared,
+        predictor.trunk,
+        predictor.tokenizer,
+        test,
         external,
         accelerator=HFAccelerator(cpu=True),
         seed=0,
         layerwise_config=layerwise_config,
     )
+    return (prepared, replace(prepared, test=external_test))
 
 
 @pytest.mark.parametrize("cached", [False, True])
-def test_prepare_test_subset_reuses_model_and_controls(
+def test_prepare_selected_test_data_reuses_model_and_controls(
     monkeypatch, tmp_path, model_family, cached
 ):
     prepared = _run_prepare(
-        monkeypatch, tmp_path, "sequence_classification", model_family,
+        monkeypatch,
+        tmp_path,
+        "sequence_classification",
+        model_family,
         embedding_cache={"enabled": cached, "cache_policy": "off"},
     )
     workspace = _make_workspace(tmp_path, "sequence_classification")
     subset = DatasetDict(
-        {"test": Dataset.from_dict({"sequence": ["ACDEFG"], "targets": [1], "id": ["selected"]})}
+        {
+            "test": Dataset.from_dict(
+                {"sequence": ["ACDEFG"], "targets": [1], "id": ["selected"]}
+            )
+        }
     )
-    # No dataset reload or model construction is needed for subsequent subsets.
     monkeypatch.setattr(
-        resolution_module, "load_raw_evaluation_dataset",
+        resolution_module,
+        "load_raw_evaluation_dataset",
         lambda *args, **kwargs: pytest.fail("subset reloaded the dataset"),
     )
-    step = PrepareStep(PrepareConfig(
-        batch_size=2, tokenize_num_proc=1,
+    config = PrepareConfig(
+        batch_size=2,
+        tokenize_num_proc=1,
         embedding_cache={"enabled": cached, "cache_policy": "off"},
-    ))
-    selected = step.prepare_test_subset(
-        workspace, prepared, "selected", subset,
-        accelerator=HFAccelerator(cpu=True), seed=0,
     )
-    assert selected.model is prepared.model
+    source = ExternalTestSetConfig(
+        name="selected",
+        dataset_repo_id=workspace.dataset_repo_id or workspace.dataset_name,
+        dataset_config_name=workspace.config.dataset_config_name,
+        dataset_revision=workspace.config.dataset_revision,
+        split=config.split.test,
+    )
+    selected_test = prepare_module.prepare_test_data(
+        config,
+        workspace,
+        prepared.predictor.trunk,
+        prepared.predictor.tokenizer,
+        prepared.test,
+        source,
+        accelerator=HFAccelerator(cpu=True),
+        seed=0,
+        dataset=subset,
+    )
+    selected = replace(prepared, test=selected_test)
+    assert selected.predictor.model is prepared.predictor.model
     assert selected.controls is prepared.controls
-    assert selected.train_dataloader is prepared.train_dataloader
-    assert selected.val_dataloader is prepared.val_dataloader
-    assert len(selected.test_dataloader.dataset) == 1
-    assert len(prepared.test_dataloader.dataset) == 4
+    assert selected.training.train_dataloader is prepared.training.train_dataloader
+    assert selected.training.val_dataloader is prepared.training.val_dataloader
+    assert len(selected.test.test_dataloader.dataset) == 1
+    assert len(prepared.test.test_dataloader.dataset) == 4
     if cached:
-        assert selected.embedding.backend.trunk is prepared.embedding.backend.trunk
-        assert selected.embedding.backend.test_cache_key != prepared.embedding.backend.test_cache_key
-        assert len(selected.embedding.backend.token_test_dataloader.dataset) == 1
+        assert selected.predictor.trunk is prepared.predictor.trunk
+        assert (
+            selected.test.embedding.backend.test_cache_key
+            != prepared.test.embedding.backend.test_cache_key
+        )
+        assert len(selected.test.embedding.backend.token_test_dataloader.dataset) == 1
 
 
 def test_prepare_caches_configured_final_refit_split_separately(
@@ -267,7 +289,6 @@ def test_prepare_caches_configured_final_refit_split_separately(
     raw["tuning_excluded"] = Dataset.from_dict(
         {"sequence": ["ACDEFG"], "targets": [1], "id": ["refit-only"]}
     )
-
     prepared = _run_prepare(
         monkeypatch,
         tmp_path,
@@ -277,20 +298,14 @@ def test_prepare_caches_configured_final_refit_split_separately(
         embedding_cache={"enabled": True, "cache_policy": "off"},
         dataset=raw,
     )
-
-    train = find_embedding_dataset(prepared.train_dataloader)
+    train = find_embedding_dataset(prepared.training.train_dataloader)
     excluded = find_embedding_dataset(
-        prepared.refit_dataloaders["tuning_excluded"]
+        prepared.training.refit_dataloaders["tuning_excluded"]
     )
     assert train is not None and excluded is not None
     assert len(train) == len(raw["train"])
     assert excluded.ids == ["refit-only"]
-    assert prepared.refit_token_dataloaders["tuning_excluded"] is not None
-
-
-# ---------------------------------------------------------------------------
-# PrepareConfig validation
-# ---------------------------------------------------------------------------
+    assert prepared.training.refit_token_dataloaders["tuning_excluded"] is not None
 
 
 class TestPrepareConfig:
@@ -326,31 +341,22 @@ class TestPrepareConfig:
             PrepareConfig(not_a_real_field=1)
 
 
-# ---------------------------------------------------------------------------
-# PrepareStep.run — end to end (with network boundaries mocked)
-# ---------------------------------------------------------------------------
-
-
-class TestPrepareStepRun:
+class TestPreparation:
     def test_sequence_classification_end_to_end(
         self, monkeypatch, tmp_path, model_family
     ):
         artifacts = _run_prepare(
             monkeypatch, tmp_path, "sequence_classification", model_family
         )
-
-        assert isinstance(artifacts, PreparedArtifacts)
-        assert isinstance(artifacts.model, model_family.sequence_model_cls)
-        assert artifacts.train_dataloader is not None
-        assert artifacts.val_dataloader is not None
-        assert artifacts.test_dataloader is not None
-
-        batch = next(iter(artifacts.train_dataloader))
+        assert isinstance(artifacts, EvaluationInputs)
+        assert isinstance(artifacts.predictor.model, model_family.sequence_model_cls)
+        assert artifacts.training.train_dataloader is not None
+        assert artifacts.training.val_dataloader is not None
+        assert artifacts.test.test_dataloader is not None
+        batch = next(iter(artifacts.training.train_dataloader))
         assert batch["input_ids"].dtype == torch.long
         assert batch["labels"].dtype == torch.long
-
-        # Full real forward pass through the real (tiny) model with the real batch.
-        output = artifacts.model(
+        output = artifacts.predictor.model(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
             labels=batch["labels"],
@@ -364,13 +370,11 @@ class TestPrepareStepRun:
         artifacts = _run_prepare(
             monkeypatch, tmp_path, "sequence_regression", model_family
         )
-        assert artifacts.model.config.problem_type == "regression"
-        assert artifacts.model.num_labels == 1
-
-        batch = next(iter(artifacts.train_dataloader))
+        assert artifacts.predictor.model.config.problem_type == "regression"
+        assert artifacts.predictor.model.num_labels == 1
+        batch = next(iter(artifacts.training.train_dataloader))
         assert batch["labels"].dtype == torch.float
-
-        output = artifacts.model(
+        output = artifacts.predictor.model(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
             labels=batch["labels"],
@@ -380,18 +384,12 @@ class TestPrepareStepRun:
 
     def test_token_classification_end_to_end(self, monkeypatch, tmp_path, model_family):
         artifacts = _run_prepare(
-            monkeypatch,
-            tmp_path,
-            "token_classification",
-            model_family,
-            num_labels=2,
+            monkeypatch, tmp_path, "token_classification", model_family, num_labels=2
         )
-        assert isinstance(artifacts.model, model_family.token_model_cls)
-
-        batch = next(iter(artifacts.train_dataloader))
+        assert isinstance(artifacts.predictor.model, model_family.token_model_cls)
+        batch = next(iter(artifacts.training.train_dataloader))
         assert batch["labels"].shape == batch["input_ids"].shape
-
-        output = artifacts.model(
+        output = artifacts.predictor.model(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
             labels=batch["labels"],
@@ -410,11 +408,11 @@ class TestPrepareStepRun:
             model_family,
             external=external,
         )
-        assert swapped.model is prepared.model
-        assert swapped.train_dataloader is prepared.train_dataloader
-        assert len(prepared.test_dataloader.dataset) == 4
-        assert len(swapped.test_dataloader.dataset) == 2
-        batch = next(iter(swapped.test_dataloader))
+        assert swapped.predictor.model is prepared.predictor.model
+        assert swapped.training.train_dataloader is prepared.training.train_dataloader
+        assert len(prepared.test.test_dataloader.dataset) == 4
+        assert len(swapped.test.test_dataloader.dataset) == 2
+        batch = next(iter(swapped.test.test_dataloader))
         assert batch["labels"].tolist() == [1, 0]
 
     def test_external_test_set_embeds_with_cached_trunk(
@@ -429,13 +427,12 @@ class TestPrepareStepRun:
             external=external,
             embedding_cache={"enabled": True, "cache_policy": "off"},
         )
-        backend = swapped.embedding.backend
-        assert backend.trunk is prepared.embedding.backend.trunk
+        backend = swapped.test.embedding.backend
         assert backend.dataset_id == "org/ext"
-        assert backend.test_cache_key != prepared.embedding.backend.test_cache_key
+        assert backend.test_cache_key != prepared.test.embedding.backend.test_cache_key
         assert len(backend.token_test_dataloader.dataset) == 2
-        assert len(swapped.test_dataloader.dataset) == 2
-        assert len(prepared.test_dataloader.dataset) == 4
+        assert len(swapped.test.test_dataloader.dataset) == 2
+        assert len(prepared.test.test_dataloader.dataset) == 4
 
     @pytest.mark.parametrize(
         "external_dataset",

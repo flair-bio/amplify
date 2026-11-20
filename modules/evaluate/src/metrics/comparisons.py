@@ -1,7 +1,7 @@
-"""Pure statistical helpers behind ScoreStep's bootstrap confidence intervals
+"""Pure statistical helpers behind scoring's bootstrap confidence intervals
 and trained-vs-control comparisons: array conversion, per-resample/full-set
 metric scoring, the paired permutation test, and multiple-comparisons
-correction. Kept out of score.py since none of these need ScoreStep's own
+correction. Kept out of score.py since none of these need scoring's own
 state (config/workspace/IO) -- each takes everything it needs as a plain
 argument, so they're independently testable and reusable.
 """
@@ -13,22 +13,20 @@ import logging
 import numpy as np
 from scipy.stats import false_discovery_control
 
-from modules.evaluate.src.contracts.artifacts import (
-    ControlComparison,
-)
+from modules.evaluate.src.artifacts.results import ControlComparison
 from modules.evaluate.src.metrics.bootstrap import (
     confusion_scores,
     full_scores,
     mean_per_example_scores,
 )
 from modules.evaluate.src.metrics.metrics import LOWER_IS_BETTER_METRICS
-from modules.evaluate.src.tasks.base import FlatMetricsTask
+from modules.evaluate.src.tasks.base import FlatTask
 
 logger = logging.getLogger(__name__)
 
 
 def permutation_p_values(
-    task: FlatMetricsTask,
+    task: FlatTask,
     observed_trained: dict[str, float],
     trained_predictions: np.ndarray,
     trained_labels: np.ndarray,
@@ -241,7 +239,7 @@ def summarize_controls(
     metric_names: list[str],
     lower_q: float,
     upper_q: float,
-    task: FlatMetricsTask,
+    task: FlatTask,
     predictions_arr: np.ndarray,
     labels_arr: np.ndarray,
     probabilities_arr: np.ndarray | None,

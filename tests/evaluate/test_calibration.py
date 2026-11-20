@@ -1,4 +1,4 @@
-"""Calibration task: windowing, temperature fitting, scoring, and sourcing."""
+"""Calibration task: windowing, temperature fitting, and scoring."""
 
 from __future__ import annotations
 
@@ -10,15 +10,9 @@ import pytest
 from datasets import Dataset, DatasetDict
 from scipy.special import softmax
 
-from modules.evaluate.scripts.dataset_sourcing.source_calibration import (
-    CONSERVATION_EDGES,
-    assign_folds,
-    build_calibration_frame,
-    read_export,
-)
-from modules.evaluate.src.contracts.artifacts import EvaluationMetadata, PredictOutput
-from modules.evaluate.src.contracts.config import BaselineRunConfig, ScoreConfig
-from modules.evaluate.src.dataset.dataloader import tokenize_dataset
+from modules.evaluate.src.artifacts.results import EvaluationMetadata, PredictOutput
+from modules.evaluate.src.config import BaselineRunConfig, ScoreConfig
+from modules.evaluate.src.dataset.tokenization import tokenize_dataset
 from modules.evaluate.src.metrics.bootstrap import id_groups
 from modules.evaluate.src.metrics.calibration_metrics import (
     crossfit_temperatures,
@@ -308,92 +302,3 @@ def test_bootstrap_resamples_whole_proteins():
     ids = ["P1:3", "P1:10", "P2:0", "sp|P3|X:5"]
     groups = id_groups([get_task("calibration").bootstrap_group_id(i) for i in ids])
     np.testing.assert_array_equal(groups, [0, 0, 1, 2])
-
-
-def _write_subset(directory, sequences, sites):
-    directory.mkdir(parents=True)
-    pl.DataFrame(sequences, schema=["id", "sequence"], orient="row").write_csv(
-        directory / "sequences.csv"
-    )
-    positions, support = [], []
-    for name, position, wt, profile, category, consensus, proportion in sites:
-        freqs = {aa: profile.get(aa, 0.0) for aa in CANONICAL_AMINO_ACIDS}
-        positions.append(
-            {"sequence_name": name, "position": position, "wt_aa": wt, **freqs}
-        )
-        support.append(
-            {
-                "sequence_name": name,
-                "position": position,
-                "category": category,
-                "consensus_aas": consensus,
-                "consensus_proportion": proportion,
-            }
-        )
-    pl.DataFrame(positions).write_csv(directory / "consensus_positions.csv")
-    pl.DataFrame(support).write_csv(directory / "position_support.csv")
-
-
-@pytest.fixture
-def export_dir(tmp_path):
-    (tmp_path / "result.json").write_text(
-        json.dumps({"dataset": "toy", "selection": {"edges": CONSERVATION_EDGES}})
-    )
-    sequences = [("P1", "ACDE"), ("P2", "MKLV"), ("P3", "ACDE")]
-    _write_subset(
-        tmp_path / "balanced",
-        sequences,
-        [
-            ("P1", 0, "A", {"A": 0.15, "C": 0.85}, "NT", "C", 0.85),
-            ("P2", 1, "K", {"K": 1.0}, "T", "K", 1.0),
-            ("P3", 2, "D", {"G": 0.5, "N": 0.5}, "NT", "G|N", 0.5),
-        ],
-    )
-    _write_subset(
-        tmp_path / "high_nt_095",
-        sequences[:1],
-        [
-            ("P1", 0, "A", {"A": 0.15, "C": 0.85}, "NT", "C", 0.85),
-            ("P1", 3, "E", {"D": 0.96, "E": 0.04}, "NT", "D", 0.96),
-        ],
-    )
-    return tmp_path
-
-
-def test_sourcing_merges_subsets_into_site_targets(export_dir):
-    dataset, sequences, sites = read_export(export_dir)
-    folds = assign_folds(sequences)
-    frame = build_calibration_frame(sequences, sites, folds)
-
-    assert dataset == "toy"
-    fold_of = dict(folds.iter_rows())
-    assert fold_of["P1"] == fold_of["P3"]  # identical sequences stay together
-    assert frame["id"].to_list() == ["P1", "P2", "P3"]
-    targets = {
-        (name, int(t[0])): t[21:]
-        for name, rows in zip(frame["id"], frame["targets"].to_list())
-        for t in rows
-    }
-    aa = CANONICAL_AMINO_ACIDS.index
-    # [is_t, bin, fold, in_balanced, in_high_nt, consensus_mask]
-    assert targets[("P1", 0)] == [0, 7, fold_of["P1"], 1, 1, 1 << aa("C")]
-    assert targets[("P1", 3)] == [0, 8, fold_of["P1"], 0, 1, 1 << aa("D")]
-    assert targets[("P2", 1)] == [1, 8, fold_of["P2"], 1, 0, 1 << aa("K")]
-    assert targets[("P3", 2)] == [
-        0,
-        4,
-        fold_of["P3"],
-        1,
-        0,
-        (1 << aa("G")) | (1 << aa("N")),
-    ]
-    p2 = frame["targets"][1].to_list()[0]
-    assert p2[1 + aa("K")] == 1.0
-
-
-def test_sourcing_rejects_wt_mismatch(export_dir):
-    path = export_dir / "balanced" / "consensus_positions.csv"
-    path.write_text(path.read_text().replace("P2,1,K", "P2,1,M"))
-
-    with pytest.raises(ValueError, match="wt_aa"):
-        read_export(export_dir)
