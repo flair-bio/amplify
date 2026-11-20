@@ -218,6 +218,7 @@ class TestPrepareOnly:
     def _main(config: PretrainConfig):
         """Run main() with the config fixed and everything external stubbed."""
         with (
+            patch.dict(os.environ, {"WORLD_SIZE": "1"}),
             patch.object(run_pretrain, "load_and_parse", return_value=config),
             patch.object(run_pretrain, "setup_runtime") as setup_runtime,
             patch.object(run_pretrain, "setup_tracking") as setup_tracking,
@@ -228,14 +229,15 @@ class TestPrepareOnly:
             setup_runtime.return_value = MagicMock()
             prepare_sources.return_value = []
             run_pretrain.main()
-        return prepare_sources, trainer_cls, setup_tracking
+        return prepare_sources, trainer_cls, setup_tracking, setup_runtime
 
     def test_prepares_sources_then_exits_without_training(self, config):
         config.dataset.prepare_only = True
 
-        prepare_sources, trainer_cls, _ = self._main(config)
+        prepare_sources, trainer_cls, _, setup_runtime = self._main(config)
 
         prepare_sources.assert_called_once_with(config.dataset)
+        setup_runtime.assert_not_called()
         trainer_cls.assert_not_called()
 
     def test_skips_model_build_so_no_gpu_is_needed(self, config):
@@ -249,9 +251,26 @@ class TestPrepareOnly:
     def test_skips_tracking_so_no_empty_run_is_logged(self, config):
         config.dataset.prepare_only = True
 
-        _, _, setup_tracking = self._main(config)
+        _, _, setup_tracking, _ = self._main(config)
 
         setup_tracking.assert_not_called()
 
     def test_disabled_by_default(self, config):
         assert config.dataset.prepare_only is False
+
+
+def test_distributed_training_requires_warm_caches_before_runtime(config, monkeypatch):
+    monkeypatch.setenv("WORLD_SIZE", "8")
+    with (
+        patch.object(run_pretrain, "load_and_parse", return_value=config),
+        patch.object(run_pretrain.sys, "argv", ["run_pretrain.py", "cfg.yaml"]),
+        patch.object(
+            run_pretrain, "prepare_sources", side_effect=RuntimeError("cache missing")
+        ) as prepare_sources,
+        patch.object(run_pretrain, "setup_runtime") as setup_runtime,
+        pytest.raises(RuntimeError, match="cache missing"),
+    ):
+        run_pretrain.main()
+
+    prepare_sources.assert_called_once_with(config.dataset, require_prepared=True)
+    setup_runtime.assert_not_called()
