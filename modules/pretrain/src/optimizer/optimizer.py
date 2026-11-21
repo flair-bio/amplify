@@ -52,7 +52,7 @@ class OptimizerConfig(BaseModel):
 def get_optimizer(
     model: torch.nn.Module, config: OptimizerConfig
 ) -> torch.optim.Optimizer:
-    """Exclude embeddings and 1D params from decay, except ZeroCenteredRMSNorm gains.
+    """Create the optimizer, without weight decay on 1D params and embeddings.
 
     Raises ``ImportError`` if an external optimizer library is missing, and
     ``RuntimeError`` if ``fused`` is requested without CUDA.
@@ -60,16 +60,8 @@ def get_optimizer(
     decay_params: list[torch.nn.Parameter] = []
     no_decay_params: list[torch.nn.Parameter] = []
 
-    # HF loads checkpoint classes into a separate module. Match the norm's
-    # class name across its MRO so copies and subclasses keep the decay policy.
-    decay_norm_weights = {
-        id(module.weight)
-        for module in model.modules()
-        if any(cls.__name__ == "ZeroCenteredRMSNorm" for cls in type(module).__mro__)
-    }
-
     # Separation logic:
-    # 1. 1D tensors bypass weight decay, except zero-centered norm gain offsets.
+    # 1. 1D tensors bypass weight decay (Biases, LayerNorm scales).
     # 2. String matching explicitly protects Embeddings (which are 2D but suffer from weight decay).
     for name, param in model.named_parameters():
         if not param.requires_grad:
@@ -77,7 +69,7 @@ def get_optimizer(
 
         name_lower = name.lower()
         if (
-            (param.dim() < 2 and id(param) not in decay_norm_weights)
+            param.dim() < 2
             or "embed" in name_lower
             or "position_embeddings" in name_lower
         ):
@@ -106,7 +98,7 @@ def get_optimizer(
             return torch.optim.AdamW(optimizer_grouped_parameters, **opt_kwargs)
 
         case "Adam":
-            # Adam without decoupled weight decay.
+            # Standard legacy Adam (without decoupled weight decay).
             return torch.optim.Adam(optimizer_grouped_parameters, **opt_kwargs)
 
         case "Adafactor":

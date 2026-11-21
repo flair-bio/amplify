@@ -469,7 +469,7 @@ dataset.sources.custom.cluster_column=cluster_rep_at_30
 
 ## Model & Tokenizer
 
-**Purpose:** The AMPLIFY encoder — a BERT-style bidirectional transformer with configurable RMSNorm, CenteredRMSNorm, ZeroCenteredRMSNorm, or LayerNorm, **rotary position embeddings (RoPE)**, and a **SwiGLU** feed-forward block. It is a standard HF `PreTrainedModel`, split across `configuration_amplify.py` and `modeling_amplify.py` following HF conventions, with MLM, sequence-classification, and token-classification heads.
+**Purpose:** The AMPLIFY encoder — a BERT-style bidirectional transformer with modern components: **RMSNorm**, **rotary position embeddings (RoPE)**, and a **SwiGLU** feed-forward block. It is a standard HF `PreTrainedModel`, split across `configuration_amplify.py` and `modeling_amplify.py` following HF conventions, with MLM, sequence-classification, and token-classification heads.
 
 The tokenizer is **character-level**: one token per amino acid, plus special tokens. Ambiguous residues (`X`, `B`, `O`, `U`, `Z`, `J`) are removed by default.
 
@@ -480,20 +480,14 @@ The tokenizer is **character-level**: one token per amino acid, plus special tok
 | `hidden_size` | `960` | Hidden dimension |
 | `num_hidden_layers` | `32` | Encoder blocks |
 | `num_attention_heads` | `15` | Attention heads |
-| `qk_norm` | `false` | Per-head normalization using `norm_type` on queries and keys before RoPE |
-| `attention_gate` | `false` | Elementwise sigmoid gating from pre-normalized hidden states before the attention output projection |
-| `nonlinear_mlm_head` | `false` | Dense → GELU → normalization using `norm_type` → vocabulary projection; inner width is `hidden_size` |
-| `layernorm_scaling` | `false` | Scale both block pre-norm outputs by `1/sqrt(layer_idx + 1)` using the zero-based block index |
 | `intermediate_size` | `2560` | SwiGLU inner dimension |
 | `max_position_embeddings` | `2048` | Maximum context length supported by RoPE |
 | `rope_theta` | `10000.0` | RoPE base frequency |
 | `vocab_size` | `32` | Must match the tokenizer vocabulary |
-| `norm_type` | `RMSNorm` | Encoder, enabled QK normalization, and nonlinear MLM head: `RMSNorm`, `CenteredRMSNorm` (mean-centered, no bias), `ZeroCenteredRMSNorm` (gain `1 + weight`, zero-initialized offset), or `LayerNorm` |
-| `norm_eps` | `1e-5` | Epsilon for the configured normalization |
-| `gaussian_init` | `false` | Use zero-mean Gaussian initialization for linear weights and token embeddings |
-| `embedding_init_range` / `decoder_init_range` | `0.02` | Uniform bounds, or standard deviations when `gaussian_init=true` |
+| `norm_eps` | `1e-5` | RMSNorm epsilon |
+| `embedding_init_range` / `decoder_init_range` | `0.02` | Uniform init bounds |
 
-Model sizes of the shipped configs (QK normalization disabled):
+Model sizes of the shipped configs:
 
 | Config | `hidden_size` | `num_hidden_layers` | `num_attention_heads` | `intermediate_size` | Parameters |
 |---|---|---|---|---|---|
@@ -511,7 +505,7 @@ The model has two attention paths, selected by the collator's `packing` flag: **
 
 **Purpose:** Build the optimizer with correct parameter grouping and the learning-rate schedule.
 
-The optimizer splits parameters into **decay** and **no-decay** groups: 1-D parameters (biases, norm weights) and embeddings are excluded from weight decay, except `ZeroCenteredRMSNorm` gain offsets, which receive weight decay toward zero (effective gain one).
+The optimizer splits parameters into **decay** and **no-decay** groups: 1-D parameters (biases, norm weights) and embeddings are excluded from weight decay, which is standard practice for transformer pretraining.
 
 **Key config fields (`optimizer`):**
 
@@ -707,7 +701,7 @@ It finishes with `Data sources prepared. Exiting (dataset.prepare_only).`, and t
 
 ### Staging data to node-local disk (network filesystems)
 
-Training reads rows in random order. If `HF_DATASETS_CACHE` is on a network filesystem that doesn't page-cache those reads, every read is a network round trip. Large sources like BFD then risk starving the GPUs. Set `dataset.local_stage_dir` to a node-local directory to copy each source's sequence-only train/val splits there once per job before training starts:
+Training reads rows in random order. If `HF_DATASETS_CACHE` is on a network filesystem that doesn't page-cache those reads (e.g. Mila's `/network/projects`, BeeGFS with `tuneFileCacheType=buffered`), every read is a network round trip. Large sources like BFD then risk starving the GPUs. Set `dataset.local_stage_dir` to a node-local directory to copy each source's sequence-only train/val splits there once per job before training starts:
 
 ```bash
     dataset.local_stage_dir=$SLURM_TMPDIR/flair_plm_stage \
@@ -769,7 +763,7 @@ Costs and caveats:
 
 ### Copying a built cache to another cluster
 
-The HF cache above is tied to the parquet files' absolute paths and modification times, so it can't be reused on another filesystem. Instead, export each source once into a self-contained folder by adding `dataset.export_dir` to a `prepare_only` run:
+The HF cache above is tied to the parquet files' absolute paths and modification times, so it can't be reused on another filesystem (e.g. Mila → Compute Canada). Instead, export each source once into a self-contained folder by adding `dataset.export_dir` to a `prepare_only` run:
 
 ```bash
     dataset.prepare_only=true \
