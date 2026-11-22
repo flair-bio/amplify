@@ -48,6 +48,7 @@ class AMPLIFYModelConfig(BaseModel):
         decoder_init_range: Uniform init bound for linear layers.
         norm_eps: Epsilon for RMSNorm layers.
         norm_type: Normalization layer used throughout the model.
+        qk_norm: Normalize queries and keys per head (over ``head_dim``) before RoPE.
         vocab_size: Number of tokens in the amino-acid vocabulary.
         pad_token_id: Index of the padding token.
         bos_token_id: Index of the beginning-of-sequence token.
@@ -67,6 +68,7 @@ class AMPLIFYModelConfig(BaseModel):
     decoder_init_range: float = Field(0.02, gt=0.0)
     norm_eps: float = Field(1e-5, gt=0.0)
     norm_type: Literal["RMSNorm", "ZeroCenteredRMSNorm"] = "RMSNorm"
+    qk_norm: bool = False
     vocab_size: int = Field(32, gt=0)
     pad_token_id: int = 0
     bos_token_id: int = 3
@@ -211,10 +213,18 @@ class RotaryQKV(NamedTuple):
 
 
 def apply_rotary_emb_qkv(
-    qkv: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    qkv: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    q_norm: Optional[nn.Module] = None,
+    k_norm: Optional[nn.Module] = None,
 ) -> RotaryQKV:
-    """RoPE for the packed path: returns rotated q/k and v as-is."""
+    """RoPE for the packed path: optionally normalizes q/k first, returns v as-is."""
     q, k, v = qkv.unbind(1)
+    if q_norm is not None:
+        q = q_norm(q)
+    if k_norm is not None:
+        k = k_norm(k)
     cos, sin = cos.unsqueeze(-2).to(q.dtype), sin.unsqueeze(-2).to(q.dtype)
     return RotaryQKV(
         q=apply_rotary_emb(q, cos, sin), k=apply_rotary_emb(k, cos, sin), v=v
@@ -222,12 +232,15 @@ def apply_rotary_emb_qkv(
 
 
 class Attention(nn.Module):
-    """MHSA with RoPE.
+    """MHSA with RoPE and optional QK norm.
 
     Supports padded batches (PyTorch SDPA) and packed sequences (FlashAttention
     when optionally installed, otherwise PyTorch variable-length attention).
     Receives the pre-norm layer from the caller, applies it internally, and returns
     ``hidden_states`` with the attention residual already added.
+
+    With ``qk_norm``, queries and keys are normalized over ``head_dim`` with a
+    gain shared across heads, before RoPE (as in Qwen3 and Gemma 3).
     """
 
     def __init__(self, config: AMPLIFYConfig) -> None:
@@ -241,6 +254,12 @@ class Attention(nn.Module):
             config.hidden_size, config.hidden_size * 3, bias=False
         )
         self.o_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        self.q_norm = (
+            make_norm(config, self.head_dim) if config.qk_norm else nn.Identity()
+        )
+        self.k_norm = (
+            make_norm(config, self.head_dim) if config.qk_norm else nn.Identity()
+        )
 
     # Fast path: packed sequences with optional FlashAttention acceleration.
     def _attn_packed(
@@ -258,10 +277,10 @@ class Attention(nn.Module):
         )
         batch_size, total_tokens = hidden_states.shape[:2]
         hidden_states_flat = hidden_states.view(-1, self.num_heads * self.head_dim)
-        # Pre-norm + QKV projection + RoPE.
+        # Pre-norm + QKV projection + QK norm + RoPE.
         normed = layernorm(hidden_states_flat)
         qkv = self.qkv_proj(normed).view(total_tokens, 3, self.num_heads, self.head_dim)
-        q, k, v = apply_rotary_emb_qkv(qkv, cos, sin)
+        q, k, v = apply_rotary_emb_qkv(qkv, cos, sin, self.q_norm, self.k_norm)
         if q.dtype not in _HALF_DTYPES:
             q, k, v = q.bfloat16(), k.bfloat16(), v.bfloat16()
         if self.fa4_attn_fn is None:
@@ -313,6 +332,7 @@ class Attention(nn.Module):
             batch_size, seq_len, 3, self.num_heads, self.head_dim
         )
         q, k, v = qkv.unbind(2)
+        q, k = self.q_norm(q), self.k_norm(k)
         # Apply rotary position embeddings, then transpose to (batch, heads, seq, dim).
         q = apply_rotary_emb(q, cos, sin).transpose(1, 2)
         k = apply_rotary_emb(k, cos, sin).transpose(1, 2)

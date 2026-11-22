@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 import torch
 from torch import nn
+from torch.nn.functional import scaled_dot_product_attention
 
 # ---------------------------------------------------------------------------
 # Module loading
@@ -230,6 +231,10 @@ class TestMakeNorm:
         with pytest.raises(ValueError, match="Unsupported norm_type"):
             make_norm(_cfg(norm_type="LayerNorm"))
 
+    def test_pydantic_config_forwards_qk_norm(self):
+        assert AMPLIFYModelConfig(qk_norm=True).to_hf_config().qk_norm is True
+        assert AMPLIFYModelConfig().qk_norm is False
+
     def test_pydantic_config_validates_and_forwards_norm_type(self):
         hf = AMPLIFYModelConfig(norm_type="ZeroCenteredRMSNorm").to_hf_config()
         assert hf.norm_type == "ZeroCenteredRMSNorm"
@@ -363,6 +368,24 @@ class TestApplyRotaryEmbQkv:
         assert torch.equal(out.q, q)
         assert torch.equal(out.k, k)
         assert torch.equal(out.v, v)
+
+    def test_optional_qk_norms_apply_before_rotation(self):
+        total_tokens, heads, head_dim = 6, 4, 16
+        qkv = torch.randn(total_tokens, 3, heads, head_dim)
+        cos = torch.randn(total_tokens, head_dim // 2)
+        sin = torch.randn(total_tokens, head_dim // 2)
+        q_norm, k_norm = RMSNorm(head_dim), ZeroCenteredRMSNorm(head_dim)
+        with torch.no_grad():
+            q_norm.weight.normal_()
+            k_norm.weight.normal_()
+
+        q, k, v = _mod.apply_rotary_emb_qkv(qkv, cos, sin, q_norm, k_norm)
+
+        q_raw, k_raw, v_raw = qkv.unbind(1)
+        cos_b, sin_b = cos.unsqueeze(-2), sin.unsqueeze(-2)
+        assert torch.equal(q, apply_rotary_emb(q_norm(q_raw), cos_b, sin_b))
+        assert torch.equal(k, apply_rotary_emb(k_norm(k_raw), cos_b, sin_b))
+        assert torch.equal(v, v_raw)
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +559,50 @@ class TestAttentionModule:
             "max_seqlen_k": 4,
             "causal": False,
         }
+
+
+    def test_qk_norm_off_keeps_baseline_parameters(self, attn: Attention):
+        assert isinstance(attn.q_norm, nn.Identity)
+        assert isinstance(attn.k_norm, nn.Identity)
+        assert set(attn.state_dict()) == {"qkv_proj.weight", "o_proj.weight"}
+
+    @pytest.mark.parametrize("norm_type", ["RMSNorm", "ZeroCenteredRMSNorm"])
+    def test_qk_norm_is_per_head_and_follows_norm_type(self, norm_type):
+        a = Attention(_cfg(qk_norm=True, norm_type=norm_type))
+        for norm in (a.q_norm, a.k_norm):
+            assert type(norm).__name__ == norm_type
+            assert norm.weight.shape == (_HIDDEN // _HEADS,)
+        assert {"q_norm.weight", "k_norm.weight"} <= set(a.state_dict())
+
+    def test_qk_norm_packed_matches_padded(self, monkeypatch: pytest.MonkeyPatch):
+        """Both paths normalize q/k at the same point (before RoPE)."""
+        torch.manual_seed(0)
+        cfg = _cfg(qk_norm=True, norm_type="ZeroCenteredRMSNorm")
+        a = Attention(cfg).eval()
+        with torch.no_grad():
+            a.q_norm.weight.normal_()
+            a.k_norm.weight.normal_()
+        norm, rope = make_norm(cfg), RotaryEmbedding(cfg)
+        S = 8
+        hidden = torch.randn(1, S, _HIDDEN)
+        positions = torch.arange(S).unsqueeze(0)
+        cos, sin = rope(hidden, positions)
+
+        def sdpa_varlen(q, k, v, **kwargs):  # Single segment: plain SDPA.
+            q, k, v = (t.transpose(0, 1).float() for t in (q, k, v))
+            return scaled_dot_product_attention(q, k, v).transpose(0, 1)
+
+        a.fa4_attn_fn = None
+        monkeypatch.setattr(_mod, "varlen_attn", sdpa_varlen)
+        with torch.no_grad():
+            packed = a._attn_packed(
+                norm, hidden, cos[0], sin[0], torch.tensor([0, S]), max_seqlen=S
+            )
+            padded, _ = a(
+                norm, hidden, None, cos.unsqueeze(2), sin.unsqueeze(2), False
+            )
+        # The packed path runs attention in bf16, as on GPU.
+        torch.testing.assert_close(packed, padded, atol=2e-2, rtol=2e-2)
 
 
 # ---------------------------------------------------------------------------
@@ -1296,6 +1363,14 @@ class TestCheckpointRoundTrip:
         assert len(norms) == 2 * _LAYERS + 1  # Block pre-norms and final norm.
         assert all(type(m) is ZeroCenteredRMSNorm for m in norms)
         assert all(torch.all(m.weight == 0.0) for m in norms)
+
+    def test_qk_norm_adds_two_norms_per_layer(self):
+        model = AMPLIFYForMaskedLM(
+            _cfg(norm_type="ZeroCenteredRMSNorm", qk_norm=True)
+        )
+        norms = [m for m in model.modules() if isinstance(m, RMSNorm)]
+        assert len(norms) == 4 * _LAYERS + 1
+        assert all(type(m) is ZeroCenteredRMSNorm for m in norms)
 
     @pytest.mark.parametrize("norm_type", ["RMSNorm", "ZeroCenteredRMSNorm"])
     def test_init_weights_resets_clobbered_norm(self, norm_type):

@@ -20,6 +20,7 @@ class AMPLIFYConfig(PretrainedConfig):
         max_position_embeddings: Maximum context length supported by RoPE.
         rope_theta: Base frequency for RoPE.
         norm_type: Normalization layer, ``"RMSNorm"`` or ``"ZeroCenteredRMSNorm"``.
+        qk_norm: Normalize queries and keys per head (over ``head_dim``) before RoPE.
     """
 
     model_type = "amplify"
@@ -40,6 +41,7 @@ class AMPLIFYConfig(PretrainedConfig):
         max_position_embeddings: int = 2048,
         rope_theta: float = 10000.0,
         norm_type: str = "RMSNorm",
+        qk_norm: bool = False,
         **kwargs: Any,
     ):
         super().__init__(
@@ -59,3 +61,4 @@ class AMPLIFYConfig(PretrainedConfig):
         self.max_position_embeddings = max_position_embeddings
         self.rope_theta = rope_theta
         self.norm_type = norm_type
+        self.qk_norm = qk_norm
