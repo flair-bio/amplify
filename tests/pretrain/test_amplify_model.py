@@ -53,7 +53,10 @@ sys.modules[f"{_PKG}.modeling_amplify"] = _mod
 _mod_spec.loader.exec_module(_mod)  # type: ignore[union-attr]
 
 AMPLIFYConfig = _cfg_mod.AMPLIFYConfig
+AMPLIFYModelConfig = _mod.AMPLIFYModelConfig
 RMSNorm = _mod.RMSNorm
+ZeroCenteredRMSNorm = _mod.ZeroCenteredRMSNorm
+make_norm = _mod.make_norm
 RotaryEmbedding = _mod.RotaryEmbedding
 apply_rotary_emb = _mod.apply_rotary_emb
 Attention = _mod.Attention
@@ -168,6 +171,71 @@ class TestRMSNorm:
         norm = RMSNorm(32)
         x = torch.randn(2, 5, 32)
         assert torch.equal(norm(x), norm(x))
+
+
+# ---------------------------------------------------------------------------
+# TestZeroCenteredRMSNorm / norm factory
+# ---------------------------------------------------------------------------
+
+
+class TestZeroCenteredRMSNorm:
+    def test_weight_initialized_to_zeros(self):
+        assert torch.all(ZeroCenteredRMSNorm(16).weight == 0.0)
+
+    def test_matches_rmsnorm_with_shifted_gain(self):
+        torch.manual_seed(0)
+        zc, ref = ZeroCenteredRMSNorm(32), RMSNorm(32)
+        with torch.no_grad():
+            zc.weight.normal_()
+            ref.weight.copy_(1.0 + zc.weight)
+        x = torch.randn(2, 5, 32)
+        torch.testing.assert_close(zc(x), ref(x))
+
+    def test_bf16_input_keeps_small_gain_offsets(self):
+        """The gain is applied in FP32, so offsets below bf16 resolution of 1 count."""
+        torch.manual_seed(0)
+        norm = ZeroCenteredRMSNorm(32)
+        with torch.no_grad():
+            norm.weight.fill_(1e-3)
+        x = torch.randn(4, 32).bfloat16()
+        out = norm(x)
+        expected = torch.nn.functional.rms_norm(
+            x.float(), (32,), torch.full((32,), 1.001), norm.eps
+        ).bfloat16()
+        assert out.dtype == torch.bfloat16
+        assert torch.equal(out, expected)
+
+    @pytest.mark.parametrize(
+        "norm_cls, identity", [(RMSNorm, 1.0), (ZeroCenteredRMSNorm, 0.0)]
+    )
+    def test_reset_parameters_restores_identity(self, norm_cls, identity):
+        norm = norm_cls(8)
+        with torch.no_grad():
+            norm.weight.fill_(float("nan"))
+        norm.reset_parameters()
+        assert torch.all(norm.weight == identity)
+
+
+class TestMakeNorm:
+    @pytest.mark.parametrize("norm_type", ["RMSNorm", "ZeroCenteredRMSNorm"])
+    def test_dispatch_and_dims(self, norm_type):
+        cfg = _cfg(norm_type=norm_type, norm_eps=1e-3)
+        norm = make_norm(cfg)
+        assert type(norm).__name__ == norm_type
+        assert norm.weight.shape == (_HIDDEN,)
+        assert norm.eps == 1e-3
+        assert make_norm(cfg, 16).weight.shape == (16,)
+
+    def test_unknown_norm_type_raises(self):
+        with pytest.raises(ValueError, match="Unsupported norm_type"):
+            make_norm(_cfg(norm_type="LayerNorm"))
+
+    def test_pydantic_config_validates_and_forwards_norm_type(self):
+        hf = AMPLIFYModelConfig(norm_type="ZeroCenteredRMSNorm").to_hf_config()
+        assert hf.norm_type == "ZeroCenteredRMSNorm"
+        assert AMPLIFYModelConfig().norm_type == "RMSNorm"
+        with pytest.raises(ValueError):
+            AMPLIFYModelConfig(norm_type="LayerNorm")
 
 
 # ---------------------------------------------------------------------------
@@ -1221,6 +1289,38 @@ class TestCheckpointRoundTrip:
 
         assert torch.isfinite(out.loss)
         assert out.loss.item() == pytest.approx(math.log(num_labels), abs=0.5)
+
+    def test_norm_type_applies_to_every_norm(self):
+        model = AMPLIFYForMaskedLM(_cfg(norm_type="ZeroCenteredRMSNorm"))
+        norms = [m for m in model.modules() if isinstance(m, RMSNorm)]
+        assert len(norms) == 2 * _LAYERS + 1  # Block pre-norms and final norm.
+        assert all(type(m) is ZeroCenteredRMSNorm for m in norms)
+        assert all(torch.all(m.weight == 0.0) for m in norms)
+
+    @pytest.mark.parametrize("norm_type", ["RMSNorm", "ZeroCenteredRMSNorm"])
+    def test_init_weights_resets_clobbered_norm(self, norm_type):
+        model = AMPLIFYForMaskedLM(_cfg(norm_type=norm_type))
+        norm = model.amplify.norm
+        norm.weight.data.fill_(float("nan"))
+        model._init_weights(norm)
+        assert torch.all(norm.weight == (1.0 if norm_type == "RMSNorm" else 0.0))
+
+    def test_zero_centered_gains_survive_round_trip(self, tmp_path):
+        """Loaded gains are kept; only checkpoint-missing ones get the identity init."""
+        cfg = _cfg(norm_type="ZeroCenteredRMSNorm")
+        model = AMPLIFYForMaskedLM(cfg)
+        with torch.no_grad():
+            for m in model.modules():
+                if isinstance(m, ZeroCenteredRMSNorm):
+                    m.weight.fill_(0.25)
+        model.save_pretrained(tmp_path)
+
+        reloaded = AMPLIFYForMaskedLM.from_pretrained(tmp_path)
+        assert reloaded.config.norm_type == "ZeroCenteredRMSNorm"
+        for m in reloaded.modules():
+            if isinstance(m, RMSNorm):
+                assert type(m) is ZeroCenteredRMSNorm
+                assert torch.all(m.weight == 0.25)
 
     def test_from_pretrained_matches_live_model(self, cfg: AMPLIFYConfig, tmp_path):
         torch.manual_seed(0)

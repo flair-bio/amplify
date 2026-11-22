@@ -342,9 +342,7 @@ def test_checkpoint_state_is_independent_cpu_copy() -> None:
     assert not torch.equal(checkpoint["weight"], model.weight.cpu())
 
 
-@pytest.mark.parametrize(
-    "norm_type", ["RMSNorm", "CenteredRMSNorm", "ZeroCenteredRMSNorm", "LayerNorm"]
-)
+@pytest.mark.parametrize("norm_type", ["RMSNorm", "ZeroCenteredRMSNorm"])
 @pytest.mark.parametrize("load_checkpoint", [False, True])
 def test_finetuning_norm_weight_decay(norm_type, load_checkpoint, tmp_path):
     from transformers import AutoModelForSequenceClassification

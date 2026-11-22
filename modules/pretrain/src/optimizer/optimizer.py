@@ -54,21 +54,32 @@ def get_optimizer(
 ) -> torch.optim.Optimizer:
     """Create the optimizer, without weight decay on 1D params and embeddings.
 
+    Modules whose class sets ``apply_weight_decay = True`` (e.g. a
+    zero-centered norm, whose gain is an offset from one) are decayed despite
+    being 1D. The flag is checked by attribute rather than ``isinstance`` so
+    this stays model-agnostic and also covers HF remote-code copies of a class.
+
     Raises ``ImportError`` if an external optimizer library is missing, and
     ``RuntimeError`` if ``fused`` is requested without CUDA.
     """
     decay_params: list[torch.nn.Parameter] = []
     no_decay_params: list[torch.nn.Parameter] = []
+    force_decay = {
+        id(param)
+        for module in model.modules()
+        if getattr(module, "apply_weight_decay", False)
+        for param in module.parameters(recurse=False)
+    }
 
     # Separation logic:
-    # 1. 1D tensors bypass weight decay (Biases, LayerNorm scales).
+    # 1. 1D tensors bypass weight decay (Biases, LayerNorm scales), unless forced.
     # 2. String matching explicitly protects Embeddings (which are 2D but suffer from weight decay).
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
 
         name_lower = name.lower()
-        if (
+        if id(param) not in force_decay and (
             param.dim() < 2
             or "embed" in name_lower
             or "position_embeddings" in name_lower

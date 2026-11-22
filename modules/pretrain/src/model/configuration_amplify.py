@@ -19,6 +19,7 @@ class AMPLIFYConfig(PretrainedConfig):
         vocab_size: Number of tokens in the amino-acid vocabulary.
         max_position_embeddings: Maximum context length supported by RoPE.
         rope_theta: Base frequency for RoPE.
+        norm_type: Normalization layer, ``"RMSNorm"`` or ``"ZeroCenteredRMSNorm"``.
     """
 
     model_type = "amplify"
@@ -38,6 +39,7 @@ class AMPLIFYConfig(PretrainedConfig):
         eos_token_id: int = 4,
         max_position_embeddings: int = 2048,
         rope_theta: float = 10000.0,
+        norm_type: str = "RMSNorm",
         **kwargs: Any,
     ):
         super().__init__(
@@ -56,3 +58,4 @@ class AMPLIFYConfig(PretrainedConfig):
         self.norm_eps = norm_eps
         self.max_position_embeddings = max_position_embeddings
         self.rope_theta = rope_theta
+        self.norm_type = norm_type

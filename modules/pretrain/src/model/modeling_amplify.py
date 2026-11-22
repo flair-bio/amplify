@@ -1,7 +1,18 @@
 """AMPLIFY model: encoder, task heads, and HF integration."""
 
 import math
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Type, Union
+from typing import (
+    Any,
+    ClassVar,
+    Dict,
+    List,
+    Literal,
+    NamedTuple,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+)
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field
@@ -36,6 +47,7 @@ class AMPLIFYModelConfig(BaseModel):
         embedding_init_range: Uniform init bound for the token embedding.
         decoder_init_range: Uniform init bound for linear layers.
         norm_eps: Epsilon for RMSNorm layers.
+        norm_type: Normalization layer used throughout the model.
         vocab_size: Number of tokens in the amino-acid vocabulary.
         pad_token_id: Index of the padding token.
         bos_token_id: Index of the beginning-of-sequence token.
@@ -54,6 +66,7 @@ class AMPLIFYModelConfig(BaseModel):
     embedding_init_range: float = Field(0.02, gt=0.0)
     decoder_init_range: float = Field(0.02, gt=0.0)
     norm_eps: float = Field(1e-5, gt=0.0)
+    norm_type: Literal["RMSNorm", "ZeroCenteredRMSNorm"] = "RMSNorm"
     vocab_size: int = Field(32, gt=0)
     pad_token_id: int = 0
     bos_token_id: int = 3
@@ -81,14 +94,59 @@ class RMSNorm(nn.Module):
 
     def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.weight = nn.Parameter(torch.empty(hidden_size))
         self.eps = eps
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        """Set the gain to identity."""
+        nn.init.ones_(self.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Normalize *x* over its last dimension."""
         return torch.nn.functional.rms_norm(
             x, self.weight.shape, self.weight.to(x.dtype), self.eps
         )
+
+
+class ZeroCenteredRMSNorm(RMSNorm):
+    """RMSNorm whose gain is stored as an offset from one: ``rms_norm(x) * (1 + weight)``.
+
+    Weight decay then pulls the gain toward identity instead of zero, as in
+    Gemma, Megatron-Core (``layernorm_zero_centered_gamma``) and Qwen3-Next.
+    ``apply_weight_decay`` tells the optimizer to decay this 1-D gain. Computed
+    in FP32 because in bf16 ``1 + weight`` rounds away small offsets.
+    """
+
+    apply_weight_decay: ClassVar[bool] = True
+
+    def reset_parameters(self) -> None:
+        """Set the gain offset to zero (identity gain)."""
+        nn.init.zeros_(self.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Normalize and apply the gain in FP32, then restore the input dtype."""
+        return torch.nn.functional.rms_norm(
+            x.float(), self.weight.shape, 1.0 + self.weight.float(), self.eps
+        ).to(x.dtype)
+
+
+_NORMS: Dict[str, Type[RMSNorm]] = {
+    "RMSNorm": RMSNorm,
+    "ZeroCenteredRMSNorm": ZeroCenteredRMSNorm,
+}
+
+
+def make_norm(config: AMPLIFYConfig, dim: Optional[int] = None) -> RMSNorm:
+    """Build the configured norm over *dim* (default: ``config.hidden_size``)."""
+    norm_type = config.norm_type
+    if norm_type not in _NORMS:
+        raise ValueError(
+            f"Unsupported norm_type {norm_type!r}; expected one of {sorted(_NORMS)}."
+        )
+    return _NORMS[norm_type](
+        config.hidden_size if dim is None else dim, config.norm_eps
+    )
 
 
 class RotaryEmbedding(nn.Module):
@@ -372,11 +430,11 @@ class EncoderBlock(nn.Module):
     def __init__(self, config: AMPLIFYConfig) -> None:
         super().__init__()
         # Pre-normalization layer applied before attention.
-        self.input_layernorm = RMSNorm(config.hidden_size, config.norm_eps)
+        self.input_layernorm = make_norm(config)
         # Attention module.
         self.attention = Attention(config)
         # Pre-normalization layer applied before FFN.
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, config.norm_eps)
+        self.post_attention_layernorm = make_norm(config)
         # FFN module.
         self.mlp = SwiGLU(config)
 
@@ -447,7 +505,7 @@ class AMPLIFYPreTrainedModel(PreTrainedModel):
     base_model_prefix = "amplify"
 
     def _init_weights(self, module: nn.Module) -> None:
-        """Initialize linear layers and embeddings with uniform weights."""
+        """Initialize linear layers and embeddings uniformly, norms to identity."""
         if isinstance(module, nn.Linear):
             nn.init.uniform_(
                 module.weight,
@@ -466,6 +524,8 @@ class AMPLIFYPreTrainedModel(PreTrainedModel):
                 -self.config.embedding_init_range,
                 self.config.embedding_init_range,
             )
+        elif isinstance(module, RMSNorm):
+            module.reset_parameters()
         elif isinstance(module, RotaryEmbedding):
             # RoPE tables are non-persistent buffers, so they are absent from the
             # checkpoint and `from_pretrained` reallocates them as uninitialised
@@ -488,7 +548,7 @@ class AMPLIFYModel(AMPLIFYPreTrainedModel):
         self.layers = nn.ModuleList(
             [EncoderBlock(config) for _ in range(config.num_hidden_layers)]
         )
-        self.norm = RMSNorm(config.hidden_size, config.norm_eps)
+        self.norm = make_norm(config)
         self.rotary_emb = RotaryEmbedding(config)
         self.post_init()
 
