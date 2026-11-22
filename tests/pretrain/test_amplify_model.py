@@ -235,6 +235,11 @@ class TestMakeNorm:
         assert AMPLIFYModelConfig(qk_norm=True).to_hf_config().qk_norm is True
         assert AMPLIFYModelConfig().qk_norm is False
 
+    def test_pydantic_config_forwards_attention_gate(self):
+        hf = AMPLIFYModelConfig(attention_gate=True).to_hf_config()
+        assert hf.attention_gate is True
+        assert AMPLIFYModelConfig().attention_gate is False
+
     def test_pydantic_config_validates_and_forwards_norm_type(self):
         hf = AMPLIFYModelConfig(norm_type="ZeroCenteredRMSNorm").to_hf_config()
         assert hf.norm_type == "ZeroCenteredRMSNorm"
@@ -574,14 +579,26 @@ class TestAttentionModule:
             assert norm.weight.shape == (_HIDDEN // _HEADS,)
         assert {"q_norm.weight", "k_norm.weight"} <= set(a.state_dict())
 
-    def test_qk_norm_packed_matches_padded(self, monkeypatch: pytest.MonkeyPatch):
-        """Both paths normalize q/k at the same point (before RoPE)."""
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            {"qk_norm": True},
+            {"attention_gate": True},
+            {"qk_norm": True, "attention_gate": True},
+        ],
+        ids=["qk_norm", "gate", "qk_norm+gate"],
+    )
+    def test_packed_matches_padded_with_options(
+        self, flags, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Both paths apply the QK norm (before RoPE) and gate at the same point."""
         torch.manual_seed(0)
-        cfg = _cfg(qk_norm=True, norm_type="ZeroCenteredRMSNorm")
+        cfg = _cfg(norm_type="ZeroCenteredRMSNorm", **flags)
         a = Attention(cfg).eval()
         with torch.no_grad():
-            a.q_norm.weight.normal_()
-            a.k_norm.weight.normal_()
+            for norm in (a.q_norm, a.k_norm):
+                if not isinstance(norm, nn.Identity):
+                    norm.weight.normal_()
         norm, rope = make_norm(cfg), RotaryEmbedding(cfg)
         S = 8
         hidden = torch.randn(1, S, _HIDDEN)
@@ -603,6 +620,35 @@ class TestAttentionModule:
             )
         # The packed path runs attention in bf16, as on GPU.
         torch.testing.assert_close(packed, padded, atol=2e-2, rtol=2e-2)
+
+
+    def test_gate_off_has_no_gate_proj(self, attn: Attention):
+        assert attn.gate_proj is None
+
+    def test_gate_proj_shape_and_no_bias(self):
+        a = Attention(_cfg(attention_gate=True))
+        assert a.gate_proj.weight.shape == (_HIDDEN, _HIDDEN)
+        assert a.gate_proj.bias is None
+        assert "gate_proj.weight" in a.state_dict()
+
+    @pytest.mark.parametrize("output_attentions", [False, True])
+    def test_zero_gate_halves_attention_update(
+        self, norm_and_rope, output_attentions
+    ):
+        """sigmoid(0) = 0.5 scales the attention output before ``o_proj``."""
+        norm, cos, sin = norm_and_rope
+        torch.manual_seed(0)
+        ungated = Attention(_cfg()).eval()
+        gated = Attention(_cfg(attention_gate=True)).eval()
+        gated.load_state_dict(ungated.state_dict(), strict=False)
+        nn.init.zeros_(gated.gate_proj.weight)
+        h = torch.randn(2, 8, _HIDDEN)
+        with torch.no_grad():
+            ref, ref_w = ungated(norm, h, None, cos, sin, output_attentions)
+            out, out_w = gated(norm, h, None, cos, sin, output_attentions)
+        torch.testing.assert_close(out - h, 0.5 * (ref - h))
+        if output_attentions:
+            torch.testing.assert_close(out_w, ref_w)
 
 
 # ---------------------------------------------------------------------------

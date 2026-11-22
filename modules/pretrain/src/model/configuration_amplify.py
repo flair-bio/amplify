@@ -21,6 +21,8 @@ class AMPLIFYConfig(PretrainedConfig):
         rope_theta: Base frequency for RoPE.
         norm_type: Normalization layer, ``"RMSNorm"`` or ``"ZeroCenteredRMSNorm"``.
         qk_norm: Normalize queries and keys per head (over ``head_dim``) before RoPE.
+        attention_gate: Gate the attention output elementwise with a sigmoid of
+            the block input, before the output projection.
     """
 
     model_type = "amplify"
@@ -42,6 +44,7 @@ class AMPLIFYConfig(PretrainedConfig):
         rope_theta: float = 10000.0,
         norm_type: str = "RMSNorm",
         qk_norm: bool = False,
+        attention_gate: bool = False,
         **kwargs: Any,
     ):
         super().__init__(
@@ -62,3 +65,4 @@ class AMPLIFYConfig(PretrainedConfig):
         self.rope_theta = rope_theta
         self.norm_type = norm_type
         self.qk_norm = qk_norm
+        self.attention_gate = attention_gate

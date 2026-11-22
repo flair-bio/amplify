@@ -49,6 +49,8 @@ class AMPLIFYModelConfig(BaseModel):
         norm_eps: Epsilon for RMSNorm layers.
         norm_type: Normalization layer used throughout the model.
         qk_norm: Normalize queries and keys per head (over ``head_dim``) before RoPE.
+        attention_gate: Gate the attention output elementwise with a sigmoid of
+            the block input, before the output projection.
         vocab_size: Number of tokens in the amino-acid vocabulary.
         pad_token_id: Index of the padding token.
         bos_token_id: Index of the beginning-of-sequence token.
@@ -69,6 +71,7 @@ class AMPLIFYModelConfig(BaseModel):
     norm_eps: float = Field(1e-5, gt=0.0)
     norm_type: Literal["RMSNorm", "ZeroCenteredRMSNorm"] = "RMSNorm"
     qk_norm: bool = False
+    attention_gate: bool = False
     vocab_size: int = Field(32, gt=0)
     pad_token_id: int = 0
     bos_token_id: int = 3
@@ -232,7 +235,7 @@ def apply_rotary_emb_qkv(
 
 
 class Attention(nn.Module):
-    """MHSA with RoPE and optional QK norm.
+    """MHSA with RoPE, optional QK norm and optional output gate.
 
     Supports padded batches (PyTorch SDPA) and packed sequences (FlashAttention
     when optionally installed, otherwise PyTorch variable-length attention).
@@ -241,6 +244,10 @@ class Attention(nn.Module):
 
     With ``qk_norm``, queries and keys are normalized over ``head_dim`` with a
     gain shared across heads, before RoPE (as in Qwen3 and Gemma 3).
+
+    With ``attention_gate``, the attention output is multiplied elementwise by
+    ``sigmoid(gate_proj(normed))`` before ``o_proj`` (Qiu et al. 2025, "Gated
+    Attention for Large Language Models"; as in Qwen3-Next).
     """
 
     def __init__(self, config: AMPLIFYConfig) -> None:
@@ -259,6 +266,11 @@ class Attention(nn.Module):
         )
         self.k_norm = (
             make_norm(config, self.head_dim) if config.qk_norm else nn.Identity()
+        )
+        self.gate_proj = (
+            nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+            if config.attention_gate
+            else None
         )
 
     # Fast path: packed sequences with optional FlashAttention acceleration.
@@ -307,6 +319,8 @@ class Attention(nn.Module):
         attn_output = attn_output.to(hidden_states_flat.dtype).view(
             -1, self.num_heads * self.head_dim
         )
+        if self.gate_proj is not None:
+            attn_output = attn_output * torch.sigmoid(self.gate_proj(normed))
         # Fused attention residual: hidden + attn_output @ o_proj.weight.T
         hidden_states_flat = torch.addmm(
             hidden_states_flat, attn_output, self.o_proj.weight.t()
@@ -356,6 +370,8 @@ class Attention(nn.Module):
             attn_output = attn_output.transpose(1, 2).reshape(batch_size, seq_len, -1)
             attn_weights = None
 
+        if self.gate_proj is not None:
+            attn_output = attn_output * torch.sigmoid(self.gate_proj(normed))
         return hidden_states + self.o_proj(attn_output), attn_weights
 
     def forward(
