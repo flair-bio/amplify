@@ -154,19 +154,19 @@ class TrainerConfig(BaseModel):
             "validates this on init."
         ),
     )
-    gradient_accumulation_schedule: (
-        list[tuple[PositiveInt, PositiveInt]] | None
-    ) = Field(
-        None,
-        description=(
-            "Optional `[optimizer_step, accumulation_steps]` pairs, e.g. a "
-            "larger batch for the LR decay phase. Each count applies once "
-            "`global_step` reaches its step; `gradient_accumulation_steps` "
-            "applies before the first one. Changes take effect between "
-            "optimizer steps, so the micro-batch size and memory are unchanged. "
-            "A list (not a dict) so config overlays replace it instead of "
-            "merging keys."
-        ),
+    gradient_accumulation_schedule: list[tuple[PositiveInt, PositiveInt]] | None = (
+        Field(
+            None,
+            description=(
+                "Optional `[optimizer_step, accumulation_steps]` pairs, e.g. a "
+                "larger batch for the LR decay phase. Each count applies once "
+                "`global_step` reaches its step; `gradient_accumulation_steps` "
+                "applies before the first one. Changes take effect between "
+                "optimizer steps, so the micro-batch size and memory are unchanged. "
+                "A list (not a dict) so config overlays replace it instead of "
+                "merging keys."
+            ),
+        )
     )
     output_dir: Path = Field(
         Path("./checkpoints"), description="Directory for training-state checkpoints."
@@ -300,10 +300,10 @@ class TrainerConfig(BaseModel):
     def gradient_accumulation_at(self, step: int) -> int:
         """Accumulation count for the optimizer step following `step`."""
         steps = self.gradient_accumulation_steps
-        for start, count in sorted(self.gradient_accumulation_schedule or ()):
+        for start, scheduled in sorted(self.gradient_accumulation_schedule or ()):
             if step < start:
                 break
-            steps = count
+            steps = scheduled
         return steps
 
 
