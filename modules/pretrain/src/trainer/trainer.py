@@ -15,8 +15,12 @@ from typing import Any, Literal
 
 import torch
 from accelerate import Accelerator
-from accelerate.utils import DDPCommunicationHookType, DistributedDataParallelKwargs
-from pydantic import BaseModel, ConfigDict, Field
+from accelerate.utils import (
+    DDPCommunicationHookType,
+    DistributedDataParallelKwargs,
+    DistributedType,
+)
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 from tqdm import tqdm
 from transformers import PreTrainedTokenizerBase
 
@@ -150,6 +154,16 @@ class TrainerConfig(BaseModel):
             "validates this on init."
         ),
     )
+    gradient_accumulation_schedule: dict[PositiveInt, PositiveInt] | None = Field(
+        None,
+        description=(
+            "Optional `{optimizer_step: accumulation_steps}` overrides, e.g. a "
+            "larger batch for the LR decay phase. Each count applies once "
+            "`global_step` reaches its key; `gradient_accumulation_steps` "
+            "applies before the first key. Changes take effect between "
+            "optimizer steps, so the micro-batch size and memory are unchanged."
+        ),
+    )
     output_dir: Path = Field(
         Path("./checkpoints"), description="Directory for training-state checkpoints."
     )
@@ -249,6 +263,25 @@ class TrainerConfig(BaseModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def _schedule_within_max_steps(self) -> "TrainerConfig":
+        schedule = self.gradient_accumulation_schedule or {}
+        if self.max_steps and any(step >= self.max_steps for step in schedule):
+            raise ValueError(
+                "gradient_accumulation_schedule steps must be < max_steps "
+                f"({self.max_steps}), got {sorted(schedule)}"
+            )
+        return self
+
+    def gradient_accumulation_at(self, step: int) -> int:
+        """Accumulation count for the optimizer step following `step`."""
+        steps = self.gradient_accumulation_steps
+        for start, count in sorted((self.gradient_accumulation_schedule or {}).items()):
+            if step < start:
+                break
+            steps = count
+        return steps
+
 
 class Trainer:
     """Orchestrates pretraining lifecycle using injected dependencies."""
@@ -306,6 +339,15 @@ class Trainer:
                 "`gradient_accumulation_steps=config.trainer.gradient_accumulation_steps` "
                 "when constructing the Accelerator."
             )
+        engine_owned = (DistributedType.DEEPSPEED, DistributedType.MEGATRON_LM)
+        if (
+            config.gradient_accumulation_schedule
+            and self.accelerator.distributed_type in engine_owned
+        ):
+            raise ValueError(
+                "gradient_accumulation_schedule is not supported with DeepSpeed or "
+                "Megatron-LM, whose engines own the accumulation count."
+            )
 
         # Injected metric logger: accumulates metrics on-device and flushes them
         # through `accelerator.log`, which forwards to any configured tracker
@@ -334,6 +376,22 @@ class Trainer:
         # Load checkpoint if provided
         if config.resume_from_checkpoint:
             self.load_checkpoint(config.resume_from_checkpoint)
+        self._update_gradient_accumulation()
+
+    def _update_gradient_accumulation(self) -> None:
+        """Apply `gradient_accumulation_schedule` for the next optimizer step."""
+        steps = self.config.gradient_accumulation_at(self.global_step)
+        if steps == self.gradient_accumulation_steps:
+            return
+        self.gradient_accumulation_steps = steps
+        # `accumulate` syncs on `accelerator.step % steps == 0` and `backward`
+        # divides the loss by `steps`; restart the counter for a full group.
+        self.accelerator.gradient_accumulation_steps = steps
+        self.accelerator.step = 0
+        if self.is_main:
+            logger.info(
+                f"gradient_accumulation_steps={steps} from step {self.global_step}"
+            )
 
     def _register_signal_handlers(self) -> None:
         """Saves state and exits gracefully on cluster preemptions."""
@@ -420,15 +478,8 @@ class Trainer:
             # Record original length to maintain correct tqdm totals when resuming
             try:
                 total_batches = len(train_dataloader)
-                # Optimizer-step units (else `train/epoch` is off by the
-                # accumulation factor); `ceil` since Accelerate also syncs a
-                # trailing partial group.
-                self.metric_logger.steps_per_epoch = max(
-                    math.ceil(total_batches / self.gradient_accumulation_steps), 1
-                )
             except TypeError:
                 total_batches = None
-                self.metric_logger.steps_per_epoch = 1.0
 
             if self.is_main:
                 batches_msg = (
@@ -443,9 +494,14 @@ class Trainer:
                 )
 
             # Refresh the bar's total each epoch since the mixture length can
-            # shift slightly (e.g. under a score curriculum).
+            # shift slightly (e.g. under a score curriculum). Optimizer-step
+            # units; `ceil` since Accelerate also syncs a trailing partial
+            # group. An estimate under `gradient_accumulation_schedule`.
             if not max_steps and total_batches is not None:
-                pbar.total = math.ceil(self.metric_logger.steps_per_epoch * num_epochs)
+                steps_per_epoch = math.ceil(
+                    total_batches / self.gradient_accumulation_steps
+                )
+                pbar.total = max(steps_per_epoch, 1) * num_epochs
 
             # If resuming mid-epoch, skip already processed batches. A config
             # change can shorten the epoch, leaving the saved count out of
@@ -525,6 +581,11 @@ class Trainer:
             if self.accelerator.sync_gradients:
                 self.global_step += 1
                 self.metric_logger.num_steps = self.global_step
+                self.metric_logger.epoch = epoch + (
+                    self.batches_completed_in_epoch / total_batches
+                    if total_batches
+                    else 0.0
+                )
                 pbar.update(1)
                 self.metric_logger.add_dataloader_stall(data_stall_ms)
                 data_stall_ms = 0.0
@@ -570,6 +631,8 @@ class Trainer:
                     and self.global_step % self.config.hf_save_steps == 0
                 ):
                     self.save_hf_checkpoint()
+
+                self._update_gradient_accumulation()
 
                 # Stop mid-epoch once the step budget is exhausted, rather
                 # than running the rest of this epoch's batches needlessly.

@@ -25,6 +25,7 @@ def accelerator():
     acc.process_index = 0
     acc.is_main_process = True
     acc.distributed_type = DistributedType.NO
+    acc.gradient_accumulation_steps = 1
     acc.reduce.side_effect = lambda tensor, reduction: tensor
     return acc
 

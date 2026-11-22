@@ -47,7 +47,8 @@ class TrainingLogger:
         self.num_samples = 0
         self.num_tokens = 0
         self.num_masked_tokens = 0
-        self.steps_per_epoch: float = 1.0
+        # Fractional epoch position, set by the trainer after each step.
+        self.epoch = 0.0
         self._last_log_time = time.perf_counter()
         self._last_log_step = 0
         self._train: Dict[str, torch.Tensor] = {}
@@ -210,12 +211,15 @@ class TrainingLogger:
         avg_loss = r["loss_sum"] / max(r["pred"], 1e-12)
         ce_key = "ce_sum" if self.log_cross_entropy else "loss_sum"
         metrics: Dict[str, float] = {
-            "train/epoch": self.num_steps / self.steps_per_epoch,
+            "train/epoch": self.epoch,
             "train/global_step": self.num_steps,
             "train/samples": self.num_samples,
             "train/tokens": self.num_tokens,
             "train/masked_tokens": self.num_masked_tokens,
             "train/learning_rate": optimizer.param_groups[0]["lr"],
+            "train/gradient_accumulation_steps": (
+                accelerator.gradient_accumulation_steps
+            ),
             "train/weight_norm": math.sqrt(max(wsq, 0.0)),
         }
         # Skip these keys if no train batches were accumulated since the last flush.
