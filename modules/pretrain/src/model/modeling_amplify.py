@@ -51,6 +51,8 @@ class AMPLIFYModelConfig(BaseModel):
         qk_norm: Normalize queries and keys per head (over ``head_dim``) before RoPE.
         attention_gate: Gate the attention output elementwise with a sigmoid of
             the block input, before the output projection.
+        nonlinear_mlm_head: Use a dense-GELU-norm transform before the MLM
+            decoder (BERT/ESM-2 style) instead of a single linear layer.
         vocab_size: Number of tokens in the amino-acid vocabulary.
         pad_token_id: Index of the padding token.
         bos_token_id: Index of the beginning-of-sequence token.
@@ -72,6 +74,7 @@ class AMPLIFYModelConfig(BaseModel):
     norm_type: Literal["RMSNorm", "ZeroCenteredRMSNorm"] = "RMSNorm"
     qk_norm: bool = False
     attention_gate: bool = False
+    nonlinear_mlm_head: bool = False
     vocab_size: int = Field(32, gt=0)
     pad_token_id: int = 0
     bos_token_id: int = 3
@@ -737,7 +740,16 @@ class AMPLIFYForMaskedLM(AMPLIFYPreTrainedModel):
     def __init__(self, config: AMPLIFYConfig, **kwargs: Any) -> None:
         super().__init__(config)
         self.amplify = AMPLIFYModel(config)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size)
+        if config.nonlinear_mlm_head:
+            # BERT / ESM-2 style transform; keys `lm_head.{0,2,3}`.
+            self.lm_head = nn.Sequential(
+                nn.Linear(config.hidden_size, config.hidden_size),
+                nn.GELU(),
+                make_norm(config),
+                nn.Linear(config.hidden_size, config.vocab_size),
+            )
+        else:
+            self.lm_head = nn.Linear(config.hidden_size, config.vocab_size)
         self.post_init()
 
     def forward(

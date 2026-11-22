@@ -235,6 +235,11 @@ class TestMakeNorm:
         assert AMPLIFYModelConfig(qk_norm=True).to_hf_config().qk_norm is True
         assert AMPLIFYModelConfig().qk_norm is False
 
+    def test_pydantic_config_forwards_nonlinear_mlm_head(self):
+        hf = AMPLIFYModelConfig(nonlinear_mlm_head=True).to_hf_config()
+        assert hf.nonlinear_mlm_head is True
+        assert AMPLIFYModelConfig().nonlinear_mlm_head is False
+
     def test_pydantic_config_forwards_attention_gate(self):
         hf = AMPLIFYModelConfig(attention_gate=True).to_hf_config()
         assert hf.attention_gate is True
@@ -1036,6 +1041,55 @@ class TestAMPLIFYForMaskedLM:
             out = model(ids, output_hidden_states=True)
         assert out.hidden_states is not None
         assert len(out.hidden_states) == cfg.num_hidden_layers + 1
+
+    def test_default_head_is_single_linear(self, model: AMPLIFYForMaskedLM):
+        assert isinstance(model.lm_head, nn.Linear)
+
+    @pytest.mark.parametrize("norm_type", ["RMSNorm", "ZeroCenteredRMSNorm"])
+    def test_nonlinear_head_layout(self, norm_type):
+        model = AMPLIFYForMaskedLM(
+            _cfg(nonlinear_mlm_head=True, norm_type=norm_type)
+        )
+        head_keys = {k for k in model.state_dict() if k.startswith("lm_head.")}
+        assert head_keys == {
+            "lm_head.0.weight",
+            "lm_head.0.bias",
+            "lm_head.2.weight",
+            "lm_head.3.weight",
+            "lm_head.3.bias",
+        }
+        dense, act, norm, decoder = model.lm_head
+        assert dense.weight.shape == (_HIDDEN, _HIDDEN)
+        assert isinstance(act, nn.GELU) and act.approximate == "none"
+        assert type(norm).__name__ == norm_type
+        assert decoder.weight.shape == (_VOCAB, _HIDDEN)
+
+    def test_nonlinear_head_logits_and_loss(self):
+        torch.manual_seed(0)
+        model = AMPLIFYForMaskedLM(_cfg(nonlinear_mlm_head=True)).eval()
+        ids = torch.randint(1, _VOCAB, (2, 10))
+        with torch.no_grad():
+            out = model(ids, labels=ids)
+            hidden = model.amplify(ids).last_hidden_state
+        assert out.logits.shape == (2, 10, _VOCAB)
+        torch.testing.assert_close(out.logits, model.lm_head(hidden))
+        expected = torch.nn.functional.cross_entropy(
+            out.logits.view(-1, _VOCAB), ids.view(-1)
+        )
+        torch.testing.assert_close(out.loss, expected)
+
+    def test_nonlinear_head_round_trip(self, tmp_path):
+        torch.manual_seed(0)
+        model = AMPLIFYForMaskedLM(
+            _cfg(nonlinear_mlm_head=True, norm_type="ZeroCenteredRMSNorm")
+        ).eval()
+        with torch.no_grad():
+            model.lm_head[2].weight.fill_(0.25)
+        model.save_pretrained(tmp_path)
+        reloaded = AMPLIFYForMaskedLM.from_pretrained(tmp_path).eval()
+        ids = torch.randint(1, _VOCAB, (2, 10))
+        with torch.no_grad():
+            assert torch.equal(model(ids).logits, reloaded(ids).logits)
 
 
 # ---------------------------------------------------------------------------

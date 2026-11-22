@@ -23,6 +23,8 @@ class AMPLIFYConfig(PretrainedConfig):
         qk_norm: Normalize queries and keys per head (over ``head_dim``) before RoPE.
         attention_gate: Gate the attention output elementwise with a sigmoid of
             the block input, before the output projection.
+        nonlinear_mlm_head: Use a dense-GELU-norm transform before the MLM
+            decoder (BERT/ESM-2 style) instead of a single linear layer.
     """
 
     model_type = "amplify"
@@ -45,6 +47,7 @@ class AMPLIFYConfig(PretrainedConfig):
         norm_type: str = "RMSNorm",
         qk_norm: bool = False,
         attention_gate: bool = False,
+        nonlinear_mlm_head: bool = False,
         **kwargs: Any,
     ):
         super().__init__(
@@ -66,3 +69,4 @@ class AMPLIFYConfig(PretrainedConfig):
         self.norm_type = norm_type
         self.qk_norm = qk_norm
         self.attention_gate = attention_gate
+        self.nonlinear_mlm_head = nonlinear_mlm_head
