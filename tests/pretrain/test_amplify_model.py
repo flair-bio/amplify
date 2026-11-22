@@ -240,6 +240,11 @@ class TestMakeNorm:
         assert hf.nonlinear_mlm_head is True
         assert AMPLIFYModelConfig().nonlinear_mlm_head is False
 
+    def test_pydantic_config_forwards_gaussian_init(self):
+        hf = AMPLIFYModelConfig(gaussian_init=True).to_hf_config()
+        assert hf.gaussian_init is True
+        assert AMPLIFYModelConfig().gaussian_init is False
+
     def test_pydantic_config_forwards_attention_gate(self):
         hf = AMPLIFYModelConfig(attention_gate=True).to_hf_config()
         assert hf.attention_gate is True
@@ -1479,6 +1484,33 @@ class TestCheckpointRoundTrip:
         norm.weight.data.fill_(float("nan"))
         model._init_weights(norm)
         assert torch.all(norm.weight == (1.0 if norm_type == "RMSNorm" else 0.0))
+
+    @pytest.mark.parametrize("gaussian", [False, True])
+    def test_init_weights_distribution(self, gaussian):
+        """Ranges are a uniform bound by default and a Gaussian std when enabled."""
+        model = AMPLIFYForMaskedLM(
+            _cfg(
+                gaussian_init=gaussian,
+                decoder_init_range=0.05,
+                embedding_init_range=0.03,
+            )
+        )
+        torch.manual_seed(0)
+        linear, embedding = nn.Linear(512, 512), nn.Embedding(512, 512)
+        model._init_weights(linear)
+        model._init_weights(embedding)
+        for weight, scale in ((linear.weight, 0.05), (embedding.weight, 0.03)):
+            if gaussian:
+                assert weight.abs().max() > scale
+                assert weight.std().item() == pytest.approx(scale, rel=0.02)
+            else:
+                assert weight.abs().max() <= scale
+                assert weight.std().item() == pytest.approx(
+                    scale / math.sqrt(3), rel=0.02
+                )
+            assert weight.mean().abs() < scale / 50
+        bound = 1.0 / math.sqrt(512)
+        assert linear.bias.abs().max() <= bound
 
     def test_zero_centered_gains_survive_round_trip(self, tmp_path):
         """Loaded gains are kept; only checkpoint-missing ones get the identity init."""

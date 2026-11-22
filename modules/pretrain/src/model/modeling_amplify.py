@@ -44,8 +44,10 @@ class AMPLIFYModelConfig(BaseModel):
         num_hidden_layers: Number of transformer encoder layers.
         num_attention_heads: Number of attention heads per layer.
         intermediate_size: Dimension of the SwiGLU feed-forward inner layer.
-        embedding_init_range: Uniform init bound for the token embedding.
-        decoder_init_range: Uniform init bound for linear layers.
+        embedding_init_range: Uniform init bound for the token embedding, or the
+            Gaussian std when ``gaussian_init``.
+        decoder_init_range: Uniform init bound for linear layers, or the Gaussian
+            std when ``gaussian_init``.
         norm_eps: Epsilon for RMSNorm layers.
         norm_type: Normalization layer used throughout the model.
         qk_norm: Normalize queries and keys per head (over ``head_dim``) before RoPE.
@@ -53,6 +55,8 @@ class AMPLIFYModelConfig(BaseModel):
             the block input, before the output projection.
         nonlinear_mlm_head: Use a dense-GELU-norm transform before the MLM
             decoder (BERT/ESM-2 style) instead of a single linear layer.
+        gaussian_init: Initialize linear and embedding weights from a zero-mean
+            Gaussian instead of a uniform distribution.
         vocab_size: Number of tokens in the amino-acid vocabulary.
         pad_token_id: Index of the padding token.
         bos_token_id: Index of the beginning-of-sequence token.
@@ -75,6 +79,7 @@ class AMPLIFYModelConfig(BaseModel):
     qk_norm: bool = False
     attention_gate: bool = False
     nonlinear_mlm_head: bool = False
+    gaussian_init: bool = False
     vocab_size: int = Field(32, gt=0)
     pad_token_id: int = 0
     bos_token_id: int = 3
@@ -543,14 +548,17 @@ class AMPLIFYPreTrainedModel(PreTrainedModel):
     config_class = AMPLIFYConfig
     base_model_prefix = "amplify"
 
+    def _init_weight(self, weight: torch.Tensor, scale: float) -> None:
+        """Draw from N(0, scale) if `gaussian_init`, else U(-scale, scale)."""
+        if self.config.gaussian_init:
+            nn.init.normal_(weight, mean=0.0, std=scale)
+        else:
+            nn.init.uniform_(weight, -scale, scale)
+
     def _init_weights(self, module: nn.Module) -> None:
-        """Initialize linear layers and embeddings uniformly, norms to identity."""
+        """Initialize linear layers and embeddings, norms to identity."""
         if isinstance(module, nn.Linear):
-            nn.init.uniform_(
-                module.weight,
-                -self.config.decoder_init_range,
-                self.config.decoder_init_range,
-            )
+            self._init_weight(module.weight, self.config.decoder_init_range)
             if module.bias is not None:
                 # `from_pretrained` fills checkpoint-missing params via this hook
                 # only; skipping bias left task heads on uninitialised memory.
@@ -558,11 +566,7 @@ class AMPLIFYPreTrainedModel(PreTrainedModel):
                 bound = 1.0 / math.sqrt(fan_in) if fan_in > 0 else 0.0
                 nn.init.uniform_(module.bias, -bound, bound)
         elif isinstance(module, nn.Embedding):
-            nn.init.uniform_(
-                module.weight,
-                -self.config.embedding_init_range,
-                self.config.embedding_init_range,
-            )
+            self._init_weight(module.weight, self.config.embedding_init_range)
         elif isinstance(module, RMSNorm):
             module.reset_parameters()
         elif isinstance(module, RotaryEmbedding):

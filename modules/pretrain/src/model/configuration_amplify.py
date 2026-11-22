@@ -13,8 +13,10 @@ class AMPLIFYConfig(PretrainedConfig):
         num_hidden_layers: Number of transformer encoder layers.
         num_attention_heads: Number of attention heads per layer.
         intermediate_size: Dimension of the SwiGLU feed-forward inner layer.
-        embedding_init_range: Uniform init bound for the token embedding.
-        decoder_init_range: Uniform init bound for linear layers.
+        embedding_init_range: Uniform init bound for the token embedding, or the
+            Gaussian std when ``gaussian_init``.
+        decoder_init_range: Uniform init bound for linear layers, or the Gaussian
+            std when ``gaussian_init``.
         norm_eps: Epsilon for RMSNorm layers.
         vocab_size: Number of tokens in the amino-acid vocabulary.
         max_position_embeddings: Maximum context length supported by RoPE.
@@ -25,6 +27,8 @@ class AMPLIFYConfig(PretrainedConfig):
             the block input, before the output projection.
         nonlinear_mlm_head: Use a dense-GELU-norm transform before the MLM
             decoder (BERT/ESM-2 style) instead of a single linear layer.
+        gaussian_init: Initialize linear and embedding weights from a zero-mean
+            Gaussian instead of a uniform distribution.
     """
 
     model_type = "amplify"
@@ -48,6 +52,7 @@ class AMPLIFYConfig(PretrainedConfig):
         qk_norm: bool = False,
         attention_gate: bool = False,
         nonlinear_mlm_head: bool = False,
+        gaussian_init: bool = False,
         **kwargs: Any,
     ):
         super().__init__(
@@ -70,3 +75,4 @@ class AMPLIFYConfig(PretrainedConfig):
         self.qk_norm = qk_norm
         self.attention_gate = attention_gate
         self.nonlinear_mlm_head = nonlinear_mlm_head
+        self.gaussian_init = gaussian_init
