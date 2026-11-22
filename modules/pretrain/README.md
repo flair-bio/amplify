@@ -521,7 +521,7 @@ The model has two attention paths, selected by the collator's `packing` flag: **
 
 **Purpose:** Build the optimizer with correct parameter grouping and the learning-rate schedule.
 
-The optimizer splits parameters into **decay** and **no-decay** groups: 1-D parameters (biases, norm weights) and embeddings are excluded from weight decay, which is standard practice for transformer pretraining.
+The optimizer splits parameters into **decay** and **no-decay** groups: 1-D parameters (biases, norm weights) and embeddings are excluded from weight decay, which is standard practice for transformer pretraining. The exception is `ZeroCenteredRMSNorm` gains (the default `norm_type`): they store an offset from one, so they are decayed, which pulls the gain towards identity.
 
 **Key config fields (`optimizer`):**
 
@@ -608,7 +608,9 @@ The default warmup-stable-decay (WSD) schedule warms up to the peak LR, holds it
 
 **Purpose:** Accumulate training metrics **on-device** across all ranks and reduce them with a single all-reduce at flush time rather than syncing every step, keeping metric tracking off the critical path. Metrics go to `accelerator.log` (forwarded to W&B when enabled) and to `metrics.jsonl`; the counters are checkpointed, so they survive resumption.
 
-**Metrics tracked:** `train/loss`, `train/perplexity`, `train/accuracy`, `train/learning_rate`, `train/grad_norm`, `train/weight_norm`, `train/tokens`, `train/masked_tokens`, `train/samples`, `train/epoch`, `train/global_step`, `train/tokens_per_second`, `train/steps_per_second`, `eval/<split>/{loss,perplexity,accuracy}`, and dataloader wait times per step (`dataloader/iter_{p50,p90,p99,max}_ms`, `dataloader/slowest_rank`, `dataloader/iter_step_pct`) to spot input-pipeline stalls.
+**Metrics tracked:** `train/loss`, `train/perplexity`, `train/accuracy`, `train/learning_rate`, `train/grad_norm`, `train/weight_norm`, `train/tokens`, `train/masked_tokens`, `train/samples`, `train/epoch`, `train/global_step`, `train/gradient_accumulation_steps`, `train/tokens_per_second`, `train/steps_per_second`, `eval/<split>/{loss,perplexity,accuracy}`, and dataloader wait times per step (`dataloader/iter_{p50,p90,p99,max}_ms`, `dataloader/slowest_rank`, `dataloader/iter_step_pct`) to spot input-pipeline stalls.
+
+`*/loss` is the training objective (focal in `config.yaml`). With a non-CE loss, `train/cross_entropy` and `eval/<split>/cross_entropy` are also logged, and `*/perplexity` is always `exp(cross-entropy)`, so it stays comparable across loss types.
 
 **Key config fields (`wandb`):**
 
@@ -971,7 +973,7 @@ checkpoint, see [Uploading a checkpoint to the Hugging Face Hub](#uploading-a-ch
 | `RuntimeError: Fused optimizer requested ... CUDA is not available` | Running without a GPU; pretraining requires CUDA |
 | Training much slower than expected with `torch.compile` | Shapes keep recompiling; keep `compile_dynamic: true` and check with `TORCH_LOGS=recompiles` |
 | `dataloader/iter_step_pct` high (GPUs waiting for data) | Data on a network filesystem; set `dataset.local_stage_dir` (see [Staging data](#staging-data-to-node-local-disk-network-filesystems)) or raise `dataloader_num_workers` |
-| CUDA out of memory | Lower `dataloader.max_tokens` and raise `gradient_accumulation_steps` to keep tokens per step (see [Batch size and steps](#batch-size-and-steps)) |
+| CUDA out of memory | Lower `dataloader.max_tokens` and raise `gradient_accumulation_steps` and the `gradient_accumulation_schedule` counts to keep tokens per step (see [Batch size and steps](#batch-size-and-steps)) |
 
 ---
 
