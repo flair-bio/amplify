@@ -19,6 +19,7 @@ from omegaconf import OmegaConf
 import modules.pretrain.src.run_pretrain as run_pretrain
 from modules.core.utils.config_loader import load_config
 from modules.pretrain.src.config import PretrainConfig
+from modules.pretrain.src.loss import FocalLoss, LossConfig
 
 CONFIGS_DIR = Path(__file__).parents[2] / "modules" / "pretrain" / "configs"
 MAIN_CONFIG = CONFIGS_DIR / "config.yaml"
@@ -255,3 +256,48 @@ class TestPrepareOnly:
 
     def test_disabled_by_default(self, config):
         assert config.dataset.prepare_only is False
+
+
+class TestLossWiring:
+    """`config.loss` reaches the Trainer, the metric logger and the export."""
+
+    @staticmethod
+    def _main(config: PretrainConfig):
+        model = MagicMock()
+        model.config = MagicMock(spec=[])
+        accelerator = MagicMock()
+        accelerator.prepare.side_effect = lambda *o: o if len(o) > 1 else o[0]
+        with (
+            patch.object(run_pretrain, "load_and_parse", return_value=config),
+            patch.object(run_pretrain, "setup_runtime", return_value=accelerator),
+            patch.object(run_pretrain, "setup_tracking"),
+            patch.object(run_pretrain, "get_amplify_masked_lm", return_value=model),
+            patch.object(run_pretrain, "get_tokenizer"),
+            patch.object(run_pretrain, "get_optimizer"),
+            patch.object(run_pretrain, "get_scheduler"),
+            patch.object(run_pretrain, "get_collator"),
+            patch.object(run_pretrain, "prepare_sources", return_value=[]),
+            patch.object(run_pretrain, "ConcatDataset"),
+            patch.object(run_pretrain, "build_split_dataloader"),
+            patch.object(run_pretrain, "Trainer") as trainer_cls,
+            patch.object(run_pretrain.sys, "argv", ["run_pretrain.py", "cfg.yaml"]),
+        ):
+            run_pretrain.main()
+        return model, trainer_cls.call_args.kwargs
+
+    def test_cross_entropy_keeps_model_loss(self, config):
+        config.loss = LossConfig()
+        model, kwargs = self._main(config)
+
+        assert kwargs["loss_fn"] is None
+        assert kwargs["metric_logger"].log_cross_entropy is False
+        assert model.config.pretraining_loss == {"type": "cross_entropy", "gamma": 0.5}
+
+    def test_focal_is_passed_to_trainer_and_recorded(self, config):
+        config.loss = LossConfig(type="focal", gamma=0.25)
+        model, kwargs = self._main(config)
+
+        assert isinstance(kwargs["loss_fn"], FocalLoss)
+        assert kwargs["loss_fn"].gamma == 0.25
+        assert kwargs["metric_logger"].log_cross_entropy is True
+        assert model.config.pretraining_loss == {"type": "focal", "gamma": 0.25}

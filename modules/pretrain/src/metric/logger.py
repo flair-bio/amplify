@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 from accelerate.utils import DistributedType
+from torch.nn.functional import cross_entropy
 
 
 class TrainingLogger:
@@ -29,9 +30,17 @@ class TrainingLogger:
         "num_tokens",
         "num_masked_tokens",
     )
-    _TRAIN_KEYS = ("samples", "tokens", "pred", "loss_sum", "correct_sum")
+    _PRED_KEYS = ("pred", "loss_sum", "correct_sum")
 
-    def __init__(self) -> None:
+    def __init__(self, *, log_cross_entropy: bool = False) -> None:
+        """
+        Args:
+            log_cross_entropy: Track token cross-entropy separately from the
+                training loss. Set when training with a non-CE objective, so
+                perplexity stays ``exp(CE)`` and ``*/cross_entropy`` is logged.
+        """
+        self.log_cross_entropy = log_cross_entropy
+        self._pred_keys = self._PRED_KEYS + (("ce_sum",) if log_cross_entropy else ())
         self.num_steps = 0
         self.num_epochs = 0
         self.num_batches_in_epoch = 0
@@ -56,7 +65,7 @@ class TrainingLogger:
         # Initialize flat on CPU, will migrate to device on first batch.
         self._train = {
             k: torch.tensor(0.0, dtype=torch.float64, device=self._device)
-            for k in self._TRAIN_KEYS
+            for k in ("samples", "tokens", *self._pred_keys)
         }
         self._eval.clear()
 
@@ -89,9 +98,6 @@ class TrainingLogger:
         """
         labels = batch["labels"]
         self._ensure_device(labels.device)
-
-        mask = labels.ne(-100)
-        num_pred = mask.sum()
         t = self._train
 
         if "num_sequences" in batch:
@@ -101,12 +107,29 @@ class TrainingLogger:
         else:
             t["samples"] += labels.shape[0]
             t["tokens"] += batch["attention_mask"].sum()
+        self._add_predictions(t, labels, output.logits, loss)
 
-        t["pred"] += num_pred
-        t["loss_sum"] += loss.detach() * num_pred
-        t["correct_sum"] += (
-            output.logits.detach().argmax(dim=-1).eq(labels).logical_and(mask).sum()
-        )
+    def _add_predictions(
+        self,
+        stats: Dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        logits: torch.Tensor,
+        loss: torch.Tensor,
+    ) -> None:
+        """Accumulate token-weighted loss, accuracy and (optionally) CE sums."""
+        mask = labels.ne(-100)
+        num_pred = mask.sum()
+        logits = logits.detach()
+        stats["pred"] += num_pred
+        stats["loss_sum"] += loss.detach() * num_pred
+        stats["correct_sum"] += logits.argmax(dim=-1).eq(labels).logical_and(mask).sum()
+        if self.log_cross_entropy:
+            stats["ce_sum"] += cross_entropy(
+                logits.float().flatten(0, -2),
+                labels.flatten(),
+                ignore_index=-100,
+                reduction="sum",
+            )
 
     def add_dataloader_stall(self, stall_ms: float) -> None:
         """Record one optimizer step's wait on `next(dataloader)`, in ms."""
@@ -122,23 +145,12 @@ class TrainingLogger:
         read from `output.loss`.
         """
         labels = batch["labels"]
-        device = labels.device
-        mask = labels.ne(-100)
-        num_pred = mask.sum()
-
         if split not in self._eval:
             self._eval[split] = {
-                "pred": torch.tensor(0.0, dtype=torch.float64, device=device),
-                "loss_sum": torch.tensor(0.0, dtype=torch.float64, device=device),
-                "correct_sum": torch.tensor(0.0, dtype=torch.float64, device=device),
+                k: torch.tensor(0.0, dtype=torch.float64, device=labels.device)
+                for k in self._pred_keys
             }
-
-        e = self._eval[split]
-        e["pred"] += num_pred
-        e["loss_sum"] += loss.detach() * num_pred
-        e["correct_sum"] += (
-            output.logits.detach().argmax(dim=-1).eq(labels).logical_and(mask).sum()
-        )
+        self._add_predictions(self._eval[split], labels, output.logits, loss)
 
     def log(
         self,
@@ -196,6 +208,7 @@ class TrainingLogger:
         steps_since_last_log = self.num_steps - self._last_log_step
 
         avg_loss = r["loss_sum"] / max(r["pred"], 1e-12)
+        ce_key = "ce_sum" if self.log_cross_entropy else "loss_sum"
         metrics: Dict[str, float] = {
             "train/epoch": self.num_steps / self.steps_per_epoch,
             "train/global_step": self.num_steps,
@@ -208,9 +221,10 @@ class TrainingLogger:
         # Skip these keys if no train batches were accumulated since the last flush.
         if r["pred"] > 0:
             metrics["train/loss"] = avg_loss
-            metrics["train/perplexity"] = math.exp(
-                min(avg_loss, 100)
-            )  # Prevent overflow
+            ce = r[ce_key] / r["pred"]
+            if self.log_cross_entropy:
+                metrics["train/cross_entropy"] = ce
+            metrics["train/perplexity"] = math.exp(min(ce, 100))  # Prevent overflow
             metrics["train/accuracy"] = r["correct_sum"] / max(r["pred"], 1e-12)
             metrics["train/grad_norm"] = float(grad_norm)
             metrics["train/steps_per_second"] = steps_since_last_log / elapsed_sec
@@ -233,9 +247,11 @@ class TrainingLogger:
             pred = r[f"{name}/pred"]
             if pred <= 0:
                 continue
-            eloss = r[f"{name}/loss_sum"] / pred
-            metrics[f"eval/{name}/loss"] = eloss
-            metrics[f"eval/{name}/perplexity"] = math.exp(min(eloss, 100))
+            metrics[f"eval/{name}/loss"] = r[f"{name}/loss_sum"] / pred
+            ce = r[f"{name}/{ce_key}"] / pred
+            if self.log_cross_entropy:
+                metrics[f"eval/{name}/cross_entropy"] = ce
+            metrics[f"eval/{name}/perplexity"] = math.exp(min(ce, 100))
             metrics[f"eval/{name}/accuracy"] = r[f"{name}/correct_sum"] / pred
 
         # Hand off tracking telemetry to accelerator (asynchronous where possible)
