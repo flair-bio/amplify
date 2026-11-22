@@ -55,6 +55,7 @@ Prepare sources   →  Plan the epoch  →  Batch, tokenize  →  Train loop  �
 - [Outputs](#outputs)
   - [Output disk layout](#output-disk-layout)
   - [Checkpoint saving, decoupling, and rotation](#checkpoint-saving-decoupling-and-rotation)
+  - [Averaging the final checkpoints](#averaging-the-final-checkpoints)
   - [Uploading a checkpoint to the Hugging Face Hub](#uploading-a-checkpoint-to-the-hugging-face-hub)
   - [W&B run resumption](#wb-run-resumption)
 - [Using a Trained Model with Hugging Face](#using-a-trained-model-with-hugging-face)
@@ -184,7 +185,7 @@ model = AutoModelForMaskedLM.from_pretrained(
 
 | File | Use |
 |---|---|
-| `configs/config.yaml` | Base config: every section, with the 350M model and the four Hub datasets. Runnable on its own |
+| `configs/config.yaml` | Base config: every section, with the final 350M-class recipe (~384M params) and the four Hub datasets. Runnable on its own |
 | `configs/120M.yaml` | Overlay for the 120M model (only the fields that differ) |
 | `configs/smoke_gpu.yaml` | Overlay for the quick smoke test to validate the setup |
 
@@ -216,11 +217,16 @@ most `max_tokens` tokens, and each GPU processes its own batch. Tokens per optim
 max_tokens × gradient_accumulation_steps × num_processes
 ```
 
-Both default configs give ~1M tokens per step on 4 GPUs (350M: 32768 × 8 × 4;
-120M: 65536 × 4 × 4). When changing the GPU count, adjust `gradient_accumulation_steps`
-to keep this constant. `trainer.max_steps` sets the run length (`num_epochs` is
-ignored when it is set), and `scheduler.num_training_steps` sets the LR decay length;
-past it, the LR stays at its final value.
+`config.yaml` gives 2M tokens per step on 8 GPUs (62500 × 4 × 8), and
+`trainer.gradient_accumulation_schedule: [[90000, 16]]` raises it to 8M for the LR
+decay (the last 10K of the 100K steps). The 120M overlay uses 65536 tokens per GPU
+(~1M tokens per step on 4 GPUs, 4M in the decay). When changing the GPU count,
+scale `gradient_accumulation_steps` and the schedule counts together to keep
+these constant. `trainer.max_steps` sets the run length (`num_epochs` is ignored
+when it is set), and `scheduler.num_training_steps` sets the LR schedule length;
+past it, the LR stays at its final value. The schedule steps and
+`trainer.hf_save_at_steps` must fit within `max_steps`, so set them (or `null`)
+when shortening a run.
 
 ### Common recipes
 
@@ -231,10 +237,10 @@ Append these overrides to the launch command above, or put them in an overlay YA
 | Train on one source only (e.g. UniRef) | `dataset.sources.bfd.sampling_fraction=0 dataset.sources.mgnify.sampling_fraction=0 dataset.sources.oas.sampling_fraction=0` |
 | Use local parquet instead of the Hub | `dataset.sources.uniref.type=parquet dataset.sources.uniref.path='/path/to/uniref_assembled/*.parquet'` |
 | Use the 120M model | Add `modules/pretrain/configs/120M.yaml` after `config.yaml` |
-| Short test run | `trainer.max_steps=500 trainer.eval_steps=100 trainer.save_steps=100` |
+| Short test run | `trainer.max_steps=500 trainer.eval_steps=100 trainer.save_steps=100 trainer.gradient_accumulation_schedule=null trainer.hf_save_at_steps=null` |
 | Debug without `torch.compile` | `trainer.compile=false` |
 | Log to W&B online | `wandb.enabled=true wandb.mode=online wandb.run_name=my_run` |
-| Fit in less GPU memory, same tokens per step | `dataloader.max_tokens=16384 trainer.gradient_accumulation_steps=16` (default 32768 × 8) |
+| Fit in less GPU memory, same tokens per step | `dataloader.max_tokens=31250 trainer.gradient_accumulation_steps=8 trainer.gradient_accumulation_schedule=[[90000,32]]` (default 62500 × 4, 16 in the decay) |
 
 ### Config schema
 
@@ -253,6 +259,7 @@ PretrainConfig
 ├── dataloader: DataLoaderConfig
 ├── trainer:    TrainerConfig
 ├── ddp:        DDPConfig
+├── loss:       LossConfig
 └── wandb:      WandbConfig
 ```
 
@@ -306,14 +313,16 @@ modules/pretrain/
 │
 ├── configs/
 │   ├── config.yaml                  ← default config, every section explicit; this
-│   │                                  is the 350M config (standalone, runnable as-is)
-│   ├── 120M.yaml                    ← 120M-specific overlay on config.yaml (118.3M params), 4x A100
+│   │                                  is the final 350M-class recipe (standalone, runnable as-is)
+│   ├── 120M.yaml                    ← 120M-specific overlay on config.yaml (128.5M params), 4x A100
 │   └── smoke_gpu.yaml               ← CUDA smoke overlay on config.yaml (small model, OAS from the Hub)
 │
 └── src/
     ├── config.py                    ← PretrainConfig: top-level Pydantic schema composing
     │                                  every component config into one object
     ├── run_pretrain.py              ← CLI entry point: builds components, wires the Trainer
+    ├── run_average_checkpoints.py   ← CLI: uniform average of HF checkpoints (post-hoc)
+    ├── loss.py                      ← LossConfig + optional focal loss
     │
     ├── dataset/
     │   ├── dataset.py               ← DatasetConfig, source preparation, cluster indexing,
@@ -357,7 +366,7 @@ with probability 1/*n* per epoch. The curriculum threshold ramps from `start_sco
 |---|---|---|
 | `sources` | Hub defaults for `bfd`/`mgnify`/`uniref`/`oas` | Mapping of name → data source (see below); at least one required. Overridable per source via CLI dotlist without editing `config.yaml` — remove a source (`sampling_fraction=0`), switch its `type` (`hub`↔`parquet`), or add a new source name entirely (see [Real pretraining runs](#real-pretraining-runs)). An empty/all-zero-fraction `sources` raises a clear `ValueError` at startup. |
 | `score_column` | `red_score` | Column holding quality scores (`RED` from the data pipeline) |
-| `score_curriculum` | `type: linear, start_score: 0.0, end_score: 0.0, ramp_epochs: 1` | `type` (`linear`/`cosine`/`exponential`), `start_score`, `end_score`, `ramp_epochs` |
+| `score_curriculum` | `type: linear, start_score: 0.01, end_score: 0.01, ramp_epochs: 1` | `type` (`linear`/`cosine`/`exponential`), `start_score`, `end_score`, `ramp_epochs` |
 | `val_min_score` | `0.0` | Minimum score for a row to be eligible for validation |
 | `val_holdout_modulus` | `200` | A cluster is held out for validation when `hash(cluster) % modulus == 0` |
 | `seed` | `25` | Base seed; combined with the epoch number to vary sampling |
@@ -419,7 +428,7 @@ dataset.sources.custom.cluster_column=cluster_rep_at_30
 
 | Field | Default | Description |
 |---|---|---|
-| `max_tokens` | `32768` | Token budget per batch (mutually exclusive with `batch_size`) |
+| `max_tokens` | `62500` | Token budget per batch (mutually exclusive with `batch_size`) |
 | `batch_size` | `null` | Sequences per batch |
 | `dataloader_num_workers` | `8` | PyTorch worker processes |
 | `persistent_workers` | `true` | Keep workers alive between epochs |
@@ -444,7 +453,7 @@ dataset.sources.custom.cluster_column=cluster_rep_at_30
 
 | Type | Behavior |
 |---|---|
-| `fixed` | Always `mlm_probability` (default 0.15) |
+| `fixed` | Always `mlm_probability` (default 0.10) |
 | `beta` | Sampled per sequence from a Beta distribution centred on `mlm_probability`, shaped by `masking_k` |
 | `cosine` | Cosine-shaped schedule; averages well below `mlm_probability` |
 
@@ -453,7 +462,7 @@ dataset.sources.custom.cluster_column=cluster_rep_at_30
 | Field | Default | Description |
 |---|---|---|
 | `mlm` | `true` | Enable masked language modeling |
-| `mlm_probability` | `0.15` | Base masking probability |
+| `mlm_probability` | `0.10` | Base masking probability (training and validation) |
 | `masking_type` | `fixed` | `fixed`, `beta`, or `cosine` |
 | `masking_k` | `10` | Concentration parameter for the beta schedule |
 | `max_length` | `512` | Truncation length |
@@ -469,7 +478,7 @@ dataset.sources.custom.cluster_column=cluster_rep_at_30
 
 ## Model & Tokenizer
 
-**Purpose:** The AMPLIFY encoder — a BERT-style bidirectional transformer with modern components: **RMSNorm**, **rotary position embeddings (RoPE)**, and a **SwiGLU** feed-forward block. It is a standard HF `PreTrainedModel`, split across `configuration_amplify.py` and `modeling_amplify.py` following HF conventions, with MLM, sequence-classification, and token-classification heads.
+**Purpose:** The AMPLIFY encoder — a BERT-style bidirectional transformer with modern components: **RMSNorm**, **rotary position embeddings (RoPE)**, and a **SwiGLU** feed-forward block. `config.yaml` enables the architecture changes retained from the pretraining ablations: zero-centered RMSNorm, QK norm, gated attention, a two-layer MLM head and Gaussian init (each off by default in the schema, so older checkpoints load unchanged). It is a standard HF `PreTrainedModel`, split across `configuration_amplify.py` and `modeling_amplify.py` following HF conventions, with MLM, sequence-classification, and token-classification heads.
 
 The tokenizer is **character-level**: one token per amino acid, plus special tokens. Ambiguous residues (`X`, `B`, `O`, `U`, `Z`, `J`) are removed by default.
 
@@ -479,21 +488,28 @@ The tokenizer is **character-level**: one token per amino acid, plus special tok
 |---|---|---|
 | `hidden_size` | `960` | Hidden dimension |
 | `num_hidden_layers` | `32` | Encoder blocks |
-| `num_attention_heads` | `15` | Attention heads |
+| `num_attention_heads` | `10` | Attention heads (`head_dim` 96) |
 | `intermediate_size` | `2560` | SwiGLU inner dimension |
 | `max_position_embeddings` | `2048` | Maximum context length supported by RoPE |
 | `rope_theta` | `10000.0` | RoPE base frequency |
 | `vocab_size` | `32` | Must match the tokenizer vocabulary |
 | `norm_eps` | `1e-5` | RMSNorm epsilon |
-| `embedding_init_range` / `decoder_init_range` | `0.02` | Uniform init bounds |
+| `norm_type` | `ZeroCenteredRMSNorm` | `RMSNorm` (weight init 1) or `ZeroCenteredRMSNorm` (scale `1 + weight`, weight init 0, so weight decay pulls towards identity) |
+| `qk_norm` | `true` | RMSNorm on queries and keys per head, before RoPE |
+| `attention_gate` | `true` | Elementwise sigmoid gate on the attention output, computed from the block input |
+| `nonlinear_mlm_head` | `true` | Dense–GELU–norm transform before the MLM decoder (BERT/ESM-2 style) |
+| `gaussian_init` | `true` | Init weights from N(0, init_range) instead of uniform |
+| `embedding_init_range` / `decoder_init_range` | `0.02` | Init bound (uniform) or std (Gaussian) |
 
 Model sizes of the shipped configs:
 
 | Config | `hidden_size` | `num_hidden_layers` | `num_attention_heads` | `intermediate_size` | Parameters |
 |---|---|---|---|---|---|
-| `smoke_gpu.yaml` | 256 | 4 | 8 | 512 | 2.6M |
-| `120M.yaml` | 640 | 24 | 10 | 1712 | 118.3M |
-| `config.yaml` (350M) | 960 | 32 | 15 | 2560 | 354.0M |
+| `smoke_gpu.yaml` | 256 | 4 | 8 | 512 | 3.0M |
+| `120M.yaml` | 640 | 24 | 10 | 1712 | 128.5M |
+| `config.yaml` (350M-class) | 960 | 32 | 10 | 2560 | 384.4M |
+
+The attention gate adds ~30M parameters to the 350M-class model (354.0M without it); the name is kept for continuity.
 
 **Key config fields (`tokenizer`):** `vocab` (ordered list; index = token ID), `vocab_size`, the special tokens (`pad`/`unk`/`mask`/`bos`/`eos`), `ambiguous_tokens`, and `remove_ambiguous`.
 
@@ -512,7 +528,7 @@ The optimizer splits parameters into **decay** and **no-decay** groups: 1-D para
 | Field | Default | Description |
 |---|---|---|
 | `type` | `AdamW` | One of `AdamW`, `Adam`, `Adafactor`, `Lamb` |
-| `lr` | `1e-3` | Peak learning rate |
+| `lr` | `5e-4` | Peak learning rate |
 | `betas` | `[0.9, 0.95]` | Adam beta parameters |
 | `eps` | `1e-8` | Numerical stability epsilon (Adafactor expects a tuple) |
 | `weight_decay` | `0.01` | Applied to the decay group only |
@@ -522,10 +538,12 @@ The optimizer splits parameters into **decay** and **no-decay** groups: 1-D para
 
 | Field | Default | Description |
 |---|---|---|
-| `type` (alias of `lr_scheduler_type`) | `cosine_with_min_lr` | Any HF `get_scheduler` type |
-| `num_warmup_steps` | `1000` | Linear warmup steps |
-| `num_training_steps` | `90000` | Total steps the schedule decays over |
-| `kwargs` (alias of `scheduler_specific_kwargs`) | `{min_lr_rate: 0.1}` | Scheduler-specific arguments |
+| `type` (alias of `lr_scheduler_type`) | `warmup_stable_decay` | Any HF `get_scheduler` type |
+| `num_warmup_steps` | `5000` | Warmup steps |
+| `num_training_steps` | `100000` | Total length of the schedule |
+| `kwargs` (alias of `scheduler_specific_kwargs`) | `{num_decay_steps: 10000, warmup_type: linear, decay_type: linear, min_lr_ratio: 0.1}` | Scheduler-specific arguments |
+
+The default warmup-stable-decay (WSD) schedule warms up to the peak LR, holds it, then decays linearly to 10% over the last `num_decay_steps`. The decay is where `gradient_accumulation_schedule` raises the batch and `hf_save_at_steps` saves the exports that are averaged into the final model (see [Averaging the final checkpoints](#averaging-the-final-checkpoints)). `kwargs` merge key by key across config files and CLI overrides, and an overlay cannot remove a key, so switching `type` to a scheduler with other arguments (e.g. `cosine_with_min_lr`, which takes only `min_lr_rate`) means editing this block in `config.yaml`.
 
 `SchedulerConfig` sets `populate_by_name=True`, so either the short YAML alias or the full field name is accepted.
 
@@ -550,22 +568,29 @@ The optimizer splits parameters into **decay** and **no-decay** groups: 1-D para
 | `num_epochs` | `1` | Number of epochs (ignored when `max_steps` is set) |
 | `max_steps` | `100000` | Stop after N optimizer steps; overrides `num_epochs` |
 | `max_grad_norm` | `1.0` | Gradient clipping norm |
-| `gradient_accumulation_steps` | `8` | Micro-batches per optimizer step; must match the `Accelerator` |
-| `gradient_accumulation_schedule` | `null` | `{step: count}` accumulation overrides applied from each step on (e.g. a larger batch for the LR decay) |
+| `gradient_accumulation_steps` | `4` | Micro-batches per optimizer step; must match the `Accelerator` |
+| `gradient_accumulation_schedule` | `[[90000, 16]]` | `[step, count]` pairs: accumulation count applied from each step on (here 4x batch for the LR decay). A list, so an overlay or CLI override replaces it |
 | `output_dir` | `runs/350M` | Root for all run artifacts |
 | `resume_from_checkpoint` | `null` | Checkpoint directory to resume from |
 | `logging_steps` | `100` | Log metrics every N optimizer steps |
-| `eval_steps` | `500` | Run validation every N steps |
-| `save_steps` | `500` | Save resumable state every N steps |
-| `hf_save_steps` | `2000` | Save a portable HF checkpoint every N steps |
-| `hf_save_at_steps` | `null` | Extra steps at which to save an HF checkpoint (e.g. the end of the decay, for averaging); combined with `hf_save_steps` |
-| `save_total_limit` | `null` | Max resumable checkpoints kept; oldest deleted beyond this. `null` = unlimited |
-| `hf_save_total_limit` | `null` | Max HF checkpoints kept; oldest deleted beyond this. `null` = unlimited |
+| `eval_steps` | `1000` | Run validation every N steps |
+| `save_steps` | `10000` | Save resumable state every N steps |
+| `hf_save_steps` | `10000` | Save a portable HF checkpoint every N steps |
+| `hf_save_at_steps` | `[98000, 98500, 99000, 99500, 100000]` | Extra steps at which to save an HF checkpoint (here the end of the decay, for averaging); combined with `hf_save_steps` |
+| `save_total_limit` | `3` | Max resumable checkpoints kept; oldest deleted beyond this. `null` = unlimited |
+| `hf_save_total_limit` | `5` | Max HF checkpoints kept; oldest deleted beyond this (here exactly the five exports to average). `null` = unlimited |
 | `tf32` | `true` | Enable TF32 matmuls |
 | `expandable_segments` | `true` | Set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to reduce fragmentation with variable batch shapes |
 | `deterministic` | `false` | `torch.use_deterministic_algorithms`; for debugging only (slow) |
 | `dist_timeout_minutes` | `90` | Distributed collective timeout; raise for first-time cache builds or staging |
 | `compile*` | `true` | `torch.compile` settings — see [torch.compile](#torchcompile) |
+
+**Key config fields (`loss`):** the MLM training objective.
+
+| Field | Default | Description |
+|---|---|---|
+| `type` | `focal` | `cross_entropy` (the model's built-in loss, schema default) or `focal` |
+| `gamma` | `0.5` | Focal focusing exponent; `0` recovers cross-entropy |
 
 **Key config fields (`ddp`):** only used for multi-GPU runs.
 
@@ -608,7 +633,7 @@ the steps below avoid wasting GPU time and network I/O.
 
 ### Real pretraining runs
 
-Once the smoke test passes, launch a full-size run. `configs/config.yaml` **is** the 350M config (standalone, runnable as-is, and ships with working Hugging Face Hub defaults for `bfd`/`mgnify`/`uniref`/`oas`); for 120M, merge `120M.yaml` on top (see [Running and Configuring](#running-and-configuring) for CLI overrides, resuming, and merging configs). To point at local Parquet data instead of the Hub for a given cluster, override `dataset.sources.*` via CLI dotlist (see [Dataset](#dataset) for the full override options — removing a source, switching its type, or adding a new one):
+Once the smoke test passes, launch a full-size run. `configs/config.yaml` **is** the final 350M-class recipe (standalone, runnable as-is, and ships with working Hugging Face Hub defaults for `bfd`/`mgnify`/`uniref`/`oas`); for 120M, merge `120M.yaml` on top (see [Running and Configuring](#running-and-configuring) for CLI overrides, resuming, and merging configs). To point at local Parquet data instead of the Hub for a given cluster, override `dataset.sources.*` via CLI dotlist (see [Dataset](#dataset) for the full override options — removing a source, switching its type, or adding a new one):
 
 ```bash
 uv run accelerate launch --multi_gpu --num_processes 4 --mixed_precision bf16 \
@@ -617,16 +642,10 @@ uv run accelerate launch --multi_gpu --num_processes 4 --mixed_precision bf16 \
     modules/pretrain/configs/120M.yaml \
     dataset.sources.bfd.type=parquet \
     dataset.sources.bfd.path=/path/to/bfd_assembled/*.parquet \
-    dataset.sources.bfd.cluster_column=cluster_rep_at_30 \
-    dataset.sources.bfd.sampling_fraction=1.0 \
     dataset.sources.mgnify.type=parquet \
     dataset.sources.mgnify.path=/path/to/mgnify_assembled/*.parquet \
-    dataset.sources.mgnify.cluster_column=cluster_rep_at_30 \
-    dataset.sources.mgnify.sampling_fraction=1.0 \
     dataset.sources.uniref.type=parquet \
-    dataset.sources.uniref.path=/path/to/uniref_assembled/*.parquet \
-    dataset.sources.uniref.cluster_column=cluster_rep_at_30 \
-    dataset.sources.uniref.sampling_fraction=1.0
+    dataset.sources.uniref.path=/path/to/uniref_assembled/*.parquet
 ```
 
 Note: On multi-GPU, the first run against a new/uncached dataset can take longer than PyTorch's
@@ -641,13 +660,13 @@ A minimal single-node, multi-GPU example on how to submit the job with `sbatch` 
 #SBATCH --job-name=<your_job_name>
 #SBATCH --output=logs/%x_%j_output.txt
 #SBATCH --error=logs/%x_%j_error.txt
-#SBATCH --time=0-03:00
-#SBATCH --partition=short-unkillable
+#SBATCH --time=3-00:00
+#SBATCH --partition=<your_partition>
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:a100l:4
-#SBATCH --cpus-per-task=24
-#SBATCH --mem=128G
+#SBATCH --gres=gpu:8
+#SBATCH --cpus-per-task=96
+#SBATCH --mem=0
 
 set -euo pipefail
 cd <path_to_flair-plm>
@@ -657,7 +676,7 @@ source <path_to_venv>/bin/activate
 
 # accelerate starts one process per GPU inside this single Slurm task, so split
 # the CPUs between them instead of letting each use all of them.
-NUM_PROCESSES=4
+NUM_PROCESSES=8
 export OMP_NUM_THREADS=$(( SLURM_CPUS_PER_TASK / NUM_PROCESSES ))
 export TOKENIZERS_PARALLELISM=false
 
@@ -665,12 +684,19 @@ export TOKENIZERS_PARALLELISM=false
 export HF_HOME=<path_to_shared_hf_cache>
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
 
-# Launch pretraining (merging base config and 120M-specific config).
+# Launch pretraining with the default recipe (add configs/120M.yaml after
+# config.yaml for the 120M model).
+OUTPUT_DIR=runs/350M
 accelerate launch --multi_gpu --num_processes "$NUM_PROCESSES" --mixed_precision bf16 \
     modules/pretrain/src/run_pretrain.py \
     modules/pretrain/configs/config.yaml \
-    modules/pretrain/configs/120M.yaml \
+    trainer.output_dir="$OUTPUT_DIR" \
     "$@"
+
+# Average the decay-phase exports (trainer.hf_save_at_steps) into the final model.
+python -m modules.pretrain.src.run_average_checkpoints \
+    --checkpoints "$OUTPUT_DIR"/hf_checkpoints/checkpoint_{98000,98500,99000,99500,100000} \
+    --output-dir "$OUTPUT_DIR"/merged_polyak
 ```
 
 Create `logs/` before submitting (`mkdir -p logs`): Slurm opens the output files before the script runs.
@@ -678,7 +704,7 @@ Create `logs/` before submitting (`mkdir -p logs`): Slurm opens the output files
 To submit the job after saving the script above as a shell script (additionally forwarding any config overrides as extra args if needed):
 
 ```bash
-sbatch <your_script>.sh trainer.max_steps=2000
+sbatch <your_script>.sh wandb.run_name=my_run
 ```
 
 ### Building the dataset cache first (CPU-only)
@@ -848,7 +874,20 @@ The two checkpoint types fire strictly on their own independent schedules and ne
 - **Resumable state** (`checkpoint_epoch_*_step_*`) saves every `trainer.save_steps` optimizer steps.
 - **HF checkpoint** (`hf_checkpoints/checkpoint_<S>/`) saves every `trainer.hf_save_steps` optimizer steps.
 - Neither is saved automatically at the end of every epoch. Instead, both are guaranteed to be saved exactly once at the very end of training (after the last epoch/`max_steps`), unless a step-based save already landed on that exact final step.
-- Set `trainer.save_total_limit` / `trainer.hf_save_total_limit` (both `None`/unlimited by default) to cap how many checkpoints of each type are kept on disk; the oldest (by step) are deleted automatically as new ones are saved. This keeps storage bounded on long runs.
+- Set `trainer.save_total_limit` / `trainer.hf_save_total_limit` (`3` / `5` in `config.yaml`, unlimited in the schema) to cap how many checkpoints of each type are kept on disk; the oldest (by step) are deleted automatically as new ones are saved. This keeps storage bounded on long runs.
+- `trainer.hf_save_at_steps` adds HF exports at specific steps (e.g. the end of the LR decay) on top of `hf_save_steps`. With `hf_save_total_limit`, make sure the exports you want to average are the newest ones kept.
+
+### Averaging the final checkpoints
+
+Uniformly averaging the last few HF exports of the decay phase (Polyak / LAWA averaging) usually gives a slightly better model than the last export alone. `config.yaml` saves the five exports below (`trainer.hf_save_at_steps`) and is the recipe of the final model. The averaging runs on CPU, one tensor at a time:
+
+```bash
+python -m modules.pretrain.src.run_average_checkpoints \
+    --checkpoints runs/350M/hf_checkpoints/checkpoint_{98000,98500,99000,99500,100000} \
+    --output-dir runs/350M/merged_polyak
+```
+
+The inputs must be single-file HF exports of the same run (identical `config.json` and tensor shapes). The output is a regular HF checkpoint (config, tokenizer and remote code copied from the last input) plus a `merge_manifest.json` listing the inputs. It is written atomically and the command refuses to overwrite an existing `--output-dir`.
 
 ### Uploading a checkpoint to the HuggingFace Hub
 

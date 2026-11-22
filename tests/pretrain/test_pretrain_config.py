@@ -52,7 +52,15 @@ def test_pretrain_config_parsed_from_yaml():
     assert isinstance(config.optimizer, OptimizerConfig)
     assert isinstance(config.scheduler, SchedulerConfig)
     assert config.optimizer.type == "AdamW"
-    assert config.scheduler.lr_scheduler_type == "cosine_with_min_lr"
+    assert config.scheduler.lr_scheduler_type == "warmup_stable_decay"
+
+
+@pytest.mark.parametrize("overlay", ["120M.yaml", "smoke_gpu.yaml"])
+def test_overlays_parse_on_top_of_config(overlay):
+    """Each shipped overlay merges with config.yaml into a valid config."""
+    config = load_and_parse([MAIN_CONFIG, CONFIGS_DIR / overlay], PretrainConfig)
+
+    assert config.trainer.max_steps == config.scheduler.num_training_steps
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +75,7 @@ def test_pretrain_config_accepts_plain_dict_inputs(valid_config_dict):
     assert isinstance(config.model, AMPLIFYModelConfig)
     assert isinstance(config.tokenizer, TokenizerConfig)
     assert config.optimizer.type == "AdamW"
-    assert config.scheduler.lr_scheduler_type == "cosine_with_min_lr"
+    assert config.scheduler.lr_scheduler_type == "warmup_stable_decay"
 
 
 # ---------------------------------------------------------------------------

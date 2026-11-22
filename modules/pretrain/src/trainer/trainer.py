@@ -154,14 +154,18 @@ class TrainerConfig(BaseModel):
             "validates this on init."
         ),
     )
-    gradient_accumulation_schedule: dict[PositiveInt, PositiveInt] | None = Field(
+    gradient_accumulation_schedule: (
+        list[tuple[PositiveInt, PositiveInt]] | None
+    ) = Field(
         None,
         description=(
-            "Optional `{optimizer_step: accumulation_steps}` overrides, e.g. a "
+            "Optional `[optimizer_step, accumulation_steps]` pairs, e.g. a "
             "larger batch for the LR decay phase. Each count applies once "
-            "`global_step` reaches its key; `gradient_accumulation_steps` "
-            "applies before the first key. Changes take effect between "
-            "optimizer steps, so the micro-batch size and memory are unchanged."
+            "`global_step` reaches its step; `gradient_accumulation_steps` "
+            "applies before the first one. Changes take effect between "
+            "optimizer steps, so the micro-batch size and memory are unchanged. "
+            "A list (not a dict) so config overlays replace it instead of "
+            "merging keys."
         ),
     )
     output_dir: Path = Field(
@@ -272,10 +276,14 @@ class TrainerConfig(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _steps_within_max_steps(self) -> "TrainerConfig":
+    def _validate_step_fields(self) -> "TrainerConfig":
+        schedule = sorted(s for s, _ in self.gradient_accumulation_schedule or ())
+        if len(set(schedule)) != len(schedule):
+            raise ValueError(
+                f"gradient_accumulation_schedule has duplicate steps: {schedule}"
+            )
         if not self.max_steps:
             return self
-        schedule = sorted(self.gradient_accumulation_schedule or {})
         if any(step >= self.max_steps for step in schedule):
             raise ValueError(
                 "gradient_accumulation_schedule steps must be < max_steps "
@@ -292,7 +300,7 @@ class TrainerConfig(BaseModel):
     def gradient_accumulation_at(self, step: int) -> int:
         """Accumulation count for the optimizer step following `step`."""
         steps = self.gradient_accumulation_steps
-        for start, count in sorted((self.gradient_accumulation_schedule or {}).items()):
+        for start, count in sorted(self.gradient_accumulation_schedule or ()):
             if step < start:
                 break
             steps = count

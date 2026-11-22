@@ -208,7 +208,7 @@ class TestGradientAccumulationSchedule:
     def test_lookup_uses_last_reached_key(self):
         config = TrainerConfig(
             gradient_accumulation_steps=1,
-            gradient_accumulation_schedule={10: 4, 5: 2},
+            gradient_accumulation_schedule=[(10, 4), (5, 2)],
         )
         counts = [config.gradient_accumulation_at(s) for s in (0, 4, 5, 9, 10, 99)]
         assert counts == [1, 1, 2, 2, 4, 4]
@@ -217,14 +217,18 @@ class TestGradientAccumulationSchedule:
         config = TrainerConfig(gradient_accumulation_steps=3)
         assert config.gradient_accumulation_at(1000) == 3
 
-    @pytest.mark.parametrize("key,ok", [(9, True), (10, False)])
-    def test_keys_must_be_below_max_steps(self, key, ok):
-        kwargs = dict(max_steps=10, gradient_accumulation_schedule={key: 2})
+    @pytest.mark.parametrize("step,ok", [(9, True), (10, False)])
+    def test_steps_must_be_below_max_steps(self, step, ok):
+        kwargs = dict(max_steps=10, gradient_accumulation_schedule=[(step, 2)])
         if ok:
             TrainerConfig(**kwargs)
         else:
             with pytest.raises(ValueError, match="max_steps"):
                 TrainerConfig(**kwargs)
+
+    def test_rejects_duplicate_steps(self):
+        with pytest.raises(ValueError, match="duplicate"):
+            TrainerConfig(gradient_accumulation_schedule=[(5, 2), (5, 4)])
 
     def test_init_applies_schedule_after_resume(self, accelerator, tmp_path):
         accelerator.step = 7
@@ -242,7 +246,7 @@ class TestGradientAccumulationSchedule:
                 config=TrainerConfig(
                     output_dir=tmp_path / "ckpt",
                     resume_from_checkpoint=tmp_path,
-                    gradient_accumulation_schedule={5: 4},
+                    gradient_accumulation_schedule=[(5, 4)],
                 ),
             )
         assert trainer.gradient_accumulation_steps == 4
@@ -260,7 +264,7 @@ class TestGradientAccumulationSchedule:
                 train_dataloader_provider=lambda epoch: [],
                 config=TrainerConfig(
                     output_dir=tmp_path / "ckpt",
-                    gradient_accumulation_schedule={5: 4},
+                    gradient_accumulation_schedule=[(5, 4)],
                 ),
             )
 
@@ -303,7 +307,7 @@ class TestGradientAccumulationSchedule:
                 output_dir=output_dir,
                 logging_steps=1,
                 gradient_accumulation_steps=2,
-                gradient_accumulation_schedule={3: 4},
+                gradient_accumulation_schedule=[(3, 4)],
                 tf32=False,
             ),
             metric_logger=TrainingLogger(),
