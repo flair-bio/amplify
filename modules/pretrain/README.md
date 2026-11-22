@@ -185,7 +185,7 @@ model = AutoModelForMaskedLM.from_pretrained(
 
 | File | Use |
 |---|---|
-| `configs/config.yaml` | Base config: every section, with the final 350M-class recipe (~384M params) and the four Hub datasets. Runnable on its own |
+| `configs/config.yaml` | Base config: every section, with the 350M-class recipe (~384M params) and the four Hub datasets. Runnable on its own |
 | `configs/120M.yaml` | Overlay for the 120M model (only the fields that differ) |
 | `configs/smoke_gpu.yaml` | Overlay for the quick smoke test to validate the setup |
 
@@ -313,7 +313,7 @@ modules/pretrain/
 │
 ├── configs/
 │   ├── config.yaml                  ← default config, every section explicit; this
-│   │                                  is the final 350M-class recipe (standalone, runnable as-is)
+│   │                                  is the 350M-class recipe (standalone, runnable as-is)
 │   ├── 120M.yaml                    ← 120M-specific overlay on config.yaml (128.5M params), 4x A100
 │   └── smoke_gpu.yaml               ← CUDA smoke overlay on config.yaml (small model, OAS from the Hub)
 │
@@ -478,7 +478,7 @@ dataset.sources.custom.cluster_column=cluster_rep_at_30
 
 ## Model & Tokenizer
 
-**Purpose:** The AMPLIFY encoder — a BERT-style bidirectional transformer with modern components: **RMSNorm**, **rotary position embeddings (RoPE)**, and a **SwiGLU** feed-forward block. `config.yaml` enables the architecture changes retained from the pretraining ablations: zero-centered RMSNorm, QK norm, gated attention, a two-layer MLM head and Gaussian init (each off by default in the schema, so older checkpoints load unchanged). It is a standard HF `PreTrainedModel`, split across `configuration_amplify.py` and `modeling_amplify.py` following HF conventions, with MLM, sequence-classification, and token-classification heads.
+**Purpose:** The AMPLIFY encoder — a BERT-style bidirectional transformer with modern components: **RMSNorm**, **rotary position embeddings (RoPE)**, and a **SwiGLU** feed-forward block. `config.yaml` also enables zero-centered RMSNorm, QK norm, gated attention, a two-layer MLM head and Gaussian init (each off by default in the schema, so older checkpoints load unchanged). It is a standard HF `PreTrainedModel`, split across `configuration_amplify.py` and `modeling_amplify.py` following HF conventions, with MLM, sequence-classification, and token-classification heads.
 
 The tokenizer is **character-level**: one token per amino acid, plus special tokens. Ambiguous residues (`X`, `B`, `O`, `U`, `Z`, `J`) are removed by default.
 
@@ -497,7 +497,7 @@ The tokenizer is **character-level**: one token per amino acid, plus special tok
 | `norm_type` | `ZeroCenteredRMSNorm` | `RMSNorm` (weight init 1) or `ZeroCenteredRMSNorm` (scale `1 + weight`, weight init 0, so weight decay pulls towards identity) |
 | `qk_norm` | `true` | RMSNorm on queries and keys per head, before RoPE |
 | `attention_gate` | `true` | Elementwise sigmoid gate on the attention output, computed from the block input |
-| `nonlinear_mlm_head` | `true` | Dense–GELU–norm transform before the MLM decoder (BERT/ESM-2 style) |
+| `nonlinear_mlm_head` | `true` | Dense–GELU–norm transform before the MLM decoder |
 | `gaussian_init` | `true` | Init weights from N(0, init_range) instead of uniform |
 | `embedding_init_range` / `decoder_init_range` | `0.02` | Init bound (uniform) or std (Gaussian) |
 
@@ -635,7 +635,7 @@ the steps below avoid wasting GPU time and network I/O.
 
 ### Real pretraining runs
 
-Once the smoke test passes, launch a full-size run. `configs/config.yaml` **is** the final 350M-class recipe (standalone, runnable as-is, and ships with working Hugging Face Hub defaults for `bfd`/`mgnify`/`uniref`/`oas`); for 120M, merge `120M.yaml` on top (see [Running and Configuring](#running-and-configuring) for CLI overrides, resuming, and merging configs). To point at local Parquet data instead of the Hub for a given cluster, override `dataset.sources.*` via CLI dotlist (see [Dataset](#dataset) for the full override options — removing a source, switching its type, or adding a new one):
+Once the smoke test passes, launch a full-size run. `configs/config.yaml` **is** the 350M-class recipe (standalone, runnable as-is, and ships with working Hugging Face Hub defaults for `bfd`/`mgnify`/`uniref`/`oas`); for 120M, merge `120M.yaml` on top (see [Running and Configuring](#running-and-configuring) for CLI overrides, resuming, and merging configs). To point at local Parquet data instead of the Hub for a given cluster, override `dataset.sources.*` via CLI dotlist (see [Dataset](#dataset) for the full override options — removing a source, switching its type, or adding a new one):
 
 ```bash
 uv run accelerate launch --multi_gpu --num_processes 4 --mixed_precision bf16 \
@@ -881,7 +881,7 @@ The two checkpoint types fire strictly on their own independent schedules and ne
 
 ### Averaging the final checkpoints
 
-Uniformly averaging the last few HF exports of the decay phase (Polyak / LAWA averaging) usually gives a slightly better model than the last export alone. `config.yaml` saves the five exports below (`trainer.hf_save_at_steps`) and is the recipe of the final model. The averaging runs on CPU, one tensor at a time:
+Uniformly averaging the last few HF exports of the decay phase (Polyak / LAWA averaging) usually gives a slightly better model than the last export alone. `config.yaml` saves the five exports below (`trainer.hf_save_at_steps`). The averaging runs on CPU, one tensor at a time:
 
 ```bash
 python -m modules.pretrain.src.run_average_checkpoints \

@@ -17,7 +17,7 @@ model:
   rope_theta: 10000.0
   num_labels: 2
 
-# The final recipe scaled down: decay from step 120, 4x batch, averaged exports.
+# The config.yaml recipe scaled down: decay from step 120, 4x batch, averaged exports.
 scheduler:
   num_warmup_steps: 10
   num_training_steps: 150

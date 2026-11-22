@@ -54,7 +54,7 @@ class AMPLIFYModelConfig(BaseModel):
         attention_gate: Gate the attention output elementwise with a sigmoid of
             the block input, before the output projection.
         nonlinear_mlm_head: Use a dense-GELU-norm transform before the MLM
-            decoder (BERT/ESM-2 style) instead of a single linear layer.
+            decoder instead of a single linear layer.
         gaussian_init: Initialize linear and embedding weights from a zero-mean
             Gaussian instead of a uniform distribution.
         vocab_size: Number of tokens in the amino-acid vocabulary.
@@ -125,8 +125,7 @@ class RMSNorm(nn.Module):
 class ZeroCenteredRMSNorm(RMSNorm):
     """RMSNorm whose gain is stored as an offset from one: ``rms_norm(x) * (1 + weight)``.
 
-    Weight decay then pulls the gain toward identity instead of zero, as in
-    Gemma, Megatron-Core (``layernorm_zero_centered_gamma``) and Qwen3-Next.
+    Weight decay then pulls the gain toward identity instead of zero.
     ``apply_weight_decay`` tells the optimizer to decay this 1-D gain. Computed
     in FP32 because in bf16 ``1 + weight`` rounds away small offsets.
     """
@@ -251,11 +250,11 @@ class Attention(nn.Module):
     ``hidden_states`` with the attention residual already added.
 
     With ``qk_norm``, queries and keys are normalized over ``head_dim`` with a
-    gain shared across heads, before RoPE (as in Qwen3 and Gemma 3).
+    gain shared across heads, before RoPE, which bounds the attention logits.
 
     With ``attention_gate``, the attention output is multiplied elementwise by
     ``sigmoid(gate_proj(normed))`` before ``o_proj`` (Qiu et al. 2025, "Gated
-    Attention for Large Language Models"; as in Qwen3-Next).
+    Attention for Large Language Models").
     """
 
     def __init__(self, config: AMPLIFYConfig) -> None:
@@ -745,7 +744,7 @@ class AMPLIFYForMaskedLM(AMPLIFYPreTrainedModel):
         super().__init__(config)
         self.amplify = AMPLIFYModel(config)
         if config.nonlinear_mlm_head:
-            # BERT / ESM-2 style transform; keys `lm_head.{0,2,3}`.
+            # Dense-GELU-norm transform, then the decoder; keys `lm_head.{0,2,3}`.
             self.lm_head = nn.Sequential(
                 nn.Linear(config.hidden_size, config.hidden_size),
                 nn.GELU(),

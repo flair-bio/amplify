@@ -1,4 +1,4 @@
-# Default pretraining config: the final AMPLIFY 350M-class recipe (~384M params
+# Default pretraining config: the AMPLIFY 350M-class recipe (~384M params
 # with the attention gate and two-layer MLM head). Batch sizes assume 8 GPUs:
 # 62,500 tokens x 4 micro-batches x 8 = 2M tokens per step, 8M in the decay.
 

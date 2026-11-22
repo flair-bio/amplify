@@ -26,7 +26,7 @@ class AMPLIFYConfig(PretrainedConfig):
         attention_gate: Gate the attention output elementwise with a sigmoid of
             the block input, before the output projection.
         nonlinear_mlm_head: Use a dense-GELU-norm transform before the MLM
-            decoder (BERT/ESM-2 style) instead of a single linear layer.
+            decoder instead of a single linear layer.
         gaussian_init: Initialize linear and embedding weights from a zero-mean
             Gaussian instead of a uniform distribution.
     """
