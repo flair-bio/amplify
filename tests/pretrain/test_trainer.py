@@ -326,6 +326,53 @@ class TestGradientAccumulationSchedule:
         assert grad_norms == pytest.approx([grad_norms[0]] * 5)
 
 
+class TestHfSaveAtSteps:
+    """`hf_save_at_steps` adds exports (e.g. the end of the decay, for
+    averaging) on top of the periodic `hf_save_steps`."""
+
+    @pytest.mark.parametrize("step,ok", [(10, True), (11, False)])
+    def test_steps_must_not_exceed_max_steps(self, step, ok):
+        kwargs = dict(max_steps=10, hf_save_at_steps=[step])
+        if ok:
+            TrainerConfig(**kwargs)
+        else:
+            with pytest.raises(ValueError, match="hf_save_at_steps"):
+                TrainerConfig(**kwargs)
+
+    def test_rejects_non_positive_steps(self):
+        with pytest.raises(ValueError):
+            TrainerConfig(hf_save_at_steps=[0])
+
+    def test_saves_listed_and_periodic_steps_once(self, accelerator, tmp_path):
+        trainer = Trainer(
+            accelerator=accelerator,
+            model=torch.nn.Linear(2, 2),
+            optimizer=MagicMock(),
+            scheduler=MagicMock(),
+            train_dataloader_provider=lambda epoch: [{}] * 12,
+            config=TrainerConfig(
+                output_dir=tmp_path / "ckpt",
+                max_steps=10,
+                hf_save_steps=4,
+                hf_save_at_steps=[4, 9, 10],
+            ),
+            metric_logger=MagicMock(),
+        )
+        trainer.training_step = MagicMock(return_value=(torch.tensor(0.0), None))
+        trainer.save_checkpoint = MagicMock()
+        saved = []
+
+        def save_hf_checkpoint():
+            saved.append(trainer.global_step)
+            trainer._last_hf_save_step = trainer.global_step
+
+        trainer.save_hf_checkpoint = save_hf_checkpoint
+        trainer.train()
+
+        # Step 4 is requested twice and step 10 is also the final save.
+        assert saved == [4, 8, 9, 10]
+
+
 class TestResumeGuardsAgainstShorterEpoch:
     """A config change can shorten the epoch, putting the saved
     `batches_completed` past its end."""

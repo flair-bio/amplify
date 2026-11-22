@@ -551,12 +551,14 @@ The optimizer splits parameters into **decay** and **no-decay** groups: 1-D para
 | `max_steps` | `100000` | Stop after N optimizer steps; overrides `num_epochs` |
 | `max_grad_norm` | `1.0` | Gradient clipping norm |
 | `gradient_accumulation_steps` | `8` | Micro-batches per optimizer step; must match the `Accelerator` |
+| `gradient_accumulation_schedule` | `null` | `{step: count}` accumulation overrides applied from each step on (e.g. a larger batch for the LR decay) |
 | `output_dir` | `runs/350M` | Root for all run artifacts |
 | `resume_from_checkpoint` | `null` | Checkpoint directory to resume from |
 | `logging_steps` | `100` | Log metrics every N optimizer steps |
 | `eval_steps` | `500` | Run validation every N steps |
 | `save_steps` | `500` | Save resumable state every N steps |
 | `hf_save_steps` | `2000` | Save a portable HF checkpoint every N steps |
+| `hf_save_at_steps` | `null` | Extra steps at which to save an HF checkpoint (e.g. the end of the decay, for averaging); combined with `hf_save_steps` |
 | `save_total_limit` | `null` | Max resumable checkpoints kept; oldest deleted beyond this. `null` = unlimited |
 | `hf_save_total_limit` | `null` | Max HF checkpoints kept; oldest deleted beyond this. `null` = unlimited |
 | `tf32` | `true` | Enable TF32 matmuls |

@@ -180,6 +180,14 @@ class TrainerConfig(BaseModel):
     hf_save_steps: int | None = Field(
         None, description="Save HF checkpoint every N steps."
     )
+    hf_save_at_steps: list[PositiveInt] | None = Field(
+        None,
+        description=(
+            "Extra optimizer steps at which to save an HF checkpoint, e.g. the "
+            "end of the LR decay for checkpoint averaging. Combined with "
+            "`hf_save_steps`; a step requested by both is saved once."
+        ),
+    )
     save_total_limit: int | None = Field(
         None,
         gt=0,
@@ -264,12 +272,20 @@ class TrainerConfig(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _schedule_within_max_steps(self) -> "TrainerConfig":
-        schedule = self.gradient_accumulation_schedule or {}
-        if self.max_steps and any(step >= self.max_steps for step in schedule):
+    def _steps_within_max_steps(self) -> "TrainerConfig":
+        if not self.max_steps:
+            return self
+        schedule = sorted(self.gradient_accumulation_schedule or {})
+        if any(step >= self.max_steps for step in schedule):
             raise ValueError(
                 "gradient_accumulation_schedule steps must be < max_steps "
-                f"({self.max_steps}), got {sorted(schedule)}"
+                f"({self.max_steps}), got {schedule}"
+            )
+        hf_steps = sorted(self.hf_save_at_steps or ())
+        if any(step > self.max_steps for step in hf_steps):
+            raise ValueError(
+                f"hf_save_at_steps must be <= max_steps ({self.max_steps}), "
+                f"got {hf_steps}"
             )
         return self
 
@@ -322,6 +338,7 @@ class Trainer:
         self.tokenizer = tokenizer
 
         self.config = config
+        self._hf_save_at_steps = frozenset(config.hf_save_at_steps or ())
         self.max_grad_norm = config.max_grad_norm
         self.output_dir = config.output_dir
 
@@ -392,6 +409,13 @@ class Trainer:
             logger.info(
                 f"gradient_accumulation_steps={steps} from step {self.global_step}"
             )
+
+    def _should_hf_save(self) -> bool:
+        """Whether `hf_save_steps` or `hf_save_at_steps` hits `global_step`."""
+        every = self.config.hf_save_steps
+        return bool(every and self.global_step % every == 0) or (
+            self.global_step in self._hf_save_at_steps
+        )
 
     def _register_signal_handlers(self) -> None:
         """Saves state and exits gracefully on cluster preemptions."""
@@ -626,10 +650,7 @@ class Trainer:
                     self.save_checkpoint()
 
                 # Mid-epoch HF format checkpoint
-                if (
-                    self.config.hf_save_steps
-                    and self.global_step % self.config.hf_save_steps == 0
-                ):
+                if self._should_hf_save():
                     self.save_hf_checkpoint()
 
                 self._update_gradient_accumulation()
