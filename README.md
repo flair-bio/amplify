@@ -1,14 +1,15 @@
 # FLAIR-pLM
 
-This repository contains the FLAIR-pLM data, pretraining, and evaluation workflows in one Python project.
+This repository contains the FLAIR-pLM data, pretraining, post-training, and evaluation workflows in one Python project.
 
 The modules form a pipeline, each with its own README (see [Modules](#modules)):
 
 ```
 data  →  pretrain  →  evaluate
+              ↘ post_train ↗
 ```
 
-`modules/core` holds utilities shared by all three (config loading, Hub upload/download).
+`modules/core` holds shared utilities (config loading, Hub upload/download).
 
 ## Table of Contents
 
@@ -48,7 +49,7 @@ Running `uv sync` creates the virtual environment (`.venv/`) and installs the lo
 uv sync --extra all
 ```
 
-Note: `--extra all` installs the dependencies for every non-hardware-specific module. To set up a single module instead, replace `all` with one of: `data`, `pretrain`, `evaluate`, `dev`. Add `--extra compute` only on Linux CUDA 13 systems where FlashAttention 4 is needed.
+Note: `--extra all` installs the dependencies for every non-hardware-specific module. To set up a single module instead, replace `all` with one of: `data`, `pretrain`, `post_train`, `evaluate`, `dev`. Add `--extra compute` only on Linux CUDA 13 systems where FlashAttention 4 is needed.
 
 The repository's `.python-version` pins the Python version, so `uv sync` uses that interpreter automatically when it is available.
 
@@ -123,11 +124,12 @@ Each module has its own README with detailed documentation on configuration, CLI
 |---|---|---|
 | **Data** | [`modules/data/`](modules/data/README.md) | Download, preprocess, cluster, score, assemble, and upload training datasets |
 | **Pretraining** | [`modules/pretrain/`](modules/pretrain/README.md) | Protein language model pretraining |
+| **Post-training** | [`modules/post_train/`](modules/post_train/README.md) | Reusable MLM + latent structural alignment using prepared residue embeddings |
 | **Evaluation** | [`modules/evaluate/`](modules/evaluate/README.md) | Evaluate pretrained protein language models on downstream tasks |
 
 ## Scope
 
-This repository contains modules for protein dataset preparation, language model pretraining, and downstream evaluation.
+This repository contains modules for protein dataset preparation, language model pretraining and post-training, and downstream evaluation.
 
 ## Contributors
 
