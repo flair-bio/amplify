@@ -1,0 +1,37 @@
+method: latent_alignment
+seed: 42
+student:
+  checkpoint: /absolute/path/to/native-amplify
+  # Enable only after reviewing checkpoint-owned Python.
+  trust_remote_code: false
+dataset:
+  path: /absolute/path/to/prepared
+output_dir: /absolute/path/to/new-output
+alignment:
+  projection_dim: 512
+  pool_proteins: 64
+  loss_weight: 0.5
+  initial_temperature: 0.07
+  min_inverse_temperature: 0.01
+mlm:
+  mask_probability: 0.15
+  mask_replace_probability: 0.8
+  random_replace_probability: 0.1
+training:
+  batch_size: 256
+  microbatch_size: 32
+  encoder_lr: 3.0e-6
+  head_lr: 1.0e-3
+  betas: [0.9, 0.95]
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  validation_interval: 25
+  anchor_chunk_size: 1024
+wandb:
+  enabled: false
+  project: flair-post-train
+  entity: null
+  run_name: null
+  tags: []
+  mode: offline
+  dir: null

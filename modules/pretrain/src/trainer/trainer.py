@@ -244,10 +244,7 @@ class TrainerConfig(BaseModel):
     dist_timeout_minutes: int = Field(
         90,
         gt=0,
-        description=(
-            "NCCL/Gloo collective timeout. Raise this for large first-time "
-            "dataset cache builds (default 10 min can be too short)."
-        ),
+        description="NCCL/Gloo collective timeout.",
     )
 
 

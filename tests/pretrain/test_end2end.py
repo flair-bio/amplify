@@ -336,6 +336,77 @@ class TestClusterColumnReuse:
             < cluster_counts["cluster_rep_at_70"]
         )
 
+    def test_prepare_only_warms_schedule_fixed_validation_and_staging(
+        self, corpus_dir, tmp_path, monkeypatch
+    ):
+        from modules.pretrain.src.dataset import dataset as dataset_module
+
+        parquet_path = corpus_dir / "part-000.parquet"
+        pq.write_table(pq.read_table(parquet_path).drop(["sequence_length"]), parquet_path)
+        config = self._config(
+            corpus_dir, "cluster_rep_at_30", split_column="cluster_rep_at_30"
+        )
+        config.cluster_index_cache_dir = tmp_path / "indexes"
+        config.score_curriculum.end_score = 0.0
+        # Start with a split cache that does not carry the new columns.
+        prepare_sources(config)
+
+        source = config.sources["src"]
+        source.cluster_schedule = {
+            4: "cluster_rep_at_30",
+            2: "cluster_rep_at_70",
+            3: "cluster_rep_at_70",
+        }
+        source.val_cluster_column = "cluster_rep_at_50"
+        config.prepare_only = True
+        config.local_stage_dir = tmp_path / "staging"
+        config.export_dir = tmp_path / "export"
+        (built,) = prepare_sources(config)
+        assert (
+            len(list((tmp_path / "export/src/cluster_index").glob("*/manifest.json")))
+            == 3
+        )
+
+        def unexpected_build(*args, **kwargs):
+            pytest.fail("warm training rebuilt a cluster index")
+
+        monkeypatch.setattr(dataset_module, "_build_cluster_index", unexpected_build)
+        config.prepare_only = False
+        config.export_dir = None
+        (loaded,) = prepare_sources(config, require_prepared=True)
+        assert loaded.train_dataset.cache_files == built.train_dataset.cache_files
+        assert loaded.val_index.cache_dir == built.val_index.cache_dir
+        assert loaded.val_index.num_clusters == len(loaded.val_dataset) // 6
+        assert loaded.train_index_for_epoch(1) is loaded.train_index
+        assert (
+            loaded.train_index_for_epoch(2).num_clusters
+            > loaded.train_index.num_clusters
+        )
+        assert loaded.train_index_for_epoch(3) is loaded.train_index_for_epoch(2)
+        assert loaded.train_index_for_epoch(4) is loaded.train_index
+        plan = build_epoch_plan([loaded], 2, config.seed, config)
+        assert len(plan.row_ids) == loaded.train_index_for_epoch(2).num_clusters
+
+        (loaded.train_index_for_epoch(2).cache_dir / "manifest.json").unlink()
+        with pytest.raises(RuntimeError, match="No completed cluster index.*cluster_rep_at_70"):
+            prepare_sources(config, require_prepared=True)
+
+    @pytest.mark.parametrize("warm_raw", [False, True])
+    def test_distributed_training_rejects_cold_caches(
+        self, corpus_dir, tmp_path, warm_raw
+    ):
+        from datasets import load_dataset
+
+        if warm_raw:
+            load_dataset(
+                "parquet", data_files=str(corpus_dir / "*.parquet"), split="train"
+            )
+        config = self._config(corpus_dir, "cluster_rep_at_30")
+        config.cluster_index_cache_dir = tmp_path / "indexes"
+        error = "Missing split cache" if warm_raw else "Cannot open cached data"
+        with pytest.raises(RuntimeError, match=rf"{error}.*dataset.prepare_only"):
+            prepare_sources(config, require_prepared=True)
+
     def test_extra_columns_are_carried_and_sorted(self, corpus_dir):
         prepared = prepare_sources(
             self._config(

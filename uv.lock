@@ -848,6 +848,10 @@ evaluate = [
     { name = "scipy" },
     { name = "xgboost" },
 ]
+post-train = [
+    { name = "pyarrow" },
+    { name = "wandb" },
+]
 pretrain = [
     { name = "accelerate" },
     { name = "wandb" },
@@ -860,7 +864,7 @@ requires-dist = [
     { name = "aria2", marker = "extra == 'data'" },
     { name = "black", marker = "extra == 'dev'" },
     { name = "datasets", specifier = ">=4.2.0" },
-    { name = "flair-plm", extras = ["data", "pretrain", "evaluate", "dev"], marker = "extra == 'all'" },
+    { name = "flair-plm", extras = ["data", "pretrain", "post-train", "evaluate", "dev"], marker = "extra == 'all'" },
     { name = "flash-attn-4", extras = ["cu13"], marker = "sys_platform == 'linux' and extra == 'compute'", specifier = ">=4.0.0b31" },
     { name = "huggingface-hub", specifier = ">=1.6.0" },
     { name = "matplotlib", marker = "extra == 'data'", specifier = ">=3.9.0" },
@@ -873,6 +877,7 @@ requires-dist = [
     { name = "polars-bio", specifier = ">=0.28.0" },
     { name = "pre-commit", marker = "extra == 'dev'" },
     { name = "pyarrow", marker = "extra == 'data'", specifier = ">=22.0.0" },
+    { name = "pyarrow", marker = "extra == 'post-train'", specifier = ">=22.0.0" },
     { name = "pydantic", specifier = ">=2.13.0" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-clarity", marker = "extra == 'dev'" },
@@ -887,11 +892,12 @@ requires-dist = [
     { name = "tqdm", specifier = ">=4.67.0" },
     { name = "transformers", specifier = ">=4.49.0" },
     { name = "upfp", marker = "extra == 'data'" },
+    { name = "wandb", marker = "extra == 'post-train'", specifier = ">=0.25.0" },
     { name = "wandb", marker = "extra == 'pretrain'", specifier = ">=0.25.0" },
     { name = "xeger", marker = "extra == 'dev'" },
     { name = "xgboost", marker = "extra == 'evaluate'" },
 ]
-provides-extras = ["data", "pretrain", "evaluate", "compute", "dev", "all"]
+provides-extras = ["data", "pretrain", "post-train", "evaluate", "compute", "dev", "all"]
 
 [[package]]
 name = "flash-attn-4"
