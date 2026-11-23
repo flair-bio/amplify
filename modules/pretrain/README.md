@@ -145,8 +145,7 @@ accelerate launch --mixed_precision bf16 \
 To run the pretraining smoke test on 4 GPUs:
 
 ```bash
-accelerate launch --multi_gpu --num_processes 4 --mixed_precision bf16 \
-    modules/pretrain/src/run_pretrain.py \
+bash modules/pretrain/launch.sh --multi_gpu --num_processes 4 --mixed_precision bf16 -- \
     modules/pretrain/configs/config.yaml \
     modules/pretrain/configs/smoke_gpu.yaml
 ```
@@ -195,8 +194,7 @@ win), followed by optional `key=value` overrides applied last. Same convention a
 overlay with only the fields you change, rather than copying `config.yaml`.
 
 ```bash
-accelerate launch --multi_gpu --num_processes 4 --mixed_precision bf16 \
-    modules/pretrain/src/run_pretrain.py \
+bash modules/pretrain/launch.sh --multi_gpu --num_processes 4 --mixed_precision bf16 -- \
     modules/pretrain/configs/config.yaml \
     modules/pretrain/configs/120M.yaml \
     trainer.output_dir=runs/my_run optimizer.lr=5e-4
@@ -282,13 +280,12 @@ differ from the schema defaults (e.g. `trainer.compile` is `true` in the config,
 `run_pretrain.py` wires the components together, then hands over to the `Trainer`:
 
 1. **Load the config**: merge the YAML files and overrides, validated into `PretrainConfig`.
-2. **Set up the runtime**: create the Accelerate `Accelerator` (GPUs, mixed precision,
-   DDP, `torch.compile`) and seed the RNGs. With `dataset.prepare_only=true`, it builds
-   the data caches and exits here.
-3. **Build the components**: model, tokenizer, optimizer, scheduler, collator.
-4. **Prepare the sources (phase 1)**: load each source, split it into train/val by
-   cluster, and build its cluster index. Cached to disk: on each node the first rank
-   builds it while the others wait, then reuse it.
+2. **Prepare the sources (phase 1)**: load the train/val splits and cluster indexes
+   before initializing distributed training. `dataset.prepare_only=true` builds
+   the caches and exits here; distributed workers require those caches to exist.
+3. **Set up the runtime**: create the Accelerate `Accelerator` (GPUs, mixed precision,
+   DDP, `torch.compile`) and seed the RNGs.
+4. **Build the components**: model, tokenizer, optimizer, scheduler, collator.
 5. **Build the validation dataloader**: once, since the val set never changes.
 6. **Train**: at the start of each epoch, the trainer asks for a new train dataloader
    (phase 2: one sequence per cluster, curriculum threshold, mixing the sources),
@@ -388,6 +385,8 @@ with probability 1/*n* per epoch. The curriculum threshold ramps from `start_sco
 All source types also require `cluster_column`: the column holding cluster IDs for that source (e.g. `cluster_rep_at_30` from the data pipeline). It's set per source rather than once for the whole dataset because different sources may be clustered at different identity thresholds and store cluster IDs under different column names.
 
 Each source also sets `split_column` and `extra_cluster_columns` so one cache serves several thresholds — see [Reusing one cache across cluster thresholds](#reusing-one-cache-across-cluster-thresholds).
+
+To change the training grouping over time, set `cluster_schedule: {2: cluster_rep_at_50, 5: cluster_rep_at_70}` on a source. Epochs are zero-based: the base `cluster_column` applies to epochs 0–1, and each scheduled column applies until the next change. `val_cluster_column` defaults to the base `cluster_column` and never follows the schedule. The holdout still uses `split_column` (defaulting to the base column); use a coarse split column whose clusters contain the scheduled groups.
 
 `madvise_random` (default `true`) turns off kernel readahead on that source's memory-mapped splits. Set it to `false` for sources small enough to stay in page cache — see [Random-read advice](#random-read-advice-madvise_random).
 
@@ -582,7 +581,7 @@ The default warmup-stable-decay (WSD) schedule warms up to the peak LR, holds it
 | `tf32` | `true` | Enable TF32 matmuls |
 | `expandable_segments` | `true` | Set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to reduce fragmentation with variable batch shapes |
 | `deterministic` | `false` | `torch.use_deterministic_algorithms`; for debugging only (slow) |
-| `dist_timeout_minutes` | `90` | Distributed collective timeout; raise for first-time cache builds or staging |
+| `dist_timeout_minutes` | `90` | Distributed collective timeout |
 | `compile*` | `true` | `torch.compile` settings — see [torch.compile](#torchcompile) |
 
 **Key config fields (`loss`):** the MLM training objective.
@@ -630,16 +629,15 @@ The default warmup-stable-decay (WSD) schedule warms up to the peak LR, holds it
 
 ## Scaling Up to Full Runs
 
-The smoke test builds its cache inside the training command. For the full datasets,
-the steps below avoid wasting GPU time and network I/O.
+For full datasets, build the shared caches in a separate CPU job to avoid wasting
+GPU time. The single-node wrapper also checks and warms the caches before launch.
 
 ### Real pretraining runs
 
 Once the smoke test passes, launch a full-size run. `configs/config.yaml` **is** the 350M-class recipe (standalone, runnable as-is, and ships with working Hugging Face Hub defaults for `bfd`/`mgnify`/`uniref`/`oas`); for 120M, merge `120M.yaml` on top (see [Running and Configuring](#running-and-configuring) for CLI overrides, resuming, and merging configs). To point at local Parquet data instead of the Hub for a given cluster, override `dataset.sources.*` via CLI dotlist (see [Dataset](#dataset) for the full override options — removing a source, switching its type, or adding a new one):
 
 ```bash
-uv run accelerate launch --multi_gpu --num_processes 4 --mixed_precision bf16 \
-    modules/pretrain/src/run_pretrain.py \
+uv run bash modules/pretrain/launch.sh --multi_gpu --num_processes 4 --mixed_precision bf16 -- \
     modules/pretrain/configs/config.yaml \
     modules/pretrain/configs/120M.yaml \
     dataset.sources.bfd.type=parquet \
@@ -649,9 +647,6 @@ uv run accelerate launch --multi_gpu --num_processes 4 --mixed_precision bf16 \
     dataset.sources.uniref.type=parquet \
     dataset.sources.uniref.path=/path/to/uniref_assembled/*.parquet
 ```
-
-Note: On multi-GPU, the first run against a new/uncached dataset can take longer than PyTorch's
-default NCCL collective timeout. If you see a timeout error, build the cache first with `dataset.prepare_only=true` (below), or raise `trainer.dist_timeout_minutes` (default `90`) for that first run. Subsequent runs will reuse the cache and are fast.
 
 ### Launching on a SLURM cluster (e.g. Mila cluster)
 
@@ -686,11 +681,10 @@ export TOKENIZERS_PARALLELISM=false
 export HF_HOME=<path_to_shared_hf_cache>
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
 
-# Launch pretraining with the default recipe (add configs/120M.yaml after
-# config.yaml for the 120M model).
+# Prepare once on this node, then launch pretraining with the default recipe if
+# preparation succeeds (add configs/120M.yaml after config.yaml for the 120M model).
 OUTPUT_DIR=runs/350M
-accelerate launch --multi_gpu --num_processes "$NUM_PROCESSES" --mixed_precision bf16 \
-    modules/pretrain/src/run_pretrain.py \
+bash modules/pretrain/launch.sh --multi_gpu --num_processes "$NUM_PROCESSES" --mixed_precision bf16 -- \
     modules/pretrain/configs/config.yaml \
     trainer.output_dir="$OUTPUT_DIR" \
     "$@"
@@ -711,34 +705,31 @@ sbatch <your_script>.sh wandb.run_name=my_run
 
 ### Building the dataset cache first (CPU-only)
 
-On the full datasets, the one-time cache build (split, flatten, cluster index) can take hours. Doing it inside a real training run wastes GPU hours, and on multi-GPU it can trip the NCCL watchdog: the build is wrapped in `local_main_process_first()`, so the other ranks sit at a NCCL barrier while rank 0 works, and they abort if it takes too long.
-
-This is only needed for large sources; small ones like OAS can build inside the training run, as in the smoke test.
-
-`dataset.prepare_only=true` builds the caches and exits before the model is created, so it needs no GPU and no distributed setup. Run it as a single plain process:
+`dataset.prepare_only=true` prepares the flattened splits, the base and scheduled training indexes, the fixed validation index, and any configured local staging. It needs no GPU or distributed setup. Run it as a plain Python process with the same dataset options and cache paths as training:
 
 ```bash
 python modules/pretrain/src/run_pretrain.py \
     modules/pretrain/configs/config.yaml \
     modules/pretrain/configs/120M.yaml \
     dataset.sources.uniref.type=parquet \
-    dataset.sources.uniref.path=/path/to/uniref_assembled/*.parquet \
+    'dataset.sources.uniref.path=/path/to/uniref_assembled/*.parquet' \
     dataset.sources.uniref.cluster_column=cluster_rep_at_30 \
     dataset.prepare_only=true
 ```
 
-It finishes with `Data sources prepared. Exiting (dataset.prepare_only).`, and the real run then starts warm (`Cluster index cache hit` per source).
+For a single node, `launch.sh` runs preparation once and starts Accelerate only after it succeeds. For multiple nodes, warm any shared cache with **one** preparation process (with `local_stage_dir=null`), then run preparation once per node with the training configuration (e.g. a Slurm `srun --ntasks-per-node=1` step). Wait for that entire step to succeed before starting the separate `accelerate launch` step on all nodes. Node-local paths and settings must match between the two steps.
+
+Cluster indexing uses a global Polars dense rank. The standard runtime supports up to 4,294,967,295 rows per split; larger splits need the 64-bit Polars runtime. Available RAM may impose a lower practical limit.
 
 ### Staging data to node-local disk (network filesystems)
 
 Training reads rows in random order. If `HF_DATASETS_CACHE` is on a network filesystem that doesn't page-cache those reads (e.g. Mila's `/network/projects`, BeeGFS with `tuneFileCacheType=buffered`), every read is a network round trip. Large sources like BFD then risk starving the GPUs. Set `dataset.local_stage_dir` to a node-local directory to copy each source's sequence-only train/val splits there once per job before training starts:
 
 ```bash
-    dataset.local_stage_dir=$SLURM_TMPDIR/flair_plm_stage \
-    trainer.dist_timeout_minutes=90
+    dataset.local_stage_dir=$SLURM_TMPDIR/flair_plm_stage
 ```
 
-Copies are named by dataset fingerprint and reused by the other ranks on the node. The copy runs inside `local_main_process_first()`, so raise `trainer.dist_timeout_minutes` to cover it. Leave it unset when the cache is already on local disk.
+Copies are named by dataset fingerprint and reused by the other ranks on the node. The copy runs during preparation, before Accelerate starts. Leave it unset when the cache is already on local disk.
 
 ### Random-read advice (`madvise_random`)
 
@@ -747,7 +738,7 @@ The dataset shards are memory-mapped Arrow files. A random ~140 B row read cause
 * Enable it for datasets too big for the node's memory page cache (BFD, Mgnify). This reduces network scratch read pressure by ~36x.
 * Disable it for sources that can all cumulatively fit.
 
-This setting only applies to training. `prepare_only` skips it since building reads sequentially. The readahead is useful prefetch in that read pattern.
+This setting only applies to training. `prepare_only` skips it since building reads sequentially and benefits from readahead.
 
 ```bash
 dataset.sources.bfd.madvise_random=true
@@ -967,7 +958,7 @@ checkpoint, see [Uploading a checkpoint to the Hugging Face Hub](#uploading-a-ch
 
 | Symptom | Cause and fix |
 |---|---|
-| NCCL / distributed timeout on the first multi-GPU run | Rank 0 is still building the cache. Build it first with `dataset.prepare_only=true`, or raise `trainer.dist_timeout_minutes` |
+| Missing split, cluster index, or local stage cache on a distributed run | Run `dataset.prepare_only=true` before launching training, with the same dataset options and cache paths |
 | `KeyError: Cluster column '...' not found` | The source lacks that column; check `cluster_column`/`split_column`/`score_column` against [Input Data](#input-data) |
 | `KeyError: Field "..." does not exist in schema` after changing `cluster_column` | That column wasn't carried in the split cache; see [Reusing one cache across cluster thresholds](#reusing-one-cache-across-cluster-thresholds) |
 | `RuntimeError: Fused optimizer requested ... CUDA is not available` | Running without a GPU; pretraining requires CUDA |

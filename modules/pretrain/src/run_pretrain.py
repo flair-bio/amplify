@@ -174,16 +174,23 @@ def main() -> None:
     )
     logger.info(f"Config loaded from {config_path}.")
 
-    accelerator = setup_runtime(config)
-
+    distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
     if config.dataset.prepare_only:
-        # Before the model/tracker exist: a cache build needs neither, so this
-        # can run on CPU-only hardware without allocating a GPU.
-        with accelerator.local_main_process_first():
-            prepare_sources(config.dataset)
+        if distributed:
+            raise RuntimeError(
+                "Run dataset.prepare_only=true as a plain Python process once per "
+                "node, not under a distributed launcher."
+            )
+        prepare_sources(config.dataset)
         logger.info("Data sources prepared. Exiting (dataset.prepare_only).")
         return
 
+    # Do this before creating the process group. Even opening warm Arrow
+    # splits can take a while on a shared filesystem.
+    prepared_sources = prepare_sources(config.dataset, require_prepared=distributed)
+    logger.info("Data sources prepared.")
+
+    accelerator = setup_runtime(config)
     setup_tracking(config, accelerator)
 
     model = get_amplify_masked_lm(config.model)
@@ -196,11 +203,6 @@ def main() -> None:
     collator = get_collator(tokenizer=tokenizer, collator_config=config.collator)
     model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
     logger.info("Model, tokenizer, optimizer, scheduler, and collator instantiated.")
-
-    # Phase 1: filter/split/index each source once, cached to disk (local rank 0 builds first).
-    with accelerator.local_main_process_first():
-        prepared_sources = prepare_sources(config.dataset)
-    logger.info("Data sources prepared.")
 
     # Built once and reused every epoch — only the per-epoch row *selection*
     # (EpochPlan) changes, not the underlying data these wrap.

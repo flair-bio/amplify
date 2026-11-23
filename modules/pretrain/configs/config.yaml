@@ -160,7 +160,7 @@ dataset:
   num_proc: 12                   # processes for the one-time score-filter map
   split_writer_batch_size: 100000  # rows per Arrow batch in the cached splits
   cluster_index_cache_dir: null  # defaults to a subdir of the HF datasets cache
-  prepare_only: false            # build caches then exit, without training
+  prepare_only: false            # build caches and stage locally, then exit without training
   local_stage_dir: null          # optional node-local dir to copy train/val splits to for better I/O
   export_dir: null               # with prepare_only, export sources as portable folders (type: prepared)
 
@@ -197,7 +197,7 @@ trainer:
   # minimizes GPU memory fragmentation using PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   expandable_segments: true
   deterministic: false       # torch.use_deterministic_algorithms; debugging only and slow
-  dist_timeout_minutes: 90   # raise for first-time cache builds
+  dist_timeout_minutes: 90
 
   # torch.compile options:
   compile: true
