@@ -4,7 +4,7 @@ Pluggable prediction heads for the evaluation probe.
 ``EmbeddingProbeHead`` is a linear or MLP torch probe over precomputed
 embeddings. ``"torch_linear"`` is a single :class:`torch.nn.Linear` layer trained by
 backpropagation through
-:class:`~modules.evaluate.src.trainers.torch.TorchProbeTrainer`. With
+:func:`~modules.evaluate.src.trainers.torch.train_torch`. With
 ``steps.prepare.embedding_cache.enabled=True``, it uses the
 standalone :class:`EmbeddingProbeHead`. Without the cache, it trains the
 model's native head only when that head is itself a plain ``nn.Linear``.
@@ -29,24 +29,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from time import monotonic
-from typing import Any, Literal
+from typing import Any
 
-import numpy as np
 import torch
-from sklearn.base import BaseEstimator
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.linear_model import LogisticRegression, Ridge
-from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
 from torch import nn
 from tqdm import tqdm
 
-from modules.evaluate.src.contracts.config import HeadType
-
-_FEATURE_STANDARDIZATION_CHUNK_SIZE = 65_536
-
+_FEATURE_STANDARDIZATION_CHUNK_SIZE = 65536
 logger = logging.getLogger(__name__)
 
 
@@ -58,54 +47,12 @@ class _HeadOutput:
     logits: torch.Tensor
 
 
-# Head types with no gradient: fit once (or swept) on cached embeddings
-# instead of trained through TuneStep's epoch loop.
-
-# head_type -> (classifier estimator class, regressor estimator class, default kwargs).
-_ESTIMATOR_REGISTRY: dict[
-    str, tuple[type[BaseEstimator], type[BaseEstimator], dict[str, Any]]
-] = {
-    "sklearn_linear": (LogisticRegression, Ridge, {"max_iter": 1000}),
-    "knn": (KNeighborsClassifier, KNeighborsRegressor, {"n_neighbors": 1}),
-    "random_forest": (
-        RandomForestClassifier,
-        RandomForestRegressor,
-        {"n_estimators": 100, "n_jobs": -1},
-    ),
-}
-
-# KNN evaluates the built-in candidate values; the other heads use their
-# single default configuration unless a search space is supplied explicitly.
-_DEFAULT_SEARCH_SPACES: dict[str, dict[str, list[Any]]] = {
-    "knn": {"n_neighbors": [1, 3, 5]},
-}
-
-# Head types whose estimator is scale/distance-sensitive (linear coefficient
-# magnitude, Euclidean nearest-neighbor distance); tree ensembles are
-# scale-invariant and deliberately excluded.
-_SCALED_HEAD_TYPES = frozenset({"sklearn_linear", "knn"})
-
-_CLASSIFICATION_ONLY_PARAMETERS = frozenset({"C"})
-_REGRESSION_ONLY_PARAMETERS = frozenset({"alpha"})
-
-
-def _xgboost_estimator_classes() -> tuple[type[BaseEstimator], type[BaseEstimator]]:
-    try:
-        from xgboost import XGBClassifier, XGBRegressor
-    except ImportError as exc:
-        raise ImportError(
-            "head_type='xgboost' requires the 'xgboost' package. Install it "
-            "via `uv pip install -e '.[evaluate]'` or `pip install xgboost`."
-        ) from exc
-    return XGBClassifier, XGBRegressor
-
-
 def build_probe_layers(
     input_dim: int, hidden_size: int | None, output_dim: int, hidden_depth: int = 1
 ) -> tuple[nn.Module, nn.Module]:
     """Build a linear head or repeated hidden Linear-GELU layers plus output."""
     if hidden_size is None:
-        return nn.Identity(), nn.Linear(input_dim, output_dim)
+        return (nn.Identity(), nn.Linear(input_dim, output_dim))
     if hidden_depth < 1:
         raise ValueError("MLP hidden_depth must be positive.")
     layers: list[nn.Module] = []
@@ -116,10 +63,7 @@ def build_probe_layers(
                 nn.GELU(),
             ]
         )
-    return (
-        nn.Sequential(*layers),
-        nn.Linear(hidden_size, output_dim),
-    )
+    return (nn.Sequential(*layers), nn.Linear(hidden_size, output_dim))
 
 
 class EmbeddingProbeHead(nn.Module):
@@ -177,17 +121,14 @@ class EmbeddingProbeHead(nn.Module):
             or embeddings.shape[1] != self.embedding_size
         ):
             raise ValueError(
-                "Feature standardization requires nonempty training embeddings "
-                f"with shape (examples, {self.embedding_size})."
+                f"Feature standardization requires nonempty training embeddings with shape (examples, {self.embedding_size})."
             )
         if row_mask is not None:
             if row_mask.ndim != 1 or row_mask.shape[0] != embeddings.shape[0]:
                 raise ValueError(
-                    "Feature standardization row mask must have one value per "
-                    "training embedding."
+                    "Feature standardization row mask must have one value per training embedding."
                 )
             row_mask = row_mask.to(device=embeddings.device, dtype=torch.bool)
-
         count = 0
         mean: torch.Tensor | None = None
         sum_squared_deviations: torch.Tensor | None = None
@@ -229,22 +170,17 @@ class EmbeddingProbeHead(nn.Module):
                         mean += delta * (chunk_count / combined_count)
                         count = combined_count
                 progress.update(end - start)
-
         if mean is None or sum_squared_deviations is None:
             raise ValueError(
-                "Feature standardization requires nonempty training embeddings "
-                f"with shape (examples, {self.embedding_size})."
+                f"Feature standardization requires nonempty training embeddings with shape (examples, {self.embedding_size})."
             )
         std = (sum_squared_deviations / count).sqrt().to(torch.float32)
         self.feature_mean = mean.to(self.classifier.weight)
-        self.feature_std = std.clamp_min(1e-6).to(self.classifier.weight)
+        self.feature_std = std.clamp_min(1e-06).to(self.classifier.weight)
 
     def cache_identity(self) -> str:
         """Return the shape identity used by control-output caching."""
-        return (
-            f"embedding_probe:{self.embedding_size}:{self.probe_hidden_size}:"
-            f"{self.probe_hidden_depth}:{self.num_labels}"
-        )
+        return f"embedding_probe:{self.embedding_size}:{self.probe_hidden_size}:{self.probe_hidden_depth}:{self.num_labels}"
 
     def forward(
         self,
@@ -285,216 +221,5 @@ def validate_native_linear_head(model: nn.Module) -> None:
     native_head = getattr(model, "classifier", None)
     if not isinstance(native_head, nn.Linear):
         raise ValueError(
-            "head_type='torch_linear' without embedding_cache requires the "
-            "loaded model's native classifier to be a single torch.nn.Linear. "
-            "Enable steps.prepare.embedding_cache.enabled=True to use a "
-            "standalone linear probe with this model."
+            "head_type='torch_linear' without embedding_cache requires the loaded model's native classifier to be a single torch.nn.Linear. Enable steps.prepare.embedding_cache.enabled=True to use a standalone linear probe with this model."
         )
-
-
-def build_estimator(
-    head_type: HeadType,
-    task_type: str,
-    hyperparameters: dict[str, Any],
-    seed: int | None = None,
-) -> BaseEstimator:
-    """Instantiate the sklearn-compatible estimator for *head_type*/*task_type*."""
-    is_regression = task_type == "sequence_regression"
-    if head_type == "xgboost":
-        classifier_cls, regressor_cls = _xgboost_estimator_classes()
-        defaults: dict[str, Any] = {}
-    else:
-        classifier_cls, regressor_cls, defaults = _ESTIMATOR_REGISTRY[head_type]
-    estimator_cls = regressor_cls if is_regression else classifier_cls
-    if head_type == "sklearn_linear":
-        defaults = {
-            **defaults,
-            ("alpha" if is_regression else "C"): 1.0,
-        }
-        allowed = (
-            _REGRESSION_ONLY_PARAMETERS
-            if is_regression
-            else _CLASSIFICATION_ONLY_PARAMETERS
-        )
-        hyperparameters = {
-            key: value
-            for key, value in hyperparameters.items()
-            if key
-            not in (_CLASSIFICATION_ONLY_PARAMETERS | _REGRESSION_ONLY_PARAMETERS)
-            or key in allowed
-        }
-    estimator = estimator_cls(**{**defaults, **hyperparameters})
-    if (
-        seed is not None
-        and "random_state" not in hyperparameters
-        and "random_state" in estimator.get_params(deep=False)
-    ):
-        estimator.set_params(random_state=seed)
-    if head_type in _SCALED_HEAD_TYPES:
-        # Pipeline delegates classes_/predict_proba to its final step.
-        estimator = Pipeline([("scaler", StandardScaler()), ("estimator", estimator)])
-    return estimator
-
-
-def _filter_classical_search_space(
-    head_type: HeadType, task_type: str, search_space: dict[str, list[Any]]
-) -> dict[str, list[Any]]:
-    """Remove estimator parameters that cannot apply to this task."""
-    if head_type != "sklearn_linear":
-        return search_space
-    allowed = (
-        _REGRESSION_ONLY_PARAMETERS
-        if task_type == "sequence_regression"
-        else _CLASSIFICATION_ONLY_PARAMETERS
-    )
-    return {
-        key: values
-        for key, values in search_space.items()
-        if key not in (_CLASSIFICATION_ONLY_PARAMETERS | _REGRESSION_ONLY_PARAMETERS)
-        or key in allowed
-    }
-
-
-def classical_search_space(
-    head_type: HeadType,
-    task_type: str,
-    search_space: dict[str, list[Any]],
-    default_hyperparameters: dict[str, Any],
-) -> dict[str, list[Any]]:
-    """Resolve the task-compatible search candidates for a classical head."""
-    filtered = _filter_classical_search_space(head_type, task_type, search_space)
-    if filtered:
-        return filtered
-    if not default_hyperparameters:
-        return _DEFAULT_SEARCH_SPACES.get(head_type, {})
-    return {}
-
-
-def has_classical_search_space(
-    head_type: HeadType,
-    search_space: dict[str, list[Any]],
-    default_hyperparameters: dict[str, Any],
-) -> bool:
-    """Whether this head configuration selects among multiple candidates."""
-    return bool(
-        search_space
-        or (_DEFAULT_SEARCH_SPACES.get(head_type, {}) and not default_hyperparameters)
-    )
-
-
-def sweep_classical_head(
-    head_type: HeadType,
-    task_type: str,
-    train_X: np.ndarray,
-    train_y: np.ndarray,
-    val_X: np.ndarray,
-    val_y: np.ndarray,
-    search_space: dict[str, list[Any]],
-    default_hyperparameters: dict[str, Any],
-    metric_name: str,
-    direction: Literal["maximize", "minimize"],
-    search_pattern: Literal["grid", "random", "bohb"] = "bohb",
-    n_trials: int | None = None,
-    seed: int = 710019,
-    average: str = "weighted",
-    num_labels: int | None = None,
-    is_main_process: bool = True,
-) -> tuple[BaseEstimator, dict[str, Any], float]:
-    """Compatibility entry point; classical fitting lives in its trainer."""
-    from modules.evaluate.src.trainers.classical import ClassicalProbeTrainer
-
-    return ClassicalProbeTrainer.fit_candidates(
-        head_type,
-        task_type,
-        train_X,
-        train_y,
-        val_X,
-        val_y,
-        search_space,
-        default_hyperparameters,
-        metric_name,
-        direction,
-        search_pattern,
-        n_trials,
-        seed,
-        average,
-        num_labels,
-        is_main_process,
-    )
-
-
-def _classical_logits(
-    estimator: BaseEstimator,
-    inputs_embeds: torch.Tensor,
-    task_type: str,
-    num_labels: int,
-) -> torch.Tensor:
-    """Convert fitted-estimator outputs to the logits expected by task handlers."""
-    features = inputs_embeds.detach().cpu().numpy()
-    probabilities = (
-        estimator.predict_proba(features)
-        if hasattr(estimator, "predict_proba")
-        else None
-    )
-    if probabilities is not None:
-        classes = np.asarray(estimator.classes_, dtype=np.int64)
-        full_probabilities = np.full(
-            (probabilities.shape[0], num_labels), 1e-12, dtype=np.float64
-        )
-        full_probabilities[:, classes] = np.clip(probabilities, 1e-12, 1.0)
-        return torch.from_numpy(np.log(full_probabilities)).float()
-    if task_type == "sequence_regression":
-        return torch.as_tensor(
-            estimator.predict(features), dtype=torch.float32
-        ).unsqueeze(-1)
-    return nn.functional.one_hot(
-        torch.as_tensor(np.asarray(estimator.predict(features), dtype=np.int64)),
-        num_classes=num_labels,
-    ).float()
-
-
-def run_classical_inference(
-    estimator: BaseEstimator,
-    dataloader: Any,
-    task_type: str,
-    num_labels: int,
-    collect_probabilities: bool = False,
-    progress_label: str | None = None,
-) -> tuple[list[Any], list[Any], list[Any], list[Any] | None]:
-    """Run a fitted estimator over a cached-embedding dataloader."""
-    from modules.evaluate.src.tasks import get_task
-
-    task = get_task(task_type)
-    all_ids: list[Any] = []
-    all_predictions: list[Any] = []
-    all_labels: list[Any] = []
-    all_probabilities: list[Any] | None = [] if collect_probabilities else None
-    started = last_log = monotonic()
-    for batch_idx, batch in enumerate(dataloader, 1):
-        batch = dict(batch)
-        ids = batch.pop("id", None)
-        labels = batch.pop("labels")
-        logits = _classical_logits(
-            estimator, batch["inputs_embeds"], task_type, num_labels
-        )
-        predictions = task.extract_predictions(logits, labels=labels)
-        for prediction, label in task.split_batch_rows(predictions, labels):
-            all_predictions.append(prediction)
-            all_labels.append(label)
-        if ids is None:
-            all_ids.extend(range(len(all_ids), len(all_ids) + len(predictions)))
-        else:
-            all_ids.extend(ids.tolist() if torch.is_tensor(ids) else ids)
-        if all_probabilities is not None:
-            all_probabilities.extend(logits.softmax(dim=-1).tolist())
-        if progress_label:
-            now = monotonic()
-            if now - last_log >= 10:
-                logger.info(
-                    "%s: %d batches completed (%.1fs elapsed)",
-                    progress_label,
-                    batch_idx,
-                    now - started,
-                )
-                last_log = now
-    return all_ids, all_predictions, all_labels, all_probabilities

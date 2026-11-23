@@ -18,111 +18,98 @@ Why it is in this evaluation suite:
   between the mutant and wild-type residue is a well-established fitness
   predictor, so models can be compared without any training. Supervised
   probes are also supported.
-- **Comparable numbers.** The scoring and aggregation follow ProteinGym's own
-  protocol, so results can be placed next to published leaderboard models.
+- **Protocol-aware evaluation.** The runners implement ProteinGym-style
+  scoring and aggregation. Compare with published leaderboard models only
+  when the dataset release, splits, scoring method, and context limits match.
 
 Four tracks are supported:
 
 | Track | Each assay is | Variant label | Per-assay metric |
 |---|---|---|---|
-| DMS substitutions | A deep mutational scan: thousands of single (sometimes multiple) substitutions of one protein, with a measured readout such as activity, binding, stability, or growth | Continuous `DMS_score` | Spearman |
-| DMS indels | The same, for insertions and deletions | Continuous `DMS_score` | Spearman |
+| DMS substitutions | A deep mutational scan: thousands of single (sometimes multiple) substitutions of one protein, with a measured readout such as activity, binding, stability, or growth | Continuous `dms_score` | Spearman |
+| DMS indels | The same, for insertions and deletions | Continuous `dms_score` | Spearman |
 | Clinical substitutions | Human disease-gene variants curated as pathogenic or benign | Binary | AUC |
 | Clinical indels | The same, for insertions and deletions | Binary | AUC |
 
 Each row is one variant (`mutated_sequence`) of an assay's wild-type sequence.
 DMS scores are only comparable within an assay. That is why ProteinGym uses
 per-assay variant tables rather than the standard `sequence`/`targets`
-dataset contract, and has its own sourcing script and two dedicated runners
-instead of `run_evaluate.py`. Hub artifacts are listed in the
+dataset contract. Both dedicated runners use the shared `run_evaluate.py`
+entry point. Prepared tracks are listed in the
 [dataset catalog](datasets.md#separate-dataset-workflows).
 
-- [Sourcing](#sourcing)
+- [Prepared inputs](#prepared-inputs)
 - [Zero-shot scoring](#zero-shot-scoring)
 - [Supervised evaluation](#supervised-evaluation)
+- [Execution flow](#execution-flow)
 - [Outputs](#outputs)
+- [Metrics and aggregation](#metrics-and-aggregation)
 
-## Sourcing
+## Prepared inputs
 
-Sourcing follows the method in the
-[ProteinGym GitHub README](https://github.com/OATML-Markslab/ProteinGym): the
-reference CSV comes from the GitHub repo (the `main` branch by default; set
-`reference_base_url` to a commit to pin it), and each track's assays come from one
-zip hosted at `<base_url>/ProteinGym_<version>/<track>.zip` (for example,
-`https://marks.hms.harvard.edu/proteingym/ProteinGym_v1.3/DMS_ProteinGym_substitutions.zip`).
-The full archive for the selected track is downloaded and extracted, and the
-source converts every assay listed in that track's reference file. The sourcing
-script has no assay-subset option. Select a track with
-`track: dms_substitutions | dms_indels | clinical_substitutions |
-clinical_indels` in [`source_proteingym.yaml`](../scripts/dataset_sourcing/configs/source_proteingym.yaml).
+Dataset sourcing, normalization, and publication are maintained in
+[amplify-downstream-data-prep](https://github.com/flair-bio/amplify-downstream-data-prep/tree/main).
+This module only loads prepared artifacts and runs evaluations.
 
-As with the other sourcing scripts, this only writes local artifacts by
-default. Set an HF owner to upload the normalized track after conversion:
+The workspace presets expect:
 
-```bash
-uv run python modules/evaluate/scripts/dataset_sourcing/source_proteingym.py \
-    modules/evaluate/scripts/dataset_sourcing/configs/source_proteingym.yaml \
-    track=dms_substitutions \
-    repo_owner=<your-hf-username-or-org>
+```text
+<suite root>/
+  proteingym-dms_substitutions/
+    reference.parquet
+    data/
+      <dms_id>.parquet
+      ...
 ```
 
-This uploads to `<repo_owner>/proteingym-<track>`. Use
-`upload_layout=single_repo repo_id=<owner>/<repo>` to place the artifact in a
-single repository instead.
+`reference.parquet` identifies each assay with `dms_id`, `uniprot_id`, and
+`coarse_selection_type`; zero-shot scoring also uses its wild-type
+`target_seq`. The `is_indel` and `is_clinical` flags select track-specific
+scoring and label handling.
 
-Each track is written to its own `work_dir/<track>/outputs` subfolder by
-default, so sourcing multiple tracks does not overwrite another track's
-`reference.parquet`, `stats.json`, or `README.md`. Set `work_dir` explicitly to
-a different path to opt back into a shared directory across tracks. The
-checked-in YAML sets `overwrite_output: true`, so rerunning it replaces
-existing output artifacts.
+Each assay file contains `mutated_sequence` and either continuous `dms_score`
+or binary `dms_score_bin` labels. Substitution zero-shot scoring uses mutation
+codes in `mutant`, such as `A42V` or `A42V:G80D`. Supervised evaluation also
+requires the fold column or persisted `split` labels selected by its config.
+Combined tables are not read by these runners.
 
-Sourcing always writes one parquet file per assay under `data/`, preserving
-ProteinGym's official fold columns (`fold_random_5`, `fold_modulo_5`, and
-`fold_contiguous_5`) when present. The checked-in YAML enables
-`combine_assays: true`, which writes `data/combined.parquet` while keeping the
-per-assay files available. With `create_split_subsets: true`, sourcing writes
-reproducible per-assay `train`/`validation`/`test` labels using a seeded 80/10/10
-split, plus canonical and pooled random/stratified combined split files. The
-pooled stratified view balances each assay's share of every split; raw DMS
-scores are not comparable across assays, so they are not used as strata. The
-seeded splits are uniform random over variants, so the same mutated position
-appears in several splits. These reuse the same partition helpers
-as the other dataset sources. MMseqs cluster subsets are intentionally omitted:
-within one assay every row is a single/double mutant of the same wild-type
-sequence, so sequence-identity clustering does not provide a meaningful
-partition. Use the official `fold_contiguous_5` or `fold_modulo_5` columns for
-a position-based generalization split instead. Official folds are retained in
-the artifacts for evaluation.
+The shipped presets use `flair-bio/evaluation-suite` and the
+`proteingym-dms_substitutions` subfolder. To select another prepared track,
+override **both** `workspace.dataset_name` (the output label) and
+`workspace.dataset_config_name` (the input subfolder), for example:
 
-Assays with fewer than three variants are retained in their per-assay and
-combined artifacts but do not receive synthetic split labels or appear in the
-pooled split views, because three nonempty splits cannot be formed from fewer
-than three observations.
+```text
+workspace.dataset_name=proteingym-dms_indels
+workspace.dataset_config_name=proteingym-dms_indels
+```
+
+`workspace.dataset_repo_id` may instead point to a local **suite root**;
+`workspace.dataset_revision` must then be null. For Hub inputs, set
+`workspace.dataset_revision` to a commit SHA to pin the snapshot; only the
+selected subfolder is downloaded. Missing suite folders or unavailable Hub
+snapshots fail rather than silently switching sources. Individual missing
+assay files are warned about and skipped; check logs before interpreting
+benchmark coverage. `max_assays=N` limits evaluation to the first N reference
+rows, not a random sample.
 
 ## Zero-shot scoring
 
 Zero-shot scoring uses masked-marginal scoring for substitutions and
 pseudo-likelihood scoring for indels; the runner selects the latter from the
-sourced `is_indel` flag. Because it does not train, zero-shot scoring does not
+prepared `is_indel` flag. Because it does not train, zero-shot scoring does not
 require train/validation/test splits:
 
 ```bash
-uv run modules/evaluate/src/run_proteingym_zero_shot.py \
+uv run python -m modules.evaluate.src.run_evaluate \
     modules/evaluate/configs/proteingym_zero_shot.yaml \
     workspace.model_repo_id=flair-bio/amplify-120m
 ```
 
-The dedicated runners accept the same `workspace.*` input/output settings as
-`run_evaluate.py`; ProteinGym scoring does not run through the ordinary
-Prepare/Tune/Predict/Score pipeline. The shipped presets use
-`flair-bio/evaluation-suite` and its `proteingym-dms_substitutions` subfolder.
-`workspace.dataset_repo_id` may instead point to a local **suite root**;
-`workspace.dataset_revision` must then be null. For Hub inputs, set a commit
-SHA to pin the snapshot; only the selected subfolder is downloaded. Missing
-local data or unavailable Hub snapshots fail rather than silently switching
-sources. `workspace.dataset_config_name` selects the subfolder independently
-of the output label `workspace.dataset_name`.
+All evaluation commands use `run_evaluate.py`. The ProteinGym presets declare
+`workflow: proteingym_zero_shot` or `workflow: proteingym_supervised`, selecting
+assay-specific functions with the shared runtime and artifact services rather
+than the ordinary flat-data workflow. Use these presets directly, without
+the ordinary base, task, or model YAML overlays.
 
 For example, launch on a single GPU with a local suite and checkpoint:
 
@@ -131,7 +118,7 @@ accelerate launch \
     --config_file modules/evaluate/configs/accelerate/local.yaml \
     --num_processes 1 \
     --num_cpu_threads_per_process 4 \
-    modules/evaluate/src/run_proteingym_zero_shot.py \
+    modules/evaluate/src/run_evaluate.py \
     modules/evaluate/configs/proteingym_zero_shot.yaml \
     workspace.model_name=amplify-120m_checkpoint_100000 \
     workspace.model_repo_id=/checkpoints/checkpoint_100000 \
@@ -154,6 +141,17 @@ each source residue retains its token and coordinate. Tokenizers that cannot
 represent one token per residue raise an error rather than silently shifting
 mutation positions.
 
+For a substitution `A42V`, the score is
+`log P(V | position 42 masked) - log P(A | position 42 masked)`.
+Each unique mutated position is evaluated once per assay, reusing its
+distribution across variants. Multi-mutant scores sum these differences,
+each calculated in the wild-type context. Higher scores mean greater
+model preference relative to wild type, not a calibrated experimental fitness.
+For long proteins, substitutions use a window centered on the mutated
+position within the `max_length` token budget, including special tokens.
+
+Indels use the mutant's summed masked pseudo-log-likelihood minus the
+wild type's: each retained residue is scored with its own token masked.
 For indels, sequences longer than `max_length` use the leftmost residues that
 fit alongside the tokenizer's added special tokens. The crop is deterministic;
 BOS/CLS and EOS remain context and are never scored as residues. This limits
@@ -163,30 +161,82 @@ pseudo-likelihood.
 The zero-shot runner can also score reference baselines with
 `baselines: [random, blosum62, random_init_trunk]`. `blosum62` is a simple
 substitution-only matrix baseline, not ProteinGym's official MSA-derived
-Site-Independent scorer. Baseline outputs are written under
-`output_dir/baselines/<name>/`.
+Site-Independent scorer; it returns undefined scores for indels.
+`random_init_trunk` initializes the entire MLM from its architecture config,
+including the prediction head. In workspace runs, all conditions share
+`predictions.parquet` and `scores.parquet`, distinguished by `control`.
+These scorers use `baselines`, not the ordinary CLI `--baselines` flag.
 
 ## Supervised evaluation
 
-Supervised evaluation fits a probe per assay using pooled embeddings. Choose
-`probe_type=linear|mlp|torch_linear`; `probe_search_space` performs a grid
+Supervised evaluation fits a separate probe for each assay and training fold,
+using embeddings from a backbone that is not fine-tuned. The final hidden
+states are mean-pooled over non-padding tokens (including boundary special
+tokens). Tokenization enables truncation at `max_length`; embeddings are
+computed once per assay and reused across folds, without a persistent cache.
+Choose `probe_type=linear|mlp|torch_linear`; `probe_search_space` performs a grid
 search on an inner holdout of each training fold before refitting the winner on
 all available training rows. Splits can use an official fold column
 (`fold_random_5`, `fold_modulo_5`, or `fold_contiguous_5`),
 `split=official_average` to average applicable official schemes equally,
-`split=seeded` to use the sourced train/validation/test split, or
+`split=seeded` to use persisted train/validation/test labels, or
 `split=custom_kfold` for a reproducible generated k-fold split:
 
 ```bash
-uv run modules/evaluate/src/run_proteingym_supervised.py \
+uv run python -m modules.evaluate.src.run_evaluate \
     modules/evaluate/configs/proteingym_supervised.yaml \
     workspace.model_repo_id=flair-bio/amplify-120m
 ```
 
-Official fold columns must be present for official supervised schemes. The
-current prepared substitutions artifact may not contain them; sourcing only
-preserves folds already present and does not fetch/join the separate CV-fold
-archives. Synthetic split labels are not a substitute for official folds.
+The preset defaults to `probe_type=linear` (Ridge for continuous targets,
+LogisticRegression for binary targets), `split=fold_random_5`, and no
+hyperparameter search. Each held-out fold is predicted by a fresh probe
+fitted only on the other folds. Standardization uses the outer training rows,
+not the held-out fold.
+
+| Split | Behavior |
+|---|---|
+| `fold_random_5`, `fold_modulo_5`, `fold_contiguous_5` | Use the corresponding prepared fold column; return out-of-fold predictions |
+| `official_average` | Run all three official schemes for substitutions, or only random folds for indels; report the mean of the scheme metrics |
+| `seeded` | Fit on persisted `train` rows and predict only `test` rows; persisted `validation` rows are not used |
+| `custom_kfold` | Generate shuffled folds using `seed` and `custom_kfold_splits` (default 5) |
+
+For `official_average`, saved predictions are averaged across schemes, but
+the reported assay score is the **mean of the separate scheme scores**, not
+the metric of those averaged predictions.
+
+Official fold columns must be present in each assay; the evaluator does not
+generate or download them. Missing columns raise an error. Verify the prepared
+artifact's schema and provenance before selecting a scheme. Generated random
+folds or persisted random splits are not equivalent to official position-based
+splits.
+
+**Current implementation limitation:** `pool_embeddings()` does not disable
+gradients before converting embeddings to NumPy. With a normal trainable
+backbone this raises a `RuntimeError`; embedding extraction needs a
+`torch.no_grad()` context. This is separate from the dataset migration.
+
+## Execution flow
+
+```text
+run_evaluate.py::main()
+  -> load_run_config()
+  -> initialize_runtime()
+  -> run_zero_shot() or run_supervised()
+       -> reserve outputs and resolve the prepared suite
+       -> load tokenizer and model
+       -> run_assay_loop()
+            -> load one assay
+            -> zero-shot scores OR embeddings and fold-local probe fitting
+            -> calculate assay metrics
+       -> aggregate metrics and publish results
+```
+
+[`proteingym/runner.py`](../src/proteingym/runner.py) owns the shared assay
+loop. [`zero_shot.py`](../src/proteingym/zero_shot.py) and
+[`supervised.py`](../src/proteingym/supervised.py) supply the scoring behavior.
+These workflows bypass the ordinary task registry and
+[`runners/pipeline.py`](../src/runners/pipeline.py).
 
 ## Outputs
 
@@ -199,8 +249,9 @@ evaluator's artifact names:
   Clinical binary labels are normalized so higher values mean benign.
 - `scores.parquet`: long-form `metric`/`value` rows with `control` and
   `scope` (`assay`, `function`, or `overall`). Assay rows carry their assay,
-  protein, function, and variant count. Overall rows use the official
-  hierarchical aggregation, not a pooled variant correlation.
+  protein, function, and variant count. DMS overall rows use hierarchical
+  aggregation, not a pooled variant correlation; clinical indels use pooled
+  AUC.
 - `run_manifest.json`: configuration, resolved inputs, run status, aggregate
   summaries (including bootstrap errors when enabled), and artifact paths.
 
@@ -238,6 +289,7 @@ scratch path; the current ProteinGym supervised runner computes pooled
 embeddings in memory rather than using a persistent embedding cache.
 Zero-shot does not extract embeddings. Checkpoint loading remains separate
 from all output/cache paths and uses `workspace.model_repo_id`.
+Neither runner saves fitted probe checkpoints.
 
 Inspect a workspace run's primary result:
 
@@ -263,6 +315,15 @@ flat paths. A standalone artifact repo can still be read through legacy
 `data_repo_id`; the workspace presets instead expect a suite with a named
 subfolder.
 
+## Metrics and aggregation
+
+The primary per-assay metric is Spearman when `dms_score` is present, otherwise
+ROC-AUC from `dms_score_bin`. Clinical labels are flipped so larger scores
+correspond to benign variants. Zero-shot DMS runs additionally report NDCG
+and top-decile recall for continuous labels, and AUC and median-threshold MCC
+when binary labels are available. Supervised runs report only the primary
+metric; they do not currently publish MSE.
+
 Aggregation follows the track's benchmark protocol:
 
 | Track | Summary aggregation |
@@ -281,8 +342,11 @@ contribute to averages. If no metric is defined, the aggregate is NaN.
 
 Set `compute_uncertainty: true` to add bootstrap standard errors for DMS and
 clinical substitution means; clinical indels do not report a bootstrap error.
-`n_bootstrap` controls the resamples for either runner and defaults to `10000`.
-The clinical substitution bootstrap resamples genes. DMS bootstrap errors
-measure uncertainty in this model's aggregate, whereas the official leaderboard
+`n_bootstrap` controls primary-condition resamples for either runner and
+defaults to `10000`; zero-shot baseline conditions do not currently receive
+the uncertainty settings. The clinical substitution bootstrap resamples genes.
+DMS bootstrap resamples proteins within each function category, not variant
+rows. DMS bootstrap errors measure uncertainty in this model's aggregate,
+whereas the official leaderboard
 reports uncertainty relative to the best model. Metrics retain full precision
 rather than reproducing the leaderboard's intermediate rounding.

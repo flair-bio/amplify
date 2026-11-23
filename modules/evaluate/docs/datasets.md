@@ -2,13 +2,15 @@
 
 This catalog lists every evaluation dataset: what question it asks about a
 protein, what one target looks like, where the question comes up in the real
-world, and which task consumes it. Each active dataset has an overlay YAML in
+world, and which task consumes it. Ordinary datasets have an overlay YAML in
 [`configs/datasets/`](../configs/datasets/) that plugs it into the
 `run_evaluate.py` pipeline; how overlays are combined with the base, model,
 and task configs is covered in the evaluation README's
-[Config files](../README.md#config-files) section. How the underlying
-artifacts are built (sources, filters, splits, rationale) is covered in the
-[dataset-sourcing guide](dataset-sourcing.md).
+[Config files](../README.md#config-files) section. Find the datasets on
+[FLAIR-bio's Hugging Face page](https://huggingface.co/datasets/flair-bio).
+This catalog describes dataset meanings, label contracts, and evaluation
+caveats; consult each dataset card for release-specific provenance, filters,
+and splits.
 
 **New here?** Read [Evaluation Tasks](#evaluation-tasks) for the seven kinds
 of prediction, then skim the cartoon at the top of each source in
@@ -20,11 +22,13 @@ interest you.
 - [Evaluation Tasks](#evaluation-tasks)
 - [Datasets by Task](#datasets-by-task)
 - [Datasets in Detail](#datasets-in-detail)
-  - [Biomap-Research](#biomap-research)
+  - [Protein-level benchmarks](#protein-level-benchmarks)
+  - [Per residue and per residue pair](#per-residue-and-per-residue-pair)
   - [UniProt Gene Ontology](#uniprot-gene-ontology)
   - [InterPro](#interpro)
   - [UniProt Residue Annotations](#uniprot-residue-annotations)
   - [UniProt ProtParam](#uniprot-protparam)
+  - [Pseudo-perplexity: UniProt UR100P test set](#pseudo-perplexity-uniprot-ur100p-test-set)
   - [Calibration](#calibration)
 - [Separate Dataset Workflows](#separate-dataset-workflows)
 
@@ -108,14 +112,14 @@ metrics.
 | UniProt GO | `GO_mf`, `GO_bp`, `GO_cc` | `sequence_multilabel_classification` | Protein-centric Fmax | Fmax, F1 |
 | InterPro | 7 `interpro_*` entry types | `sequence_multilabel_classification` | Macro-F1 | Macro-F1, multilabel MCC, average precision |
 | UniProt features | 12 `uniprot_*` residue overlays | `token_classification` | Macro-F1 | Macro-F1, accuracy |
-| UniProt ProtParam | `uniprot_protparams` (all 31 properties per run) | `sequence_regression` | Per-property R² | Per-property R², equal-weight mean R² |
+| UniProt ProtParam | `uniprot_protparams` (one selected property per run) | `sequence_regression` | R² | R², MSE |
 | AMPLIFY / UR100P | `uniprot_ur100p_test` | `pseudo_perplexity` | Not applicable | Pseudo-perplexity |
 | Any sequence dataset | MLM models with a mask token | `pseudo_perplexity` | Not applicable | Pseudo-perplexity |
 | omicMSA homolog profiles | `omicmsa_calibration` (test split only) | `calibration` | Not applicable | Calibration agreement for T, NT, high-NT |
-| ProteinGym | 4 assay tracks | Separate runners | Per-assay | Spearman (DMS), AUC (clinical) |
+| ProteinGym | 4 assay tracks | Assay-specific workflows | Per-assay | Spearman (DMS), AUC (clinical) |
 
-ProteinGym uses separate runners. The next section describes the active
-evaluation overlays.
+ProteinGym uses the shared `run_evaluate.py` entry point with its own workflow
+preset. The next section describes the active evaluation overlays.
 
 ---
 
@@ -352,7 +356,7 @@ tokens, so the supplied residues are not cropped.
 ### UniProt Gene Ontology
 
 Protein-level multi-label prediction of UniProtKB Gene Ontology terms, one
-overlay per GO aspect ([sourcing](dataset-sourcing.md#uniprot-gene-ontology)).
+overlay per GO aspect.
 The [Gene Ontology](https://geneontology.org/) is the standard vocabulary for
 describing what a protein does, in three independent aspects.
 
@@ -406,7 +410,7 @@ and pathway, not only on its own chemistry. `GO_cc` overlaps with
 ### InterPro
 
 Protein-level multi-label prediction of InterPro entries, one overlay per
-entry type ([sourcing](dataset-sourcing.md#interpro)).
+entry type.
 [InterPro](https://www.ebi.ac.uk/interpro/) sorts proteins into families and
 recognizes the domains, repeats, and sites they are built from.
 
@@ -450,7 +454,7 @@ overlays have only 2 to 13 labels, so their scores are noisier.
 ### UniProt Residue Annotations
 
 Per-residue prediction of UniProtKB sequence features, one overlay per feature
-group ([sourcing](dataset-sourcing.md#uniprot-residue-annotations)). Curators
+group. Curators
 mark where things happen along each protein: structural elements, membrane
 crossings, cleaved peptides, functional sites, and chemical modifications.
 Each overlay turns one group of those marks into one class per residue.
@@ -657,9 +661,8 @@ anchor them to membranes, and change their stability.
 
 ### UniProt ProtParam
 
-Sequence-derived physicochemical properties for UniProt proteins, all 31
-properties evaluated by one suite run
-([sourcing](dataset-sourcing.md#uniprot-protparam)).
+Sequence-derived physicochemical properties for UniProt proteins, with one
+of 31 property columns selected per evaluation run.
 
 #### `uniprot_protparams`
 
@@ -668,10 +671,8 @@ hydrophobicity, be read back from the embedding?
 
 - **Readout:** one number per protein: one of 31 properties, such as
   amino-acid composition, molecular mass, isoelectric point, or GRAVY
-  (average   hydrophobicity). The overlay evaluates all 31 properties automatically.
-  Each property is a separate regression run,
-  selected and reported with R². The full list is in the
-  [sourcing guide](dataset-sourcing.md#uniprot-protparam).
+  (average hydrophobicity). Each invocation evaluates one selected property,
+  selected and reported with R². The property groups are listed below.
 - **Used for:** these properties guide purification and formulation (for
   example, the isoelectric point sets the pH at which a protein is least
   soluble), but in practice they are computed directly with tools like
@@ -684,40 +685,39 @@ hydrophobicity, be read back from the embedding?
   with `sequence_regression` ·
   [Hub](https://huggingface.co/datasets/flair-bio/uniprot_protparams)
 
-Selecting the ProtParams overlay with the ordinary evaluation entry point
-trains all 31 probes sequentially and automatically publishes their
-equal-weight mean test R². No separate aggregation command is needed:
+The artifact has numeric property columns rather than a single `targets`
+column:
+
+| Property | Meaning |
+|---|---|
+| `length`, `mass` | UniProt-reported length (residues) and molecular mass (Da) |
+| `percent_<aa>` | Composition of each of the 20 canonical amino acids |
+| `fraction_helix_aas`, `fraction_turn_aas`, `fraction_sheet_aas` | Composition-based propensity estimates, not observed structure |
+| `instability_index` | Sequence-based instability estimate |
+| `gravy` | Grand average of hydropathicity |
+| `isoelectric_point` | Theoretical pH with zero net charge |
+| `charge_at_ph4_7`, `charge_at_ph7_2`, `charge_at_ph8` | Estimated net charge at the indicated pH |
+
+The ProtParams overlay selects `length` by default. Choose another scalar
+property with `steps.prepare.label_column`; each invocation is one regression
+run:
 
 ```bash
 python -m modules.evaluate.src.run_evaluate \
     modules/evaluate/configs/config.yaml \
     modules/evaluate/configs/models/amplify_120m.yaml \
-    modules/evaluate/configs/datasets/uniprot_protparams.yaml
+    modules/evaluate/configs/datasets/uniprot_protparams.yaml \
+    steps.prepare.label_column=mass \
+    workspace.run_id=mass
 ```
 
-This behavior is configured through the dataset overlay's `multi_target`
-block (`target_columns`, `metric`, and summary-output settings), not a
-ProtParam-specific runner. Another dataset with multiple scalar targets can
-reuse the same orchestration by declaring its own block.
+Automatic multi-target expansion and mean-across-target reports are not
+supported. Use distinct run IDs for separate properties; compatible embedding
+caches remain reusable. `--overwrite` replaces only the selected run under the
+ordinary output-protection rules.
 
-The Mila launcher uses one job (array index 33) for the complete suite.
-Property runs use IDs `<run_id>-<property>` while retaining the dataset
-identity and compatible embedding caches. A restart skips completed properties
-only when their saved configuration matches. Matching incomplete runs are
-restarted from scratch; incompatible runs fail rather than being silently reused.
-`--overwrite` reruns all properties under the existing output-protection rules.
-
-The runner writes `scores.parquet` and `run_manifest.json` under
-`<model_root>/<variant>-<run_id>-summary/seed_<seed>/` only after all properties
-complete. The last row of `scores.parquet` contains the unweighted mean, labelled
-`unweighted_property_mean` with a null manifest path. The manifest also records
-the summary. Negative R² values are retained; targets are never pooled.
-Missing, nonfinite, or incompatible results prevent publication of a partial mean.
-Regression evaluation of `uniprot_protparams` always runs the complete property
-suite; selecting an individual property is not supported. The suite requires
-ordinary regression probes, without layerwise or additional test sets.
-Baseline-only runs also aggregate all properties in `scores.parquet` and their
-run manifest; non-regression evaluations continue to use their existing paths.
+Predictions, scores and the run manifest use the ordinary per-run workspace
+layout. Baseline-only runs also evaluate only the selected property.
 
 ### Pseudo-perplexity: UniProt UR100P test set
 
@@ -739,8 +739,7 @@ the existing `uniprot_protparams` regression dataset remains separate.
 
 ### Calibration
 
-Sites from omicMSA homolog profiles, sourced from a precomputed export
-([sourcing](dataset-sourcing.md#calibration)).
+Sites from a precomputed export of omicMSA homolog profiles.
 
 #### `omicmsa_calibration`
 
@@ -784,13 +783,17 @@ match the amino-acid frequencies among the protein's homologs?
 
 ## Separate Dataset Workflows
 
-ProteinGym has no dataset overlays; see the [ProteinGym guide](proteingym.md)
-for its sourcing and scoring workflow.
+ProteinGym has no ordinary dataset overlays; see the [ProteinGym guide](proteingym.md)
+for prepared inputs and the zero-shot and supervised evaluation workflows.
 Development-only test datasets are not listed here.
 
-| Dataset | What it measures | Hub repository | Workflow |
+The ProteinGym presets read the selected subfolder of
+[`flair-bio/evaluation-suite`](https://huggingface.co/datasets/flair-bio/evaluation-suite),
+or the same layout under a local suite root.
+
+| Dataset | What it measures | Suite subfolder | Workflow |
 |---|---|---|---|
-| ProteinGym DMS substitutions | Per-assay variant-effect measurements for single/double substitutions. | [flair-bio/proteingym-dms_substitutions](https://huggingface.co/datasets/flair-bio/proteingym-dms_substitutions) | Dedicated zero-shot and supervised ProteinGym runners. |
-| ProteinGym DMS indels | Per-assay variant-effect measurements for insertions and deletions. | [flair-bio/proteingym-dms_indels](https://huggingface.co/datasets/flair-bio/proteingym-dms_indels) | Dedicated zero-shot and supervised ProteinGym runners. |
-| ProteinGym clinical substitutions | Per-assay clinical labels for substitutions. | [flair-bio/proteingym-clinical_substitutions](https://huggingface.co/datasets/flair-bio/proteingym-clinical_substitutions) | Dedicated zero-shot and supervised ProteinGym runners. |
-| ProteinGym clinical indels | Per-assay clinical labels for insertions and deletions. | [flair-bio/proteingym-clinical_indels](https://huggingface.co/datasets/flair-bio/proteingym-clinical_indels) | Dedicated zero-shot and supervised ProteinGym runners. |
+| ProteinGym DMS substitutions | Per-assay variant-effect measurements for single and multiple substitutions. | `proteingym-dms_substitutions` | Dedicated zero-shot and supervised ProteinGym runners. |
+| ProteinGym DMS indels | Per-assay variant-effect measurements for insertions and deletions. | `proteingym-dms_indels` | Dedicated zero-shot and supervised ProteinGym runners. |
+| ProteinGym clinical substitutions | Per-assay clinical labels for substitutions. | `proteingym-clinical_substitutions` | Dedicated zero-shot and supervised ProteinGym runners. |
+| ProteinGym clinical indels | Per-assay clinical labels for insertions and deletions. | `proteingym-clinical_indels` | Dedicated zero-shot and supervised ProteinGym runners. |

@@ -1,10 +1,10 @@
-"""Tests for modules.evaluate.src.utils.io.update_run_manifest."""
+"""Tests for modules.evaluate.src.artifacts.manifests.update_run_manifest."""
 
 from __future__ import annotations
 
 import json
 
-from modules.evaluate.src.utils.io import update_run_manifest
+from modules.evaluate.src.artifacts.manifests import update_run_manifest
 
 
 def test_update_run_manifest_creates_preserves_and_overwrites_sections(tmp_path):

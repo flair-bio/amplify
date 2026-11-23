@@ -5,19 +5,18 @@ per-sequence row extraction, metrics, and the bilinear contact model.
 from __future__ import annotations
 
 import numpy as np
-import polars as pl
 import pytest
 import torch
 
-from modules.evaluate.src.metrics import contact_metrics
-from modules.evaluate.src.tasks import get_task
 from modules.evaluate.src.dataset.contact import (
     ContactChain,
     align_contact_sequence,
     separation_prior_scores,
 )
-from modules.evaluate.src.tasks.contact_prediction import IGNORE_INDEX
+from modules.evaluate.src.metrics import contact_metrics
 from modules.evaluate.src.model.inference import pad_for_gather
+from modules.evaluate.src.tasks import get_task
+from modules.evaluate.src.tasks.token_classification import IGNORE_INDEX
 
 
 def _task():
@@ -42,158 +41,6 @@ def test_separation_prior_uses_original_coordinates_across_unresolved_residues()
     assert scores[0, 1] > scores[0, 2]
 
 
-def test_align_labels_crops_and_shifts_pairs():
-    task = _task()
-    # Residues 0..9; keep a window of 4 residues starting at residue 2
-    # (offset=1 for a single leading BOS token).
-    label = [[0, 1], [2, 3], [4, 5], [2, 4], [8, 9]]
-    aligned = task.align_labels(
-        label, num_residues=10, start=2, kept=4, offset=1, input_len=6, example_index=0
-    )
-    # Only pairs fully inside [2, 6) survive: (2,3)->(1,2)->offset shift, (4,5), (2,4)
-    assert aligned["res_start"] == 1
-    assert aligned["res_end"] == 5
-    assert sorted(aligned["pairs"]) == sorted(
-        [
-            [1 + (2 - 2), 1 + (3 - 2)],  # [1, 2]
-            [1 + (4 - 2), 1 + (5 - 2)],  # [3, 4]
-            [1 + (2 - 2), 1 + (4 - 2)],  # [1, 3]
-        ]
-    )
-
-
-def test_unresolved_contact_pairs_are_ignored_after_crop():
-    task = _task()
-    aligned = task.align_labels(
-        {"pairs": [[2, 9]], "valid_positions": [2, 9, 12]},
-        num_residues=15,
-        start=2,
-        kept=13,
-        offset=1,
-        input_len=15,
-        example_index=0,
-    )
-    labels = task.collate_labels([aligned], batch_size=1, seq_len=15)
-
-    assert aligned["length"] == 13
-    assert labels[0, 1, 8] == 1
-    assert labels[0, 1, 7] == IGNORE_INDEX
-    assert labels[0, 1, 11] == 0
-
-
-def test_collate_labels_is_symmetric_and_masks_short_range_and_padding():
-    task = _task()
-    seq_len = 8
-    labels = [
-        # full-length sequence (no special tokens), one contact
-        {"pairs": [[0, 7]], "res_start": 0, "res_end": 8},
-        # short sequence + a sub-min_sep pair
-        {"pairs": [[0, 1]], "res_start": 0, "res_end": 4},
-    ]
-    collated = task.collate_labels(labels, batch_size=2, seq_len=seq_len)
-
-    assert collated.shape == (2, seq_len, seq_len)
-    assert collated.dtype == task.label_dtype
-    # Symmetric positive contact.
-    assert collated[0, 0, 7] == 1
-    assert collated[0, 7, 0] == 1
-    # Valid (sep >= MIN_SEP) but non-contact pair is an explicit negative.
-    assert collated[0, 0, 6] == 0
-    # Below MIN_SEP: always ignored, even on the diagonal.
-    assert collated[0, 0, 1] == IGNORE_INDEX
-    # Second example: res_end=4, so anything touching padding (>=4) is ignored...
-    assert collated[1, 0, 5] == IGNORE_INDEX
-    # ...and the listed pair [0, 1] has sep=1 < MIN_SEP, so it stays ignored
-    # rather than being (incorrectly) marked a positive.
-    assert collated[1, 0, 1] == IGNORE_INDEX
-
-
-def test_collate_labels_excludes_special_token_positions():
-    task = _task()
-    seq_len = 10
-    # offset=1 leading CLS, 8 residues, 1 trailing EOS: real residues are
-    # indices [1, 9). Index 0 (CLS) and 9 (EOS) must never be scored, even
-    # though they fall at sep >= MIN_SEP from other positions.
-    labels = [{"pairs": [], "res_start": 1, "res_end": 9}]
-    collated = task.collate_labels(labels, batch_size=1, seq_len=seq_len)
-
-    assert (collated[0, 0, :] == IGNORE_INDEX).all()
-    assert (collated[0, :, 0] == IGNORE_INDEX).all()
-    assert (collated[0, 9, :] == IGNORE_INDEX).all()
-    assert (collated[0, :, 9] == IGNORE_INDEX).all()
-    # A genuine residue pair at valid separation is still scored.
-    assert collated[0, 1, 8] == 0
-
-
-def test_split_batch_rows_returns_explicit_metric_metadata():
-    task = _task()
-    # Long enough that every residue has *some* partner at sep >= MIN_SEP, so
-    # the reconstructed length sentinel exactly equals seq_len.
-    seq_len = 2 * task.MIN_SEP + 2
-    # Build a realistic dense label matrix (whole valid region filled, not
-    # just the listed positives) via collate_labels itself.
-    labels = task.collate_labels(
-        [{"pairs": [[0, seq_len - 1]], "res_start": 0, "res_end": seq_len}],
-        batch_size=1,
-        seq_len=seq_len,
-    )
-    preds = torch.rand(1, seq_len, seq_len)
-
-    rows = task.split_batch_rows(preds, labels)
-    assert len(rows) == 1
-    pred_row, label_row = rows[0]
-    assert set(pred_row) == {"scores", "separations"}
-    assert set(label_row) == {"length", "values"}
-    assert label_row["length"] == seq_len
-    # One positive pair, counted once (not twice, despite symmetry).
-    assert label_row["values"].count(1) == 1
-    positive_index = label_row["values"].index(1)
-    assert pred_row["separations"][positive_index] == seq_len - 1
-
-
-def test_split_batch_rows_uses_cropped_length_with_unresolved_edges():
-    task = _task()
-    aligned = task.align_labels(
-        {"pairs": [[2, 9]], "valid_positions": [2, 9, 12]},
-        num_residues=15,
-        start=2,
-        kept=13,
-        offset=1,
-        input_len=15,
-        example_index=0,
-    )
-    labels = task.collate_labels([aligned], batch_size=1, seq_len=15)
-    rows = task.split_batch_rows(
-        torch.zeros((1, 15, 15)),
-        labels,
-        residue_lengths=torch.tensor([aligned["length"]]),
-    )
-
-    assert rows[0][1]["length"] == 13
-
-
-def test_split_batch_rows_length_uses_span_not_scored_count():
-    task = _task()
-    # An 8-residue chain: the two edge residues each have a scored partner
-    # (sep=7 >= MIN_SEP=6), but every middle residue's partners are all
-    # closer than MIN_SEP, so they have zero scored pairs of their own.
-    # Counting scored columns would undercount L (4 instead of 8); the real
-    # span (min..max scored index) must still recover the true length.
-    seq_len = 8
-    labels = task.collate_labels(
-        [{"pairs": [], "res_start": 0, "res_end": seq_len}],
-        batch_size=1,
-        seq_len=seq_len,
-    )
-    scored_cols = (labels[0] != IGNORE_INDEX).any(dim=0)
-    assert scored_cols.sum().item() < seq_len  # middle residues have no partner
-
-    preds = torch.rand(1, seq_len, seq_len)
-    rows = task.split_batch_rows(preds, labels)
-    _, label_row = rows[0]
-    assert label_row["length"] == seq_len
-
-
 def test_pad_for_gather_pads_both_contact_map_axes():
     class TwoProcessAccelerator:
         num_processes = 2
@@ -212,16 +59,6 @@ def test_pad_for_gather_pads_both_contact_map_axes():
 
     assert result is contact_map
     assert accelerator.dims == [1, 2]
-
-
-def test_scramble_labels_preserves_length_and_shuffles_values():
-    task = _task()
-    rng = np.random.default_rng(0)
-    labels = [{"length": 6, "values": [1, 0, 0]}, {"length": 4, "values": [1]}]
-    scrambled = task.scramble_labels(labels, rng)
-    assert [row["length"] for row in scrambled] == [6, 4]
-    assert sorted(scrambled[0]["values"]) == sorted(labels[0]["values"])
-    assert sorted(scrambled[1]["values"]) == sorted(labels[1]["values"])
 
 
 def test_precision_at_l_ranks_within_bin_and_uses_length():

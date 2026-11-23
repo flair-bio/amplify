@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from modules.evaluate.src.utils.storage import atomic_output, cache_lock
+from modules.evaluate.src.artifacts.files import atomic_output, cache_lock
 
 
 def _increment(path: Path) -> None:

@@ -8,16 +8,19 @@ import math
 import os
 import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal, Never
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.compute as pc
+import polars as pl
 import pyarrow.types as pa_types
 from datasets import Dataset as HFDataset  # type: ignore[attr-defined]
-from datasets import load_dataset, load_from_disk  # type: ignore[attr-defined]
+from datasets import (  # type: ignore[attr-defined]
+    load_dataset,
+    load_dataset_builder,
+    load_from_disk,
+)
 from datasets.config import HF_DATASETS_CACHE
 from huggingface_hub.constants import HF_HUB_CACHE
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -52,6 +55,23 @@ class DataSourceConfig(BaseModel):
             "Name of the column containing cluster IDs to use for this source."
         ),
     )
+    cluster_schedule: dict[Annotated[int, Field(ge=1)], str] = Field(
+        default_factory=dict,
+        description="Training cluster column changes keyed by zero-based epoch. "
+        "`cluster_column` applies from epoch 0 until the first change.",
+    )
+    val_cluster_column: str | None = Field(
+        None,
+        description="Fixed validation grouping column; defaults to `cluster_column`.",
+    )
+
+    @property
+    def train_cluster_columns(self) -> tuple[str, ...]:
+        """Distinct training groupings, with the base column first."""
+        return tuple(
+            dict.fromkeys((self.cluster_column, *self.cluster_schedule.values()))
+        )
+
     split_column: str | None = Field(
         None,
         description=(
@@ -220,7 +240,7 @@ class DatasetConfig(BaseModel):
     )
     prepare_only: bool = Field(
         False,
-        description="Build the dataset caches (split, flatten, cluster index) "
+        description="Build the dataset caches (split, flatten, all configured cluster indexes) "
         "and exit before constructing the model or training. Lets a slow "
         "first-time cache build run once on cheap CPU-only hardware, so the "
         "real run starts warm.",
@@ -229,8 +249,7 @@ class DatasetConfig(BaseModel):
         None,
         description="Node-local dir. (e.g., `$SLURM_TMPDIR`) to copy "
         "each source's sequence-only train/val splits into before training. "
-        "Leave unset when HF_DATASETS_CACHE is already on local disk. "
-        "Ignored with `prepare_only`.",
+        "Leave unset when HF_DATASETS_CACHE is already on local disk.",
     )
     export_dir: Path | None = Field(
         None,
@@ -293,6 +312,13 @@ def _build_cluster_index(
             lengths=np.array([], dtype=np.int64),
         )
 
+    index_dtype = pl.get_index_type()
+    if index_dtype == pl.UInt32 and num_rows > np.iinfo(np.uint32).max:
+        raise ValueError(
+            f"Cannot index {num_rows:,} rows with this Polars build "
+            "(maximum 4,294,967,295 rows). Use a 64-bit Polars runtime (polars[rt64])."
+        )
+
     # Log the cluster index build time for reporting.
     start = time.monotonic()
     logger.info(f"Building cluster index over {num_rows:,} rows...")
@@ -307,35 +333,22 @@ def _build_cluster_index(
             "failing to flatten may result in missing columns or unexpected behavior."
         )
 
-    # Reorder with numpy rather than Arrow `take`, which is slow over the many
-    # chunks `flatten_indices` produces. Cluster IDs are dictionary-encoded so
-    # we sort integer codes, not one Python str per row (~40-60 GB at 2B rows);
-    # codes are remapped to lexicographic order to match sorting raw strings.
-    encoded = table.column(cluster_column).dictionary_encode()
+    # Rank values, not categorical codes: Arrow's global dictionary unification
+    # uses signed 32-bit IDs. Polars dense ranks preserve exact lexical ordering.
+    column = table.column(cluster_column)
+    if pa_types.is_dictionary(column.type):
+        column = column.cast(column.type.value_type)
+    ranks = pl.from_arrow(column, rechunk=False).rank("dense")
+    if ranks.null_count():
+        # Ranks start at 1; with a null, every non-null rank is < num_rows.
+        ranks = ranks.fill_null(pl.lit(num_rows, dtype=index_dtype))
+    cluster_codes = ranks.to_numpy()
+    del column, ranks
     logger.info(
-        f"[cluster index] read '{cluster_column}' in {time.monotonic() - start:.1f}s"
-    )
-    encoded = encoded.combine_chunks()  # unify the per-chunk dictionaries
-    if isinstance(encoded, pa.ChunkedArray):  # older pyarrow keeps the wrapper
-        encoded = encoded.chunk(0)
-    uniques, codes = encoded.dictionary, encoded.indices
-
-    # Extra slot is a null sentinel: ranks last, matching null string ordering.
-    rank_dtype = np.int32 if len(uniques) < np.iinfo(np.int32).max else np.int64
-    lex_rank = np.empty(len(uniques) + 1, dtype=rank_dtype)
-    lex_rank[pc.sort_indices(uniques).to_numpy(zero_copy_only=False)] = np.arange(
-        len(uniques)
-    )
-    lex_rank[len(uniques)] = len(uniques)
-    cluster_codes = lex_rank[
-        pc.fill_null(codes, len(uniques)).to_numpy(zero_copy_only=False)
-    ]
-    logger.info(
-        f"[cluster index] encoded {len(uniques):,} cluster ids in "
-        f"{time.monotonic() - start:.1f}s"
+        f"[cluster index] ranked '{cluster_column}' in {time.monotonic() - start:.1f}s"
     )
     # Keep the narrow source dtypes: upcasting to 64-bit would double both
-    # cached arraysfor no gain, and they are mmapped on every training run.
+    # cached arrays for no gain, and they are mmapped on every training run.
     scores = table.column(score_column).to_numpy(zero_copy_only=False)
     if scores.dtype == np.float16:
         scores = scores.astype(np.float32)
@@ -362,7 +375,8 @@ def _build_cluster_index(
     # and, being stable, it preserves the pass-1 score order within ties.
     reordered_clusters = cluster_codes[first_pass_order]
     final_relative_order = np.argsort(reordered_clusters, kind="stable")
-    order = first_pass_order[final_relative_order].astype(np.int64)
+    order = first_pass_order[final_relative_order].astype(np.int64, copy=False)
+    del first_pass_order, final_relative_order, reordered_clusters
     logger.info(f"[cluster index] sort done in {time.monotonic() - start:.1f}s")
 
     sorted_clusters = cluster_codes[order]
@@ -386,7 +400,12 @@ def _build_cluster_index(
 
 
 def load_or_build_cluster_index(
-    dataset: HFDataset, cluster_column: str, score_column: str, cache_dir: Path
+    dataset: HFDataset,
+    cluster_column: str,
+    score_column: str,
+    cache_dir: Path,
+    *,
+    require_prepared: bool = False,
 ) -> ClusterIndex:
     """Load the cluster index from cache, or build and cache it.
 
@@ -395,31 +414,47 @@ def load_or_build_cluster_index(
     load; a mismatch triggers a rebuild.
     """
     digest = hashlib.md5(
-        f"{dataset._fingerprint}-{cluster_column}-{score_column}".encode("utf-8")
+        f"{dataset._fingerprint}-{cluster_column}-{score_column}".encode()
     ).hexdigest()
     index_dir = cache_dir / f"cluster_index-{digest}"
     manifest_path = index_dir / "manifest.json"
 
+    def load_index() -> ClusterIndex:
+        return ClusterIndex(
+            order=np.load(index_dir / "order.npy", mmap_mode="r"),
+            boundaries=np.load(index_dir / "boundaries.npy", mmap_mode="r"),
+            scores=np.load(index_dir / "scores.npy", mmap_mode="r"),
+            lengths=np.load(index_dir / "lengths.npy", mmap_mode="r"),
+            cache_dir=index_dir,
+        )
+
     if manifest_path.exists():
         cached_rows = json.loads(manifest_path.read_text()).get("num_rows")
         if cached_rows == len(dataset):
-            logger.info(f"Cluster index cache hit: {index_dir}")
-            return ClusterIndex(
-                order=np.load(index_dir / "order.npy", mmap_mode="r"),
-                boundaries=np.load(index_dir / "boundaries.npy"),
-                scores=np.load(index_dir / "scores.npy", mmap_mode="r"),
-                lengths=np.load(index_dir / "lengths.npy", mmap_mode="r"),
-                cache_dir=index_dir,
+            try:
+                cached = load_index()
+            except FileNotFoundError:
+                logger.warning(f"Cluster index cache is incomplete: {index_dir}")
+            else:
+                logger.info(f"Cluster index cache hit: {index_dir}")
+                return cached
+        else:
+            logger.warning(
+                f"Cluster index cache is stale (cached {cached_rows} rows, dataset "
+                f"has {len(dataset):,}): {index_dir}"
             )
-        logger.warning(
-            f"Cluster index cache is stale (cached {cached_rows} rows, dataset "
-            f"has {len(dataset):,}); rebuilding: {index_dir}"
-        )
     else:
         logger.info(f"Cluster index cache miss: {index_dir}")
 
+    if require_prepared:
+        raise RuntimeError(
+            f"No completed cluster index for '{cluster_column}' at {index_dir}. "
+            "Run with dataset.prepare_only=true once per node before accelerate launch."
+        )
+
     index = _build_cluster_index(dataset, cluster_column, score_column)
     index_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path.unlink(missing_ok=True)
     write_start = time.monotonic()
     np.save(index_dir / "order.npy", index.order)
     np.save(index_dir / "boundaries.npy", index.boundaries)
@@ -435,7 +470,8 @@ def load_or_build_cluster_index(
         f"Cluster index written: {Bytes(written)} to {index_dir} in "
         f"{time.monotonic() - write_start:.1f}s"
     )
-    manifest_path.write_text(
+    tmp_manifest = manifest_path.with_suffix(".tmp")
+    tmp_manifest.write_text(
         json.dumps(
             {
                 "fingerprint": dataset._fingerprint,
@@ -447,8 +483,8 @@ def load_or_build_cluster_index(
             indent=2,
         )
     )
-    index.cache_dir = index_dir
-    return index
+    tmp_manifest.replace(manifest_path)
+    return load_index()
 
 
 def _canonicalize_threshold(threshold: float) -> str:
@@ -558,10 +594,22 @@ class PreparedSource:
     train_index: ClusterIndex
     val_dataset: HFDataset
     val_index: ClusterIndex
+    scheduled_train_indexes: dict[int, ClusterIndex] = field(default_factory=dict)
+
+    def train_index_for_epoch(self, epoch: int) -> ClusterIndex:
+        # prepare_source inserts the changes in increasing epoch order.
+        for start_epoch in reversed(self.scheduled_train_indexes):
+            if epoch >= start_epoch:
+                return self.scheduled_train_indexes[start_epoch]
+        return self.train_index
 
 
 def stage_dataset_locally(
-    dataset: HFDataset, stage_prefix: Path, num_proc: int | None = None
+    dataset: HFDataset,
+    stage_prefix: Path,
+    num_proc: int | None = None,
+    *,
+    require_prepared: bool = False,
 ) -> HFDataset:
     """Copy ``dataset`` to ``{stage_prefix}-{fingerprint}`` and return the copy.
 
@@ -578,6 +626,12 @@ def stage_dataset_locally(
             f"Local staged copy is stale ({len(staged):,} rows, expected "
             f"{len(dataset):,}); re-staging: {target}"
         )
+    if require_prepared:
+        raise RuntimeError(
+            f"No completed staged dataset at {target}. Run with "
+            "dataset.prepare_only=true on this node before accelerate launch."
+        )
+    if target.exists():
         shutil.rmtree(target)
 
     # Rows only: `dataset.data.nbytes` walks every record batch through the
@@ -588,7 +642,8 @@ def stage_dataset_locally(
     shutil.rmtree(tmp, ignore_errors=True)
     # An explicit `num_shards` skips `save_to_disk`'s own size estimate (the
     # same slow `nbytes` walk).
-    dataset.save_to_disk(str(tmp), num_shards=8 * (num_proc or 1), num_proc=num_proc)
+    num_shards = max(1, min(8 * (num_proc or 1), len(dataset)))
+    dataset.save_to_disk(str(tmp), num_shards=num_shards, num_proc=num_proc)
     tmp.rename(target)
     logger.info(f"Staged to {target} in {time.monotonic() - start:.1f}s")
     return load_from_disk(str(target))
@@ -645,7 +700,11 @@ def _split_fingerprint(
 
 
 def _load_and_split_source(
-    name: str, source: DataSourceConfig, dataset_cfg: DatasetConfig
+    name: str,
+    source: DataSourceConfig,
+    dataset_cfg: DatasetConfig,
+    *,
+    require_prepared: bool = False,
 ) -> tuple[HFDataset, HFDataset]:
     """Load a parquet/hub source and split it into train/val by cluster.
 
@@ -655,24 +714,28 @@ def _load_and_split_source(
     """
     load_start = time.monotonic()
     logger.info(f"Loading source '{name}' ({source.type})...")
+    load_kwargs: dict[str, str | None]
     if source.type == "parquet":
         assert source.path is not None  # enforced by DataSourceConfig's validator
-        dataset = load_dataset(
-            "parquet",
-            data_files=_resolve_parquet_data_files(source.path),
-            split="train",
-            streaming=False,
-            num_proc=dataset_cfg.num_proc,
-        )
+        path, subset, split = "parquet", None, "train"
+        load_kwargs = {"data_files": _resolve_parquet_data_files(source.path)}
     else:
         assert source.repo_id is not None  # enforced by DataSourceConfig's validator
+        path, subset, split = source.repo_id, source.subset, source.split
+        load_kwargs = {"revision": source.revision}
+    if require_prepared:
+        try:
+            dataset = load_dataset_builder(path, subset, **load_kwargs).as_dataset(
+                split=split
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"Cannot open cached data for '{name}'. Run with "
+                "dataset.prepare_only=true once per node before accelerate launch."
+            ) from exc
+    else:
         dataset = load_dataset(
-            source.repo_id,
-            source.subset,
-            split=source.split,
-            revision=source.revision,
-            streaming=False,
-            num_proc=dataset_cfg.num_proc,
+            path, subset, split=split, num_proc=dataset_cfg.num_proc, **load_kwargs
         )
     logger.info(
         f"Loaded '{name}': {len(dataset):,} rows in "
@@ -693,11 +756,17 @@ def _load_and_split_source(
             raise KeyError(
                 f"Extra cluster column '{extra}' not found in dataset '{name}'"
             )
+    index_columns = {
+        *source.train_cluster_columns,
+        source.val_cluster_column or cluster_col,
+    }
+    for column in sorted(index_columns - set(dataset.column_names)):
+        raise KeyError(f"Cluster column '{column}' not found in dataset '{name}'")
 
     # Sorted so the projection depends on the *set* of cluster columns, not on
     # which one is selected: changing cluster_column then leaves it unchanged
     # and the split+flatten cache still hits.
-    cluster_cols = {cluster_col, split_col, *source.extra_cluster_columns}
+    cluster_cols = {split_col, *index_columns, *source.extra_cluster_columns}
     selected_columns = ["sequence", score_col, *sorted(cluster_cols)]
     if "sequence_length" in dataset.column_names:
         selected_columns.append("sequence_length")
@@ -706,7 +775,7 @@ def _load_and_split_source(
         f"Projected '{name}' to {len(selected_columns)} columns: {selected_columns}"
     )
 
-    if "sequence_length" not in dataset.column_names:
+    if "sequence_length" not in dataset.column_names and not require_prepared:
         logger.info(
             f"'sequence_length' missing from '{name}': computing it over "
             f"{len(dataset):,} rows (full pass)..."
@@ -729,24 +798,43 @@ def _load_and_split_source(
         batch_size = dataset_cfg.split_writer_batch_size
         # Explicit `new_fingerprint=` on both steps.
         fp = _split_fingerprint(source, dataset_cfg, split_col, keep_val)
+
         # An identity `map` rather than `flatten_indices`: the latter forwards
         # `writer_batch_size` but not `batch_size`, so its output is locked to
         # `map`'s 1000-row default. Output is otherwise identical.
-        out = dataset.filter(
-            _cluster_split_filter,
+        def require_cached_batch(*args: object, **kwargs: object) -> Never:
+            raise RuntimeError(
+                f"Missing split cache for '{name}' {label}. Run with "
+                "dataset.prepare_only=true once per node before accelerate launch."
+            )
+
+        filtered = dataset.filter(
+            require_cached_batch if require_prepared else _cluster_split_filter,
             batched=True,
             num_proc=dataset_cfg.num_proc,
             fn_kwargs={**split_kwargs, "keep_val": keep_val},
             desc=f"Splitting '{name}' {label}",
             new_fingerprint=f"{fp}-filter",
-        ).map(
-            batched=True,
-            batch_size=batch_size,
-            writer_batch_size=batch_size,
-            num_proc=dataset_cfg.num_proc,
-            desc=f"Flattening '{name}' {label}",
-            new_fingerprint=f"{fp}-map",
         )
+
+        def flatten(fingerprint: str) -> HFDataset:
+            return filtered.map(
+                require_cached_batch if require_prepared else None,
+                batched=True,
+                batch_size=batch_size,
+                writer_batch_size=batch_size,
+                num_proc=dataset_cfg.num_proc,
+                desc=f"Flattening '{name}' {label}",
+                new_fingerprint=fingerprint,
+            )
+
+        out = flatten(f"{fp}-map")
+        # Older split caches may not carry columns added by a schedule.
+        if not (index_columns | {score_col}).issubset(out.column_names):
+            projection = hashlib.md5(
+                json.dumps([fp, selected_columns]).encode()
+            ).hexdigest()
+            out = flatten(f"{projection}-map")
         logger.info(
             f"'{name}' {label} split ready: {len(out):,} rows in "
             f"{time.monotonic() - phase_start:.1f}s (fingerprint {out._fingerprint})"
@@ -784,12 +872,16 @@ def _load_prepared_source(
     val_dataset = load_from_disk(str(root / "val"))
     train_dataset._fingerprint = fingerprints["train"]
     val_dataset._fingerprint = fingerprints["val"]
-    for col in (source.cluster_column, dataset_cfg.score_column):
-        if col not in train_dataset.column_names:
-            raise KeyError(
-                f"Column '{col}' not found in exported source '{name}' ({root}); "
-                f"available: {train_dataset.column_names}"
-            )
+    for data, columns in (
+        (train_dataset, source.train_cluster_columns),
+        (val_dataset, (source.val_cluster_column or source.cluster_column,)),
+    ):
+        for col in (*columns, dataset_cfg.score_column):
+            if col not in data.column_names:
+                raise KeyError(
+                    f"Column '{col}' not found in exported source '{name}' ({root}); "
+                    f"available: {data.column_names}"
+                )
     logger.info(
         f"Loaded exported source '{name}' from {root}: {len(train_dataset):,} "
         f"train / {len(val_dataset):,} val rows"
@@ -867,31 +959,42 @@ def export_prepared_source(
 
 
 def prepare_source(
-    name: str, source: DataSourceConfig, dataset_cfg: DatasetConfig
+    name: str,
+    source: DataSourceConfig,
+    dataset_cfg: DatasetConfig,
+    *,
+    require_prepared: bool = False,
 ) -> PreparedSource:
     """Phase 1: load, split by cluster, and index a single source (all cached).
 
     Score filtering happens later in ``build_epoch_plan``. A ``prepared`` source
     reads an exported folder instead of loading and splitting.
     """
-    cluster_col = source.cluster_column
     score_col = dataset_cfg.score_column
     if source.type == "prepared":
         train_dataset, val_dataset = _load_prepared_source(name, source, dataset_cfg)
         assert source.path is not None
         cache_dir = Path(source.path) / "cluster_index"
     else:
-        train_dataset, val_dataset = _load_and_split_source(name, source, dataset_cfg)
+        train_dataset, val_dataset = _load_and_split_source(
+            name, source, dataset_cfg, require_prepared=require_prepared
+        )
         cache_dir = dataset_cfg.cluster_index_cache_dir or (
             Path(str(HF_DATASETS_CACHE)) / "flair_plm_cluster_index"
         )
-    logger.info(f"Cluster index for '{name}' train on '{cluster_col}':")
-    train_index = load_or_build_cluster_index(
-        train_dataset, cluster_col, score_col, cache_dir
-    )
-    logger.info(f"Cluster index for '{name}' val on '{cluster_col}':")
-    val_index = load_or_build_cluster_index(
-        val_dataset, cluster_col, score_col, cache_dir
+
+    def index_split(dataset: HFDataset, split: str, column: str) -> ClusterIndex:
+        logger.info(f"Cluster index for '{name}' {split} on '{column}':")
+        return load_or_build_cluster_index(
+            dataset, column, score_col, cache_dir, require_prepared=require_prepared
+        )
+
+    train_indexes = {
+        column: index_split(train_dataset, "train", column)
+        for column in source.train_cluster_columns
+    }
+    val_index = index_split(
+        val_dataset, "val", source.val_cluster_column or source.cluster_column
     )
 
     if dataset_cfg.export_dir is not None and dataset_cfg.prepare_only:
@@ -901,7 +1004,7 @@ def prepare_source(
             dataset_cfg,
             train_dataset,
             val_dataset,
-            [train_index, val_index],
+            [*train_indexes.values(), val_index],
         )
 
     # Training reads only `sequence`, but `Dataset.__getitem__` materializes
@@ -911,16 +1014,18 @@ def prepare_source(
     train_dataset = train_dataset.select_columns(["sequence"])
     val_dataset = val_dataset.select_columns(["sequence"])
 
-    if dataset_cfg.local_stage_dir is not None and not dataset_cfg.prepare_only:
+    if dataset_cfg.local_stage_dir is not None:
         train_dataset = stage_dataset_locally(
             train_dataset,
             dataset_cfg.local_stage_dir / f"{name}-train",
             dataset_cfg.num_proc,
+            require_prepared=require_prepared,
         )
         val_dataset = stage_dataset_locally(
             val_dataset,
             dataset_cfg.local_stage_dir / f"{name}-val",
             dataset_cfg.num_proc,
+            require_prepared=require_prepared,
         )
 
     # Datasets too large to fit entirely into pageable memory should advise the
@@ -948,13 +1053,19 @@ def prepare_source(
         name=name,
         sampling_fraction=source.sampling_fraction,
         train_dataset=train_dataset,
-        train_index=train_index,
+        train_index=train_indexes[source.cluster_column],
         val_dataset=val_dataset,
         val_index=val_index,
+        scheduled_train_indexes={
+            epoch: train_indexes[column]
+            for epoch, column in sorted(source.cluster_schedule.items())
+        },
     )
 
 
-def prepare_sources(dataset_cfg: DatasetConfig) -> list[PreparedSource]:
+def prepare_sources(
+    dataset_cfg: DatasetConfig, *, require_prepared: bool = False
+) -> list[PreparedSource]:
     """Phase 1 entrypoint: prepare every configured source, once, up front."""
     if not dataset_cfg.sources:
         raise ValueError("`sources` must contain at least one dataset source.")
@@ -967,7 +1078,9 @@ def prepare_sources(dataset_cfg: DatasetConfig) -> list[PreparedSource]:
                 "would contribute nothing to training. Its path is not loaded."
             )
             continue
-        prepared.append(prepare_source(name, source, dataset_cfg))
+        prepared.append(
+            prepare_source(name, source, dataset_cfg, require_prepared=require_prepared)
+        )
 
     if not prepared:
         raise ValueError(
@@ -1052,7 +1165,11 @@ def build_epoch_plan(
     cumulative_offset = 0
     for prepared in prepared_sources:
         dataset = prepared.train_dataset if split == "train" else prepared.val_dataset
-        index = prepared.train_index if split == "train" else prepared.val_index
+        index = (
+            prepared.train_index_for_epoch(epoch)
+            if split == "train"
+            else prepared.val_index
+        )
         if index.num_clusters > 0:
             source_seed = seed + epoch + _stable_seed_component(prepared.name)
             rng = np.random.default_rng(source_seed)

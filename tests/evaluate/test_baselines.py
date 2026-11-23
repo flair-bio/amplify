@@ -5,45 +5,48 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import polars as pl
 import pytest
 from datasets import Dataset, DatasetDict
 
-from modules.evaluate.src.contracts.artifacts import EvaluationMetadata, PredictOutput
-from modules.evaluate.src.contracts.config import (
+from modules.evaluate.src.artifacts.baselines import (
+    artifact_directory,
+    load_baseline_artifact,
+)
+from modules.evaluate.src.artifacts.predictions import persist_predictions
+from modules.evaluate.src.artifacts.results import EvaluationMetadata, PredictOutput
+from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
+from modules.evaluate.src.config import (
     BaselineRunConfig,
-    DatasetWorkspaceConfig,
     ExternalTestSetConfig,
     LayerwiseConfig,
     PredictConfig,
     ScoreConfig,
 )
-from modules.evaluate.src.contracts.config_loader import load_baseline_config
-from modules.evaluate.src.dataset import dataloader
+from modules.evaluate.src.utils.config_utils import load_baseline_config
+from modules.evaluate.src.config import DatasetWorkspaceConfig
+from modules.evaluate.src.dataset import loading as dataloader
 from modules.evaluate.src.dataset.baseline_data import (
     align_baseline,
     align_token_baseline,
-    artifact_directory,
     baseline_context,
-    load_baseline_artifact,
     preprocessing_identity,
 )
-from modules.evaluate.src.dataset.workspace import get_evaluation_workspace
 from modules.evaluate.src.model.baselines import (
     _mmseqs_nearest_neighbors,
     build_sequence_baseline,
 )
 from modules.evaluate.src.runners import baselines as runner
-from modules.evaluate.src.runners.baselines import (
-    run_baselines,
-    run_multi_target_baselines,
-)
-from modules.evaluate.src.steps.predict import PredictStep, persist_predictions
-from modules.evaluate.src.steps.score import ScoreStep
+from modules.evaluate.src.runners.baselines import run_baselines
 
 from .conftest import build_raw_dataset_dict
+from .helpers import (
+    predict_inputs,
+    predict_layer_inputs,
+    score_inputs,
+)
 from .test_prepare import _make_workspace, _run_prepare
 
 
@@ -222,13 +225,13 @@ def test_standalone_baseline_reuses_predictions_and_never_fits_validation(
 def test_short_hash_collisions_reject_different_full_identities(
     tmp_path, monkeypatch, role
 ):
-    from modules.evaluate.src.dataset import baseline_data as baselines
+    from modules.evaluate.src.artifacts import baselines
 
     original_hash = baselines.identity_hash
     monkeypatch.setattr(
         baselines, "identity_hash", lambda value: "0" * 12 + original_hash(value)[12:]
     )
-    config, data = _config(tmp_path), _data()
+    config, data = (_config(tmp_path), _data())
     path = run_baselines(config, dataset=data)["test"]["majority_class"]
     before = path.read_bytes()
     data[role] = data[role].map(
@@ -347,7 +350,7 @@ def test_suite_baseline_loads_main_and_external_configurations(tmp_path, monkeyp
 def test_score_loads_shared_predictions_and_standalone_manifest(
     tmp_path, monkeypatch, regression, baseline
 ):
-    config, data = _config(tmp_path, regression), _data(regression)
+    config, data = (_config(tmp_path, regression), _data(regression))
     if baseline != "constant":
         config.baselines.names = [baseline]
     monkeypatch.setattr(
@@ -360,7 +363,7 @@ def test_score_loads_shared_predictions_and_standalone_manifest(
     for model in ("first", "second"):
         workspace = _make_workspace(tmp_path, config.workspace.task_type, num_labels=3)
         workspace.config.base_path = str(tmp_path)
-        workspace = get_evaluation_workspace(
+        workspace = EvaluationWorkspace(
             workspace.config.model_copy(
                 update={"model_name": model, "model_repo_id": None}
             ),
@@ -386,14 +389,16 @@ def test_score_loads_shared_predictions_and_standalone_manifest(
             config=PredictConfig(controls=[]).model_dump(mode="json"),
         )
         persist_predictions(workspace, output, seed=1)
-        result = ScoreStep(
+        result = score_inputs(
             ScoreConfig(
                 metrics=["mse", "spearmanr"] if regression else ["f1"],
                 bootstrap_enabled=True,
                 n_samples=5,
                 n_permutations=5,
-            )
-        ).run(workspace, predict_result=output)
+            ),
+            workspace,
+            predict_result=output,
+        )
         assert result.control_comparisons is None
         assert not (
             workspace.preds_path / f"control_{name}_predictions.parquet"
@@ -878,149 +883,6 @@ def test_invalid_training_targets_rejected(tmp_path, targets):
         run_baselines(config, dataset=data)
 
 
-def test_multi_target_baselines_score_each_target_and_resume(tmp_path, monkeypatch):
-    data = DatasetDict(
-        {
-            "train": Dataset.from_dict(
-                {
-                    "sequence": ["AAA", "CCC", "DDD"],
-                    "alpha": [0.0, 2.0, 4.0],
-                    "beta": [10.0, 20.0, 30.0],
-                }
-            ),
-            "test": Dataset.from_dict(
-                {
-                    "sequence": ["ACE", "DFG", "HI"],
-                    "alpha": [1.0, 3.0, 5.0],
-                    "beta": [12.0, 25.0, 25.0],
-                }
-            ),
-        }
-    )
-    base_config = _config(tmp_path, regression=True)
-    config = BaselineRunConfig.model_validate(
-        {
-            **base_config.model_dump(),
-            "multi_target": {
-                "target_columns": ["alpha", "beta"],
-                "metric": "r2",
-                "target_key": "label_name",
-                "count_key": "n_labels",
-                "aggregation_name": "unweighted_label_mean",
-            },
-            "baselines": {"names": ["train_mean", "composition", "mmseqs_knn"]},
-            "score": ScoreConfig(metrics=["mse"]),
-        }
-    )
-
-    search = Mock(return_value=[0, 1, None])
-    monkeypatch.setattr(runner, "_mmseqs_nearest_neighbors", search)
-    loader = Mock(return_value=data)
-    monkeypatch.setattr(dataloader, "load_evaluation_dataset", loader)
-    outputs = run_multi_target_baselines(config)
-    loader.assert_called_once()
-    search.assert_called_once()
-
-    assert set(outputs["test"]) == set(config.baselines.names)
-    for name, output_path in outputs["test"].items():
-        assert output_path.name == "scores.parquet"
-        assert {path.name for path in output_path.parent.iterdir()} == {
-            "scores.parquet",
-            "run_manifest.json",
-        }
-        target_table = pl.read_parquet(output_path)
-        assert target_table["label_name"].to_list() == [
-            "alpha",
-            "beta",
-            "unweighted_label_mean",
-        ]
-        paths = [Path(path) for path in target_table["manifest_path"].to_list()[:-1]]
-        manifests = [json.loads(path.read_text()) for path in paths]
-        assert [
-            manifest["run"]["config"]["prepare"]["label_column"]
-            for manifest in manifests
-        ] == ["alpha", "beta"]
-        scalar_scores = [manifest["score"]["scores"]["r2"] for manifest in manifests]
-        if name == "mmseqs_knn":
-            predictions = [
-                pl.read_parquet(path.with_name("predictions.parquet")) for path in paths
-            ]
-            assert [p["prediction"].to_list() for p in predictions] == [
-                [0.0, 2.0, 2.0],
-                [10.0, 20.0, 20.0],
-            ]
-            assert all(
-                p["fallback"].to_list() == [False, False, True] for p in predictions
-            )
-        assert target_table["r2"].to_list() == pytest.approx(
-            [*scalar_scores, sum(scalar_scores) / 2]
-        )
-        assert target_table["manifest_path"][-1] is None
-        aggregate = json.loads(output_path.with_name("run_manifest.json").read_text())[
-            "score"
-        ]
-        assert aggregate["value"] == pytest.approx(sum(scalar_scores) / 2)
-        assert aggregate["metadata"]["baseline"] == name
-
-    table_path = outputs["test"]["train_mean"]
-    table = pl.read_parquet(table_path)
-    assert table["r2"].to_list()[:2] == pytest.approx([-0.375, -0.01183431952662722])
-
-    manifest_path = table_path.with_name("run_manifest.json")
-    run_manifest = json.loads(manifest_path.read_text())
-    summary = run_manifest["score"]
-    assert summary["n_labels"] == 2
-    assert summary["metric"] == "r2"
-    assert run_manifest["evaluation"]["status"] == "complete"
-
-    original_manifest = manifest_path.read_text()
-    changed_data = DatasetDict(
-        {
-            "train": data["train"].map(lambda row: {"alpha": row["alpha"] + 5.0}),
-            "test": data["test"],
-        }
-    )
-    changed_outputs = run_multi_target_baselines(config, dataset=changed_data)
-    assert changed_outputs["test"]["train_mean"] != table_path
-    assert manifest_path.read_text() == original_manifest
-
-    actual_write_parquet = runner.write_parquet
-
-    def fail_summary_write(table, path):
-        if path.parent.name.startswith("summary-"):
-            raise RuntimeError("simulated aggregate publication interruption")
-        return actual_write_parquet(table, path)
-
-    with (
-        patch.object(
-            runner,
-            "write_parquet",
-            side_effect=fail_summary_write,
-        ),
-        pytest.raises(RuntimeError, match="publication interruption"),
-    ):
-        run_multi_target_baselines(config, dataset=data)
-    interrupted_manifest = json.loads(
-        table_path.with_name("run_manifest.json").read_text()
-    )
-    assert interrupted_manifest["evaluation"]["status"] == "running"
-    run_multi_target_baselines(config, dataset=data)
-    restored_manifest = json.loads(
-        table_path.with_name("run_manifest.json").read_text()
-    )
-    assert restored_manifest["evaluation"]["status"] == "complete"
-    assert restored_manifest["score"] == summary
-
-    builder = Mock(
-        side_effect=AssertionError("completed scalar baselines should resume")
-    )
-    monkeypatch.setattr(runner, "build_sequence_baseline", builder)
-    assert run_multi_target_baselines(config, dataset=data) == outputs
-    builder.assert_not_called()
-    assert search.call_count == 2
-    loader.assert_called_once()
-
-
 def test_baseline_cli_uses_data_subset_without_model_validation(tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
     config = load_baseline_config(
@@ -1031,48 +893,20 @@ def test_baseline_cli_uses_data_subset_without_model_validation(tmp_path, monkey
         ],
         ["steps.mode=not_a_model_mode", "workspace.model_name=null"],
     )
-    assert config.baselines.names == [
-        "majority_class",
-        "composition",
-        "mmseqs_knn",
-    ]
+    assert config.baselines.names == ["majority_class", "composition", "mmseqs_knn"]
     assert not hasattr(config.workspace, "model_name")
     from modules.evaluate.src import run_evaluate
 
     monkeypatch.setattr(
         "sys.argv", ["run_evaluate.py", "--baselines", str(root / "config.yaml")]
     )
-    monkeypatch.setattr(run_evaluate, "load_baseline_config", lambda *args: config)
+    from modules.evaluate.src.runners import runtime as runtime_module
+
+    monkeypatch.setattr(run_evaluate, "load_run_config", lambda *args, **kwargs: config)
     run = Mock(return_value={})
-    monkeypatch.setattr(run_evaluate, "run_baselines", run)
+    monkeypatch.setattr(runner, "run_baselines", run)
     monkeypatch.setattr(
-        run_evaluate,
-        "Accelerator",
-        Mock(side_effect=AssertionError("baseline CLI must not create an accelerator")),
-    )
-    run_evaluate.main()
-    run.assert_called_once_with(config)
-
-
-def test_baseline_cli_dispatches_multi_target_run(tmp_path, monkeypatch):
-    root = Path(__file__).resolve().parents[2] / "modules/evaluate/configs"
-    base = _config(tmp_path, regression=True)
-    config = BaselineRunConfig.model_validate(
-        {
-            **base.model_dump(),
-            "multi_target": {"target_columns": ["first", "second"], "metric": "r2"},
-        }
-    )
-    from modules.evaluate.src import run_evaluate
-
-    monkeypatch.setattr(
-        "sys.argv", ["run_evaluate.py", "--baselines", str(root / "config.yaml")]
-    )
-    monkeypatch.setattr(run_evaluate, "load_baseline_config", lambda *args: config)
-    run = Mock(return_value={})
-    monkeypatch.setattr(run_evaluate, "run_multi_target_baselines", run)
-    monkeypatch.setattr(
-        run_evaluate,
+        runtime_module,
         "Accelerator",
         Mock(side_effect=AssertionError("baseline CLI must not create an accelerator")),
     )
@@ -1122,22 +956,22 @@ def test_prepare_predict_carries_context_without_building_baselines(
         baseline_names=[name],
         dataset=raw,
         embedding_cache={"enabled": cached},
-        layerwise_config=(
-            LayerwiseConfig(enabled=True, layers=[0, 2]) if layerwise else None
-        ),
+        layerwise_config=LayerwiseConfig(enabled=True, layers=[0, 2])
+        if layerwise
+        else None,
     )
     workspace = _make_workspace(tmp_path, task_type)
-    predict = PredictStep(PredictConfig(controls=[], persist_to_disk=False))
+    predict = PredictConfig(controls=[], persist_to_disk=False)
     if layerwise:
         from accelerate import Accelerator
 
-        outputs = predict.run_layerwise(
-            workspace, prepared, Accelerator(cpu=True), seed=710019
+        outputs = predict_layer_inputs(
+            predict, workspace, prepared, Accelerator(cpu=True), seed=710019
         ).values()
     else:
-        outputs = [predict.run(workspace, prepared)]
+        outputs = [predict_inputs(predict, workspace, prepared)]
     for output in outputs:
-        assert output.baseline_context == prepared.baseline_context
+        assert output.baseline_context == prepared.test.baseline_context
         assert output.baseline_context["names"] == [name]
         assert output.controls == {}
     assert not (Path(workspace.base_path) / "baselines").exists()
@@ -1160,14 +994,16 @@ def test_prepare_predict_carries_context_without_building_baselines(
     )
     run_baselines(baseline_config, dataset=raw)
     for output in outputs:
-        score = ScoreStep(
+        score = score_inputs(
             ScoreConfig(
                 metrics=["mse"] if task_type == "sequence_regression" else ["f1"],
                 bootstrap_enabled=True,
                 n_samples=5,
                 n_permutations=5,
-            )
-        ).run(workspace, predict_result=output)
+            ),
+            workspace,
+            predict_result=output,
+        )
         assert set(score.condition_scores) == {"trained"}
 
 
@@ -1207,8 +1043,8 @@ def test_external_prepare_and_score_use_source_fit_identity(
         external_test_sets=[external],
     )
     paths = run_baselines(baseline_config, dataset=raw)
-    assert prepared.baseline_context["fit"] == source.baseline_context["fit"]
-    workspace = get_evaluation_workspace(
+    assert prepared.test.baseline_context["fit"] == source.test.baseline_context["fit"]
+    workspace = EvaluationWorkspace(
         workspace.config.model_copy(
             update={
                 "dataset_name": external.name,
@@ -1216,10 +1052,10 @@ def test_external_prepare_and_score_use_source_fit_identity(
             }
         )
     )
-    output = PredictStep(PredictConfig(controls=[], persist_to_disk=False)).run(
-        workspace, prepared
+    output = predict_inputs(
+        PredictConfig(controls=[], persist_to_disk=False), workspace, prepared
     )
-    ScoreStep(ScoreConfig(metrics=["f1"])).run(workspace, predict_result=output)
+    score_inputs(ScoreConfig(metrics=["f1"]), workspace, predict_result=output)
     manifest = json.loads(workspace.run_manifest_path.read_text())
     assert manifest["score"]["baselines"] == {}
     assert paths["external/separate"]["majority_class"].exists()
