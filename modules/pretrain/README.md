@@ -144,7 +144,8 @@ accelerate launch --mixed_precision bf16 \
 To run the pretraining smoke test on 4 GPUs:
 
 ```bash
-bash modules/pretrain/launch.sh --multi_gpu --num_processes 4 --mixed_precision bf16 -- \
+accelerate launch --multi_gpu --num_processes 4 --mixed_precision bf16 \
+    modules/pretrain/src/run_pretrain.py \
     modules/pretrain/configs/config.yaml \
     modules/pretrain/configs/smoke_gpu.yaml
 ```
@@ -193,7 +194,8 @@ win), followed by optional `key=value` overrides applied last. Same convention a
 overlay with only the fields you change, rather than copying `config.yaml`.
 
 ```bash
-bash modules/pretrain/launch.sh --multi_gpu --num_processes 4 --mixed_precision bf16 -- \
+accelerate launch --multi_gpu --num_processes 4 --mixed_precision bf16 \
+    modules/pretrain/src/run_pretrain.py \
     modules/pretrain/configs/config.yaml \
     modules/pretrain/configs/120M.yaml \
     trainer.output_dir=runs/my_run optimizer.lr=5e-4
@@ -614,7 +616,8 @@ GPU time. The single-node wrapper also checks and warms the caches before launch
 Once the smoke test passes, launch a full-size run. `configs/config.yaml` **is** the 350M config (standalone, runnable as-is, and ships with working Hugging Face Hub defaults for `bfd`/`mgnify`/`uniref`/`oas`); for 120M, merge `120M.yaml` on top (see [Running and Configuring](#running-and-configuring) for CLI overrides, resuming, and merging configs). To point at local Parquet data instead of the Hub for a given cluster, override `dataset.sources.*` via CLI dotlist (see [Dataset](#dataset) for the full override options — removing a source, switching its type, or adding a new one):
 
 ```bash
-uv run bash modules/pretrain/launch.sh --multi_gpu --num_processes 4 --mixed_precision bf16 -- \
+uv run accelerate launch --multi_gpu --num_processes 4 --mixed_precision bf16 \
+    modules/pretrain/src/run_pretrain.py \
     modules/pretrain/configs/config.yaml \
     modules/pretrain/configs/120M.yaml \
     dataset.sources.bfd.type=parquet \
@@ -664,8 +667,14 @@ export TOKENIZERS_PARALLELISM=false
 export HF_HOME=<path_to_shared_hf_cache>
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
 
-# Prepare once on this node, then launch if preparation succeeds.
-bash modules/pretrain/launch.sh --multi_gpu --num_processes "$NUM_PROCESSES" --mixed_precision bf16 -- \
+# Prepare once on this node, then launch only if preparation succeeds.
+python modules/pretrain/src/run_pretrain.py \
+    modules/pretrain/configs/config.yaml \
+    modules/pretrain/configs/120M.yaml \
+    dataset.prepare_only=true \
+    "$@"
+accelerate launch --multi_gpu --num_processes "$NUM_PROCESSES" --mixed_precision bf16 \
+    modules/pretrain/src/run_pretrain.py \
     modules/pretrain/configs/config.yaml \
     modules/pretrain/configs/120M.yaml \
     "$@"
@@ -693,7 +702,7 @@ python modules/pretrain/src/run_pretrain.py \
     dataset.prepare_only=true
 ```
 
-For a single node, `launch.sh` runs preparation once and starts Accelerate only after it succeeds. For multiple nodes, warm any shared cache with **one** preparation process (with `local_stage_dir=null`), then run preparation once per node with the training configuration (e.g. a Slurm `srun --ntasks-per-node=1` step). Wait for that entire step to succeed before starting the separate `accelerate launch` step on all nodes. Node-local paths and settings must match between the two steps.
+For a single node, run preparation once with `dataset.prepare_only=true`, then start Accelerate only after it succeeds. For multiple nodes, warm any shared cache with **one** preparation process (with `local_stage_dir=null`), then run preparation once per node with the training configuration (e.g. a Slurm `srun --ntasks-per-node=1` step). Wait for that entire step to succeed before starting the separate `accelerate launch` step on all nodes. Node-local paths and settings must match between the two steps.
 
 Cluster indexing uses a global Polars dense rank. The standard runtime supports up to 4,294,967,295 rows per split; larger splits need the 64-bit Polars runtime. Available RAM may impose a lower practical limit.
 
