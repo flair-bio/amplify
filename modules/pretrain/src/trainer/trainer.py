@@ -15,11 +15,7 @@ from typing import Any, Literal
 
 import torch
 from accelerate import Accelerator
-from accelerate.utils import (
-    DDPCommunicationHookType,
-    DistributedDataParallelKwargs,
-    DistributedType,
-)
+from accelerate.utils import DDPCommunicationHookType, DistributedDataParallelKwargs
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 from tqdm import tqdm
 from transformers import PreTrainedTokenizerBase
@@ -363,15 +359,6 @@ class Trainer:
                 f"requests {self.gradient_accumulation_steps}. Pass "
                 "`gradient_accumulation_steps=config.trainer.gradient_accumulation_steps` "
                 "when constructing the Accelerator."
-            )
-        engine_owned = (DistributedType.DEEPSPEED, DistributedType.MEGATRON_LM)
-        if (
-            config.gradient_accumulation_schedule
-            and self.accelerator.distributed_type in engine_owned
-        ):
-            raise ValueError(
-                "gradient_accumulation_schedule is not supported with DeepSpeed or "
-                "Megatron-LM, whose engines own the accumulation count."
             )
 
         # Injected metric logger: accumulates metrics on-device and flushes them

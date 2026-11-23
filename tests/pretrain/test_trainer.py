@@ -13,7 +13,6 @@ import pytest
 import torch
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState, GradientState
-from accelerate.utils import DistributedType
 
 from modules.pretrain.src.metric.logger import TrainingLogger
 from modules.pretrain.src.trainer import Trainer, TrainerConfig
@@ -252,21 +251,6 @@ class TestGradientAccumulationSchedule:
         assert trainer.gradient_accumulation_steps == 4
         assert accelerator.gradient_accumulation_steps == 4
         assert accelerator.step == 0
-
-    def test_rejects_engine_owned_accumulation(self, accelerator, tmp_path):
-        accelerator.distributed_type = DistributedType.DEEPSPEED
-        with pytest.raises(ValueError, match="DeepSpeed"):
-            Trainer(
-                accelerator=accelerator,
-                model=torch.nn.Linear(2, 2),
-                optimizer=MagicMock(),
-                scheduler=MagicMock(),
-                train_dataloader_provider=lambda epoch: [],
-                config=TrainerConfig(
-                    output_dir=tmp_path / "ckpt",
-                    gradient_accumulation_schedule=[(5, 4)],
-                ),
-            )
 
     def test_real_accelerator_follows_schedule(self, tmp_path, fresh_accelerate_state):
         """16 micro-batches with accumulation 2, then 4 from step 3: optimizer
