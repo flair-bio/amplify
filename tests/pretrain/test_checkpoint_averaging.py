@@ -1,4 +1,4 @@
-"""Tests for `run_average_checkpoints` (uniform averaging of HF exports)."""
+"""Tests for `checkpoint_averaging` (uniform averaging of HF exports)."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from modules.pretrain.src.model.modeling_amplify import (
     AMPLIFYForMaskedLM,
     register_amplify_auto_classes,
 )
-from modules.pretrain.src.run_average_checkpoints import (
+from modules.pretrain.src.utils.checkpoint_averaging import (
     MANIFEST_NAME,
     WEIGHTS_NAME,
     average_checkpoints,

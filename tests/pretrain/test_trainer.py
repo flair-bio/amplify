@@ -361,6 +361,70 @@ class TestHfSaveAtSteps:
         assert saved == [4, 8, 9, 10]
 
 
+class TestAverageHfCheckpoints:
+    """`average_hf_checkpoints` averages the `hf_save_at_steps` exports
+    into `hf_checkpoints/averaged` once training ends."""
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            dict(hf_save_at_steps=[9, 10]),  # no max_steps
+            dict(max_steps=10, hf_save_at_steps=[10]),
+            # Periodic saves at 8 and 10 rotate out the export at step 7.
+            dict(
+                max_steps=10,
+                hf_save_at_steps=[7, 9],
+                hf_save_steps=2,
+                hf_save_total_limit=3,
+            ),
+        ],
+    )
+    def test_rejects_configs_that_cannot_average(self, kwargs):
+        with pytest.raises(ValueError, match="average_hf_checkpoints"):
+            TrainerConfig(average_hf_checkpoints=True, **kwargs)
+
+    def test_accepts_a_limit_that_keeps_every_export(self):
+        TrainerConfig(
+            average_hf_checkpoints=True,
+            max_steps=10,
+            hf_save_at_steps=[8, 9, 10],
+            hf_save_steps=2,
+            hf_save_total_limit=3,
+        )
+
+    def test_averages_once_at_the_end_of_training(self, accelerator, tmp_path):
+        trainer = Trainer(
+            accelerator=accelerator,
+            model=torch.nn.Linear(2, 2),
+            optimizer=MagicMock(),
+            scheduler=MagicMock(),
+            train_dataloader_provider=lambda epoch: [{}] * 12,
+            config=TrainerConfig(
+                output_dir=tmp_path,
+                max_steps=10,
+                hf_save_at_steps=[10, 8, 9],
+                average_hf_checkpoints=True,
+            ),
+            metric_logger=MagicMock(),
+        )
+        trainer.training_step = MagicMock(return_value=(torch.tensor(0.0), None))
+        trainer.save_checkpoint = MagicMock()
+        trainer.save_hf_checkpoint = MagicMock()
+        target = "modules.pretrain.src.trainer.trainer.average_checkpoints"
+        with patch(target) as average:
+            trainer.train()
+            hf_root = tmp_path / "hf_checkpoints"
+            average.assert_called_once_with(
+                [hf_root / f"checkpoint_{step}" for step in (8, 9, 10)],
+                hf_root / "averaged",
+            )
+
+            # A resumed, already averaged run does not average again.
+            (hf_root / "averaged").mkdir(parents=True)
+            trainer.average_hf_checkpoints()
+            average.assert_called_once()
+
+
 class TestResumeGuardsAgainstShorterEpoch:
     """A config change can shorten the epoch, putting the saved
     `batches_completed` past its end."""

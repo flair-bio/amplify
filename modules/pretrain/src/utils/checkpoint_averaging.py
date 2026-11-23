@@ -1,12 +1,13 @@
 """Uniformly average HF checkpoints of one run into a single HF checkpoint.
 
 Typically the last few exports of the LR decay (see `trainer.hf_save_at_steps`),
-i.e. post-hoc Polyak / LAWA averaging.
-Runs on CPU, streaming one tensor at a time.
+i.e. Polyak / LAWA averaging. The trainer does this at the end of training
+when `trainer.average_hf_checkpoints` is set; otherwise, average a finished
+run by hand. Runs on CPU, streaming one tensor at a time.
 
-    python -m modules.pretrain.src.run_average_checkpoints \\
+    python -m modules.pretrain.src.utils.checkpoint_averaging \\
         --checkpoints runs/x/hf_checkpoints/checkpoint_{98000,99000,100000} \\
-        --output-dir runs/x/merged_polyak
+        --output-dir runs/x/hf_checkpoints/averaged
 """
 
 from __future__ import annotations

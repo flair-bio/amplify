@@ -225,8 +225,8 @@ scale `gradient_accumulation_steps` and the schedule counts together to keep
 these constant. `trainer.max_steps` sets the run length (`num_epochs` is ignored
 when it is set), and `scheduler.num_training_steps` sets the LR schedule length;
 past it, the LR stays at its final value. The schedule steps and
-`trainer.hf_save_at_steps` must fit within `max_steps`, so set them (or `null`)
-when shortening a run.
+`trainer.hf_save_at_steps` must fit within `max_steps`, so set them (or `null`,
+with `trainer.average_hf_checkpoints=false`) when shortening a run.
 
 ### Common recipes
 
@@ -237,7 +237,7 @@ Append these overrides to the launch command above, or put them in an overlay YA
 | Train on one source only (e.g. UniRef) | `dataset.sources.bfd.sampling_fraction=0 dataset.sources.mgnify.sampling_fraction=0 dataset.sources.oas.sampling_fraction=0` |
 | Use local parquet instead of the Hub | `dataset.sources.uniref.type=parquet dataset.sources.uniref.path='/path/to/uniref_assembled/*.parquet'` |
 | Use the 120M model | Add `modules/pretrain/configs/120M.yaml` after `config.yaml` |
-| Short test run | `trainer.max_steps=500 trainer.eval_steps=100 trainer.save_steps=100 trainer.gradient_accumulation_schedule=null trainer.hf_save_at_steps=null` |
+| Short test run | `trainer.max_steps=500 trainer.eval_steps=100 trainer.save_steps=100 trainer.gradient_accumulation_schedule=null trainer.hf_save_at_steps=null trainer.average_hf_checkpoints=false` |
 | Debug without `torch.compile` | `trainer.compile=false` |
 | Log to W&B online | `wandb.enabled=true wandb.mode=online wandb.run_name=my_run` |
 | Fit in less GPU memory, same tokens per step | `dataloader.max_tokens=31250 trainer.gradient_accumulation_steps=8 trainer.gradient_accumulation_schedule=[[90000,32]]` (default 62500 × 4, 16 in the decay) |
@@ -320,7 +320,6 @@ modules/pretrain/
     ├── config.py                    ← PretrainConfig: top-level Pydantic schema composing
     │                                  every component config into one object
     ├── run_pretrain.py              ← CLI entry point: builds components, wires the Trainer
-    ├── run_average_checkpoints.py   ← CLI: uniform average of HF checkpoints (post-hoc)
     │
     ├── dataset/
     │   ├── dataset.py               ← DatasetConfig, source preparation, cluster indexing,
@@ -337,7 +336,8 @@ modules/pretrain/
     ├── scheduler/scheduler.py       ← SchedulerConfig (HF get_scheduler wrapper)
     ├── loss/loss.py                 ← LossConfig + optional focal loss
     ├── trainer/trainer.py           ← TrainerConfig, WandbConfig, Trainer (train loop, checkpoints)
-    └── metric/logger.py             ← TrainingLogger: on-device metric accumulation + reduction
+    ├── metric/logger.py             ← TrainingLogger: on-device metric accumulation + reduction
+    └── utils/checkpoint_averaging.py ← uniform averaging of HF checkpoints (also a CLI)
 ```
 
 Shared config loading helpers live in `modules/core/utils/config_loader.py`.
@@ -578,6 +578,7 @@ The default warmup-stable-decay (WSD) schedule warms up to the peak LR, holds it
 | `save_steps` | `10000` | Save resumable state every N steps |
 | `hf_save_steps` | `10000` | Save a portable HF checkpoint every N steps |
 | `hf_save_at_steps` | `[98000, 98500, 99000, 99500, 100000]` | Extra steps at which to save an HF checkpoint (here the end of the decay, for averaging); combined with `hf_save_steps` |
+| `average_hf_checkpoints` | `true` | Average the `hf_save_at_steps` exports into `hf_checkpoints/averaged` at the end of training — see [Averaging the final checkpoints](#averaging-the-final-checkpoints) |
 | `save_total_limit` | `3` | Max resumable checkpoints kept; oldest deleted beyond this. `null` = unlimited |
 | `hf_save_total_limit` | `5` | Max HF checkpoints kept; oldest deleted beyond this (here exactly the five exports to average). `null` = unlimited |
 | `tf32` | `true` | Enable TF32 matmuls |
@@ -697,11 +698,6 @@ accelerate launch --multi_gpu --num_processes "$NUM_PROCESSES" --mixed_precision
     modules/pretrain/configs/config.yaml \
     trainer.output_dir="$OUTPUT_DIR" \
     "$@"
-
-# Average the decay-phase exports (trainer.hf_save_at_steps) into the final model.
-python -m modules.pretrain.src.run_average_checkpoints \
-    --checkpoints "$OUTPUT_DIR"/hf_checkpoints/checkpoint_{98000,98500,99000,99500,100000} \
-    --output-dir "$OUTPUT_DIR"/merged_polyak
 ```
 
 Create `logs/` before submitting (`mkdir -p logs`): Slurm opens the output files before the script runs.
@@ -858,13 +854,15 @@ local log data by default, so every run is a single self-contained folder:
 │   ├── custom_checkpoint_0.pkl                    ← metric logger counters
 │   └── trainer_state.pt                           ← epoch, global_step, batches_completed
 └── hf_checkpoints/                                ← portable, self-contained HF checkpoints
-    └── checkpoint_<S>/
-        ├── config.json                            ← includes auto_map
-        ├── model.safetensors
-        ├── modeling_amplify.py                    ← copied source, so the checkpoint
-        ├── configuration_amplify.py                 loads without this repo on the path
-        ├── tokenizer.py
-        └── tokenizer.json, tokenizer_config.json
+    ├── checkpoint_<S>/
+    │   ├── config.json                            ← includes auto_map
+    │   ├── model.safetensors
+    │   ├── modeling_amplify.py                    ← copied source, so the checkpoint
+    │   ├── configuration_amplify.py                 loads without this repo on the path
+    │   ├── tokenizer.py
+    │   └── tokenizer.json, tokenizer_config.json
+    └── averaged/                                  ← average of the hf_save_at_steps exports
+                                                     (if trainer.average_hf_checkpoints)
 ```
 
 Resumable checkpoints are saved **directly** in `output_dir`; portable ones go under `hf_checkpoints/`. Use `checkpoint_epoch_*` to resume an interrupted run (`trainer.resume_from_checkpoint`), and `hf_checkpoints/` for downstream evaluation, fine-tuning, or Hub upload (see [Using a Trained Model with Hugging Face](#using-a-trained-model-with-hugging-face)).
@@ -877,19 +875,23 @@ The two checkpoint types fire strictly on their own independent schedules and ne
 - **HF checkpoint** (`hf_checkpoints/checkpoint_<S>/`) saves every `trainer.hf_save_steps` optimizer steps.
 - Neither is saved automatically at the end of every epoch. Instead, both are guaranteed to be saved exactly once at the very end of training (after the last epoch/`max_steps`), unless a step-based save already landed on that exact final step.
 - Set `trainer.save_total_limit` / `trainer.hf_save_total_limit` (`3` / `5` in `config.yaml`, unlimited in the schema) to cap how many checkpoints of each type are kept on disk; the oldest (by step) are deleted automatically as new ones are saved. This keeps storage bounded on long runs.
-- `trainer.hf_save_at_steps` adds HF exports at specific steps (e.g. the end of the LR decay) on top of `hf_save_steps`. With `hf_save_total_limit`, make sure the exports you want to average are the newest ones kept.
+- `trainer.hf_save_at_steps` adds HF exports at specific steps (e.g. the end of the LR decay) on top of `hf_save_steps`. With `trainer.average_hf_checkpoints`, the config is rejected if `hf_save_total_limit` would delete any of them before averaging.
 
 ### Averaging the final checkpoints
 
-Uniformly averaging the last few HF exports of the decay phase (Polyak / LAWA averaging) usually gives a slightly better model than the last export alone. `config.yaml` saves the five exports below (`trainer.hf_save_at_steps`). The averaging runs on CPU, one tensor at a time:
+Uniformly averaging the last few HF exports of the decay phase (Polyak / LAWA averaging) usually gives a slightly better model than the last export alone. `config.yaml` saves five exports at the end of the decay (`trainer.hf_save_at_steps`) and, with `trainer.average_hf_checkpoints: true`, averages them into `hf_checkpoints/averaged/` once training ends. This is the final model. The main process averages on CPU, one tensor at a time, while the other ranks wait. A resumed run skips averaging if `averaged/` already exists.
+
+The output is a regular HF checkpoint (config, tokenizer and remote code copied from the last input) plus a `merge_manifest.json` listing the inputs, written atomically.
+
+To average by hand instead, e.g. with `trainer.average_hf_checkpoints=false` or to try other steps afterwards, run the same utility once training has finished. It refuses to overwrite an existing `--output-dir`:
 
 ```bash
-python -m modules.pretrain.src.run_average_checkpoints \
+python -m modules.pretrain.src.utils.checkpoint_averaging \
     --checkpoints runs/350M/hf_checkpoints/checkpoint_{98000,98500,99000,99500,100000} \
-    --output-dir runs/350M/merged_polyak
+    --output-dir runs/350M/hf_checkpoints/averaged
 ```
 
-The inputs must be single-file HF exports of the same run (identical `config.json` and tensor shapes). The output is a regular HF checkpoint (config, tokenizer and remote code copied from the last input) plus a `merge_manifest.json` listing the inputs. It is written atomically and the command refuses to overwrite an existing `--output-dir`.
+The inputs must be single-file HF exports of the same run (identical `config.json` and tensor shapes).
 
 ### Uploading a checkpoint to the HuggingFace Hub
 

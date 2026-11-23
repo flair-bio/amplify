@@ -188,9 +188,10 @@ trainer:
   eval_steps: 1000
   save_steps: 10000
   hf_save_steps: 10000
-  # Exports averaged into the final model (run_average_checkpoints, see README);
-  # with hf_save_total_limit 5, they are exactly the ones kept.
+  # Exports averaged into the final model (hf_checkpoints/averaged) at the end of
+  # training; with hf_save_total_limit 5, they are exactly the ones kept.
   hf_save_at_steps: [98000, 98500, 99000, 99500, 100000]
+  average_hf_checkpoints: true
   save_total_limit: 3         # cap on resumable checkpoints kept; null = unlimited
   hf_save_total_limit: 5      # cap on HF checkpoints kept; null = unlimited
   tf32: true

@@ -22,6 +22,7 @@ from transformers import PreTrainedTokenizerBase
 
 from modules.pretrain.src.metric.logger import TrainingLogger
 from modules.pretrain.src.model.modeling_amplify import register_amplify_auto_classes
+from modules.pretrain.src.utils.checkpoint_averaging import average_checkpoints
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +189,13 @@ class TrainerConfig(BaseModel):
             "`hf_save_steps`; a step requested by both is saved once."
         ),
     )
+    average_hf_checkpoints: bool = Field(
+        False,
+        description=(
+            "At the end of training, uniformly average the `hf_save_at_steps` "
+            "exports into `output_dir/hf_checkpoints/averaged`."
+        ),
+    )
     save_total_limit: int | None = Field(
         None,
         gt=0,
@@ -287,6 +295,32 @@ class TrainerConfig(BaseModel):
             raise ValueError(
                 f"hf_save_at_steps must be <= max_steps ({self.max_steps}), "
                 f"got {hf_steps}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_averaging(self) -> "TrainerConfig":
+        if not self.average_hf_checkpoints:
+            return self
+        steps = set(self.hf_save_at_steps or ())
+        if not self.max_steps or len(steps) < 2:
+            raise ValueError(
+                "average_hf_checkpoints requires max_steps and at least two "
+                "hf_save_at_steps"
+            )
+        limit, every = self.hf_save_total_limit, self.hf_save_steps
+        if limit is None:
+            return self
+        # HF saves from the first averaged step on; rotation keeps the newest.
+        saves = steps | {self.max_steps}
+        if every:
+            saves.update(range(every, self.max_steps + 1, every))
+        needed = sum(step >= min(steps) for step in saves)
+        if needed > limit:
+            raise ValueError(
+                f"average_hf_checkpoints: hf_save_total_limit={limit} would "
+                f"delete exports before averaging ({needed} HF saves from step "
+                f"{min(steps)} on)"
             )
         return self
 
@@ -564,6 +598,8 @@ class Trainer:
             self.save_checkpoint()
         if self._last_hf_save_step != self.global_step:
             self.save_hf_checkpoint()
+        if self.config.average_hf_checkpoints:
+            self.average_hf_checkpoints()
 
         self.accelerator.end_training()
 
@@ -843,6 +879,25 @@ class Trainer:
             "checkpoint_*",
             self.config.hf_save_total_limit,
         )
+
+    def average_hf_checkpoints(self) -> None:
+        """Averages the `hf_save_at_steps` exports into `hf_checkpoints/averaged`.
+
+        Runs on the main process; skipped if the output already exists (e.g.
+        when resuming a finished run).
+        """
+        hf_root = self.output_dir / "hf_checkpoints"
+        output_dir = hf_root / "averaged"
+        if self.is_main:
+            if output_dir.exists():
+                logger.info(f"{output_dir} already exists; skipping averaging.")
+            else:
+                steps = sorted(set(self.config.hf_save_at_steps or ()))
+                average_checkpoints(
+                    [hf_root / f"checkpoint_{step}" for step in steps], output_dir
+                )
+                logger.info(f"Averaged HF checkpoints {steps} into {output_dir}")
+        self.accelerator.wait_for_everyone()
 
     def _rotate_checkpoints(
         self, base_dir: Path, pattern: str, limit: int | None
