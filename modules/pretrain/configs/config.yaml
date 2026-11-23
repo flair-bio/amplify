@@ -146,7 +146,7 @@ dataset:
   val_min_score: 0.0
   val_holdout_modulus: 200
   seed: 25
-  num_proc: 12                   # processes for the one-time score-filter map
+  num_proc: null                 # processes for the one-time score-filter map, null allocates most cores to rank 0 for processing
   split_writer_batch_size: 100000  # rows per Arrow batch in the cached splits
   cluster_index_cache_dir: null  # defaults to a subdir of the HF datasets cache
   prepare_only: false            # build caches then exit, without training

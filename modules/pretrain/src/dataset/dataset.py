@@ -20,7 +20,7 @@ from datasets import Dataset as HFDataset  # type: ignore[attr-defined]
 from datasets import load_dataset, load_from_disk  # type: ignore[attr-defined]
 from datasets.config import HF_DATASETS_CACHE
 from huggingface_hub.constants import HF_HUB_CACHE
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from modules.core.utils.madvise import MADV_RANDOM, advise_available, advise_paths
 from modules.core.utils.units import Bytes
@@ -199,9 +199,14 @@ class DatasetConfig(BaseModel):
     )
     num_proc: int | None = Field(
         None,
+        gt=0,
+        strict=True,
+        validate_default=True,  # so the default `None` gets resolved
         description="Number of processes for the one-time, cached passes over "
         "each source: the initial parquet/hub load into Arrow and the "
-        "train/val split. Not part of any cache key.",
+        "train/val split. Not part of any cache key. Unset: allotted CPUs on "
+        "local rank 0, 1 elsewhere. Stored as `None` when 1, since `datasets` "
+        "still spawns a worker pool for `num_proc=1`.",
     )
     cluster_index_cache_dir: Path | None = Field(
         None,
@@ -213,10 +218,11 @@ class DatasetConfig(BaseModel):
         100_000,
         gt=0,
         description="Rows per Arrow record batch in the cached train/val "
-        "splits. `datasets` defaults to 1000, which leaves a billion-row "
-        "source with millions of batches; opening one then costs a metadata "
-        "read per batch, minutes to hours on a network filesystem. Not part "
-        "of the cache key: an existing cache keeps its original batch size.",
+        "splits and the filter's indices files. `datasets` defaults to 1000, "
+        "which leaves a billion-row source with millions of batches; opening "
+        "one then costs a metadata read per batch, minutes to hours on a "
+        "network filesystem. Not part of the cache key: an existing cache "
+        "keeps its original batch size.",
     )
     prepare_only: bool = Field(
         False,
@@ -240,6 +246,18 @@ class DatasetConfig(BaseModel):
         "with `type: prepared`, `path: <folder>`, without rebuilding. Ignored "
         "without `prepare_only`.",
     )
+
+    @field_validator("num_proc")
+    @classmethod
+    def _resolve_num_proc(cls, v: int | None) -> int | None:
+        if v is None:
+            # Automatically give most of the CPU cores to rank 0 for data processing.
+            v = (
+                1 # Only global rank 0 builds the cache. Other ranks get 1 CPU.
+                if os.environ.get("LOCAL_RANK", "0") != "0"
+                else len(os.sched_getaffinity(0))
+            )
+        return v if v > 1 else None
 
     @model_validator(mode="after")
     def _warn_export_without_prepare_only(self) -> "DatasetConfig":
@@ -735,10 +753,12 @@ def _load_and_split_source(
         out = dataset.filter(
             _cluster_split_filter,
             batched=True,
+            batch_size=batch_size,
+            writer_batch_size=batch_size,
             num_proc=dataset_cfg.num_proc,
             fn_kwargs={**split_kwargs, "keep_val": keep_val},
             desc=f"Splitting '{name}' {label}",
-            new_fingerprint=f"{fp}-filter",
+            new_fingerprint=f"{fp}-filter-v1",
         ).map(
             batched=True,
             batch_size=batch_size,
