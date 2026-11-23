@@ -19,7 +19,7 @@ from omegaconf import OmegaConf
 import modules.pretrain.src.run_pretrain as run_pretrain
 from modules.core.utils.config_loader import load_config
 from modules.pretrain.src.config import PretrainConfig
-from modules.pretrain.src.loss import FocalLoss, LossConfig
+from modules.pretrain.src.loss.loss import FocalLoss, LossConfig
 
 CONFIGS_DIR = Path(__file__).parents[2] / "modules" / "pretrain" / "configs"
 MAIN_CONFIG = CONFIGS_DIR / "config.yaml"

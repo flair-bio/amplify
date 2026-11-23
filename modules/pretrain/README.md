@@ -321,7 +321,6 @@ modules/pretrain/
     │                                  every component config into one object
     ├── run_pretrain.py              ← CLI entry point: builds components, wires the Trainer
     ├── run_average_checkpoints.py   ← CLI: uniform average of HF checkpoints (post-hoc)
-    ├── loss.py                      ← LossConfig + optional focal loss
     │
     ├── dataset/
     │   ├── dataset.py               ← DatasetConfig, source preparation, cluster indexing,
@@ -336,6 +335,7 @@ modules/pretrain/
     │
     ├── optimizer/optimizer.py       ← OptimizerConfig + decay/no-decay param grouping
     ├── scheduler/scheduler.py       ← SchedulerConfig (HF get_scheduler wrapper)
+    ├── loss/loss.py                 ← LossConfig + optional focal loss
     ├── trainer/trainer.py           ← TrainerConfig, WandbConfig, Trainer (train loop, checkpoints)
     └── metric/logger.py             ← TrainingLogger: on-device metric accumulation + reduction
 ```

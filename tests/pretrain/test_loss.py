@@ -9,7 +9,7 @@ import torch
 from pydantic import ValidationError
 from torch.nn.functional import cross_entropy
 
-from modules.pretrain.src.loss import FocalLoss, LossConfig, get_loss
+from modules.pretrain.src.loss.loss import FocalLoss, LossConfig, get_loss
 
 
 def _batch(seed: int = 0, vocab: int = 7):
