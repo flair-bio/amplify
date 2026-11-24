@@ -1,5 +1,4 @@
 import copy
-import hashlib
 import json
 
 import numpy as np
@@ -29,13 +28,13 @@ def vocabulary(tmp_path):
 
 @pytest.fixture
 def prepared_factory(tmp_path):
-    def create(dimension=1024, lengths=(64, 65, 66), teacher=True, columns=None):
+    def create(dimension=7, lengths=(64, 65, 66), teacher=True, columns=None):
         root = tmp_path / "parquet"
         root.mkdir()
         features = columns if columns is not None else feature_columns(dimension)
         teacher = (
             {"model_id": "fixture/teacher", "revision": "fixture-revision",
-             "dimension": dimension, "checkpoint_sha256": "a" * 64}
+             "dimension": dimension}
             if teacher is True else copy.deepcopy(teacher)
         )
         records, arrays = [], []
@@ -68,7 +67,6 @@ def prepared_factory(tmp_path):
                         parquet_metadata[key] = str(teacher[field]).encode()
             table = pa.table(columns).replace_schema_metadata(parquet_metadata)
             pq.write_table(table, path)
-            row["embedding_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
             records.append(row)
             arrays.append(values)
         metadata = {

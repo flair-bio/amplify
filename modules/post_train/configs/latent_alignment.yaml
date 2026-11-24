@@ -9,11 +9,12 @@ dataset:
 output_dir: /absolute/path/to/new-output
 alignment:
   projection_dim: 512
-  pool_proteins: 64
+  pool_proteins: 256
   loss_weight: 0.5
   initial_temperature: 0.07
   min_inverse_temperature: 0.01
 mlm:
+  loss_weight: 1.0
   mask_probability: 0.15
   mask_replace_probability: 0.8
   random_replace_probability: 0.1
@@ -33,5 +34,3 @@ wandb:
   entity: null
   run_name: null
   tags: []
-  mode: offline
-  dir: null

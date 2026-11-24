@@ -52,8 +52,7 @@ Training finds `dataset.json` inside that directory without contacting the Hub.
 Use an absolute path, `./...` or `~/...` to make local intent explicit; a missing
 local path fails rather than falling back to a Hub download. Leave
 `dataset.revision` unset for local data. For reproducibility, pin and record the
-Hub commit when downloading; training also records the manifest hash and verifies
-embedding file checksums.
+Hub commit when downloading.
 
 ### Alternatively, load directly from the Hub
 
@@ -67,7 +66,7 @@ dataset:
 An existing local directory takes precedence; otherwise, a Hub ID downloads or
 reuses a cached snapshot. `dataset.revision` is optional: omit it for the default
 branch, or specify a branch, tag or commit hash. A full commit hash is recommended
-for reproducibility. The resolved snapshot commit is recorded in provenance even
+for reproducibility. The resolved snapshot commit is recorded in `run.json` even
 when the requested revision is a branch or omitted.
 
 Cache placement uses standard Hugging Face settings such as `HF_HOME` and
@@ -90,13 +89,15 @@ Each optimizer update combines two objectives:
    every other residue in the same protein pool, including same-protein residues.
 
 ```text
-loss = MLM loss + alignment.loss_weight * latent alignment loss
+loss = mlm.loss_weight * MLM loss
+     + alignment.loss_weight * latent alignment loss
 ```
 
-The default alignment weight is `0.5`. Sequence features are captured just before
-the encoder's final normalization. The entire native sequence model, including
-its MLM decoder, is updated alongside the new projections and temperature.
-Structure embeddings remain fixed; **no teacher encoder is loaded**.
+The default MLM and alignment weights are `1.0` and `0.5`, respectively.
+Sequence features are captured just before the encoder's final normalization.
+The entire native sequence model, including its MLM decoder, is updated
+alongside the new projections and temperature. Structure embeddings remain
+fixed; **no teacher encoder is loaded**.
 
 Training makes **one pass** over the training split, then exports the final
 checkpoint. The update count is `number_of_training_proteins / training.batch_size`.
@@ -114,10 +115,11 @@ The supplied YAML uses:
 | Setting | Value | Meaning |
 | --- | --- | --- |
 | `training.batch_size` | 256 | Proteins contributing to one optimizer update |
-| `alignment.pool_proteins` | 64 | Proteins sharing contrastive negatives; four independent pools per update |
+| `alignment.pool_proteins` | 256 | Proteins sharing contrastive negatives; one pool per update |
 | `training.microbatch_size` | 32 | Proteins processed in each model forward |
 | `training.anchor_chunk_size` | 1024 | Residue anchors processed per contrastive similarity block |
 | `alignment.projection_dim` | 512 | Shared sequence/structure embedding dimension |
+| `mlm.loss_weight` | 1.0 | MLM contribution to the total loss |
 | `alignment.loss_weight` | 0.5 | Alignment contribution to the total loss |
 | `training.encoder_lr` | `3e-6` | Learning rate for the pretrained encoder and MLM decoder |
 | `training.head_lr` | `1e-3` | Learning rate for projections and temperature |
@@ -132,25 +134,29 @@ Microbatches limit model-forward memory; anchor chunks limit similarity-matrix
 memory. Every anchor still compares against all candidate residues in its pool.
 Gradient caching replays microbatches to accumulate full-pool gradients without
 keeping all encoder graphs in memory; smaller microbatches do not shrink the
-negative pool.
+negative pool. Larger pools increase contrastive computation and memory use.
 
 Other validated settings cover MLM corruption, temperature, AdamW betas/decay,
 gradient clipping and the random seed. CUDA execution uses BF16 autocast with
-FP32 parameters, gradients and contrastive softmax. Deterministic execution is
-enabled, but bitwise equality across hardware or software versions is not promised.
+FP32 parameters, gradients and contrastive softmax. Python, NumPy and PyTorch
+random-number generators are seeded; cuDNN deterministic mode is enabled, but
+PyTorch's global deterministic-algorithms mode is not forced. Exact repeatability
+across runs, hardware or software versions is not guaranteed.
 Override the top-level seed with `seed=123`; it controls initialization,
-training randomness and diagnostic validation sampling/masking.
+training randomness and diagnostic validation masking.
 
 ## Monitor training and validation
 
-The terminal shows a progress bar with update count, elapsed time, ETA, training
-losses and the latest validation MLM loss. Set `training.progress_bar=false` to
-disable it. Full numeric records are always saved to `metrics.jsonl`.
+The terminal shows startup milestones, a progress bar with update count, elapsed
+time, ETA, training losses and the latest validation MLM loss, and a protein
+counter during validation. Final training and validation metrics are saved in
+`run.json`; per-update curves are sent to W&B when enabled.
 
 Validation runs **before training, every `training.validation_interval` updates,
-and after the final update**. It uses fixed corruption masks on a deterministic
-sample of up to 32 validation proteins per source.
-This measures **MLM only**, not latent alignment or downstream performance.
+and after the final update**. It evaluates every validation protein, with fixed
+corruption masks and deterministic source/ID ordering.
+This measures the **unweighted MLM loss** only, not latent alignment or
+downstream performance.
 Validation does not choose a checkpoint or determine when training ends.
 
 ### Enable Weights & Biases
@@ -159,15 +165,13 @@ W&B is disabled by default. After authenticating separately, append:
 
 ```bash
 wandb.enabled=true \
-wandb.mode=online \
 wandb.entity=YOUR_USERNAME_OR_TEAM \
 wandb.project=amplify \
 wandb.run_name=amplify-latent-alignment
 ```
 
 `wandb.entity` is a W&B username or team, not necessarily an organization slug.
-Use `wandb.mode=offline` to log locally without syncing online.
-Local W&B files default to `<output_dir>/wandb`.
+When enabled, W&B uses its standard SDK settings.
 Training metrics appear under `train/*` and diagnostic metrics under
 `validation/*`. The logger records settings and metrics, not model weights,
 source code, protein sequences or embedding targets.
@@ -199,16 +203,16 @@ embeddings/
 
 The manifest contains `metadata` and `records`. Records identify the protein,
 chain, source, train/validation split, uppercase sequence, ordered residue IDs,
-relative embedding path and file SHA256.
+and relative embedding path.
 
 Only `parquet_per_protein_v1` is supported. Each file contains one row per
 residue, row-identity columns and float32 embedding features.
 `metadata.embedding_schema.feature_columns` defines their order and dimension.
-Every file must agree with the manifest, have finite nonzero feature rows, and
-pass checksum and residue-mapping checks when loaded.
+Files are checked for schema, metadata, finite nonzero values and residue
+identity when loaded. Input file checksums are not computed or verified.
 
 Teacher details in `metadata.structural_teacher` are optional provenance, not
-training settings. No teacher identity or teacher checkpoint hash is prescribed.
+training settings. No teacher identity is required.
 Supplied dimension declarations must agree with the feature columns; model and
 revision declarations must agree when present in both manifest and file metadata.
 Original dataset metadata is preserved in the run's provenance.
@@ -222,18 +226,15 @@ independence: audit homology and downstream benchmark overlap separately.
 ```text
 <output_dir>/
   amplify/             # Standalone native model, tokenizer and code
-  alignment_heads.pt   # Training-only projections and temperature
-  config.json          # Resolved settings and selected device
-  provenance.json      # Dataset metadata and input hashes
-  metrics.jsonl        # Training and validation records
-  summary.json         # Successful completion and run summary
-  wandb/               # Present when W&B logging is enabled
+  run.json             # Resolved settings, provenance and final metrics
 ```
 
 Pass **`<output_dir>/amplify`** to downstream evaluation as the model checkpoint.
-It does not need the original student directory, structure embeddings or
-alignment heads. Load checkpoint-owned code in a fresh process to avoid global
-model/kernel registration collisions.
+It does not need the original student directory or structure embeddings. Load
+checkpoint-owned code in a fresh process to avoid global model/kernel
+registration collisions.
 
-Only a completed run writes `summary.json`. If interrupted, retain the incomplete
-output for diagnosis and restart with a fresh directory.
+`run.json` is written before training with the resolved settings and provenance,
+then updated with final metrics and a completed status after export. If
+interrupted, retain the incomplete output for diagnosis and restart with a fresh
+directory. It records input paths and metadata but does not contain file hashes.

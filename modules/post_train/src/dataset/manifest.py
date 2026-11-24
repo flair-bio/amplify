@@ -1,8 +1,7 @@
-"""Lazy, checksum-bound residue embeddings for latent alignment."""
+"""Manifest loading and residue-validated embeddings for latent alignment."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -15,7 +14,7 @@ import pyarrow.parquet as pq
 from numpy.typing import NDArray
 from pydantic import BaseModel, ConfigDict, Field
 
-from modules.post_train.src.contracts.config import DatasetConfig
+from modules.post_train.src.config import DatasetConfig
 
 ROW_COLUMNS = (
     "record_id",
@@ -89,7 +88,6 @@ class Record(BaseModel):
     residue_ids: list[str]
     cluster_id: str | None = None
     embedding_file: Path
-    embedding_sha256: str
     embedding_spec: EmbeddingSpec = Field(exclude=True)
 
 
@@ -100,7 +98,6 @@ class PreparedDataset:
     metadata: dict[str, Any]
     embedding_spec: EmbeddingSpec
     manifest: Path
-    manifest_sha256: str
     hub_revision: str | None = None
 
 
@@ -137,8 +134,7 @@ def load_manifest(
     # Do not resolve the final symlink: Hub manifests point into a blob cache,
     # but their relative embedding paths belong to the snapshot directory.
     path = Path(path).expanduser().absolute()
-    blob = path.read_bytes()
-    payload = json.loads(blob)
+    payload = json.loads(path.read_text())
     metadata = payload["metadata"]
     spec = embedding_spec(metadata)
     records = [
@@ -159,8 +155,6 @@ def load_manifest(
             raise ValueError(f"{row.id}: invalid residue identities/order.")
         if row.split not in {"train", "validation"}:
             raise ValueError(f"{row.id}: split must be train or validation.")
-        if not re.fullmatch(r"[0-9a-f]{64}", row.embedding_sha256):
-            raise ValueError(f"{row.id}: invalid embedding_sha256.")
         relative = row.embedding_file
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError(f"{row.id}: embedding_file must stay within the dataset.")
@@ -189,18 +183,12 @@ def load_manifest(
         metadata=metadata,
         embedding_spec=spec,
         manifest=path,
-        manifest_sha256=hashlib.sha256(blob).hexdigest(),
         hub_revision=hub_revision,
     )
 
 
 def load_embeddings(row: Record) -> NDArray[np.float32]:
-    blob = row.embedding_file.read_bytes()
-    if hashlib.sha256(blob).hexdigest() != row.embedding_sha256:
-        raise ValueError(
-            f"{row.id}: embedding checksum differs from its recorded residue mapping."
-        )
-    table = pq.read_table(pa.BufferReader(blob))
+    table = pq.read_table(row.embedding_file)
     spec = row.embedding_spec
     names = [*ROW_COLUMNS, *spec.feature_columns]
     if table.column_names != names or table.num_rows != len(row.sequence):

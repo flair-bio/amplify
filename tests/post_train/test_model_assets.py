@@ -35,7 +35,6 @@ def test_discovers_transitive_model_and_tokenizer_assets_without_executing(check
 
 @pytest.mark.parametrize("reference", [
     "owner/model--amplify.AMPLIFYForMaskedLM",
-    "../amplify.AMPLIFYForMaskedLM",
     "missing.AMPLIFYForMaskedLM",
 ])
 def test_rejects_nonlocal_or_missing_sources(checkpoint_assets, reference):

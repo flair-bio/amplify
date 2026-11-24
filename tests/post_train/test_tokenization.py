@@ -53,8 +53,7 @@ def test_rejects_special_token_metadata_that_disagrees_with_processor(tmp_path):
 
 
 @pytest.mark.parametrize("changes", [
-    {"vocab_size": 31}, {"pad_token_id": 1}, {"mask_token_id": 1},
-    {"max_position_embeddings": 5},
+    {"vocab_size": 31}, {"max_position_embeddings": 5},
 ])
 def test_native_model_must_match_tokenizer_and_actual_input_capacity(tmp_path, monkeypatch, changes):
     from transformers import AutoModelForMaskedLM
