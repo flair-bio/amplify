@@ -290,10 +290,9 @@ class TestCompiledCheckpointKeys:
         self._save(trainer, accelerator, {"w": torch.zeros(1)}, tmp_path)
         assert accelerator.unwrap_model.call_args.kwargs["keep_torch_compile"] is False
 
-    def test_compile_and_ddp_prefixes_are_stripped(self, trainer, accelerator, tmp_path):
-        kwargs = self._save(
-            trainer, accelerator, {"_orig_mod.module.encoder.weight": torch.zeros(1)}, tmp_path
-        )
+    @pytest.mark.parametrize("key", ["_orig_mod.module.encoder.weight", "module.encoder.weight"])
+    def test_compile_and_ddp_prefixes_are_stripped(self, trainer, accelerator, tmp_path, key):
+        kwargs = self._save(trainer, accelerator, {key: torch.zeros(1)}, tmp_path)
         assert set(kwargs["state_dict"]) == {"encoder.weight"}
 
     def test_state_dict_is_read_without_unwrapping_the_live_model(
@@ -326,7 +325,7 @@ class TestAccelerateUnwrapMutation:
 
         return torch.compile(DistributedDataParallel(torch.nn.Linear(2, 2)))
 
-    def test_real_get_state_dict_without_unwrap_keeps_ddp(self, gloo_group, tmp_path):
+    def test_real_get_state_dict_without_unwrap_keeps_ddp(self, gloo_group):
         from accelerate import Accelerator
         from torch.nn.parallel import DistributedDataParallel
 
@@ -334,14 +333,17 @@ class TestAccelerateUnwrapMutation:
         Accelerator(cpu=True).get_state_dict(model, unwrap=False)
         assert isinstance(model._orig_mod, DistributedDataParallel)
 
-    def test_default_get_state_dict_breaks_ddp(self, gloo_group, tmp_path):
+    def test_default_get_state_dict_breaks_ddp(self, gloo_group):
         """Documents the accelerate behaviour the fix avoids."""
         from accelerate import Accelerator
         from torch.nn.parallel import DistributedDataParallel
 
         model = self._compiled_ddp()
         Accelerator(cpu=True).get_state_dict(model)
-        assert not isinstance(model._orig_mod, DistributedDataParallel)
+        assert not isinstance(model._orig_mod, DistributedDataParallel), (
+            "accelerate no longer strips DDP off the live model; the "
+            "`unwrap=False` workaround in `save_hf_checkpoint` can be removed"
+        )
 
 
 class TestRotateCheckpoints:
