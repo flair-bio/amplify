@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from modules.post_train.src.contracts.config import AlignmentConfig, MLMConfig, TrainingConfig
+from modules.post_train.src.config import AlignmentConfig, MLMConfig, TrainingConfig
 from modules.post_train.src.model.alignment import AlignmentModel, forward
 from modules.post_train.src.trainers.latent_alignment import (
     cached_backward, capture_rng, gradient_norms, make_optimizer, seed_everything, validation_mlm,
@@ -70,14 +70,18 @@ def assert_rng_equal(expected, actual):
     assert torch.equal(expected[2], actual[2])
 
 
-@pytest.mark.parametrize("empty_mlm", [False, True])
-@pytest.mark.parametrize("nondefault", [False, True])
-def test_dense_vs_cached_loss_gradients_update_and_rng(empty_mlm, nondefault):
+@pytest.mark.parametrize("empty_mlm,nondefault,pool_microbatches", [
+    (False, False, 4),
+    (False, True, 2),
+    (True, True, 4),
+])
+def test_dense_vs_cached_loss_gradients_update_and_rng(empty_mlm, nondefault, pool_microbatches):
     seed_everything(29)
     alignment = AlignmentConfig(
         projection_dim=7, loss_weight=0.2, initial_temperature=0.2,
         min_inverse_temperature=8.0,
     ) if nondefault else AlignmentConfig()
+    mlm_weight = 0.4 if nondefault else 1.0
     options = TrainingConfig(
         encoder_lr=2e-5, head_lr=2e-3, betas=(0.8, 0.9),
         weight_decay=0.03, gradient_clip=0.3,
@@ -99,18 +103,25 @@ def test_dense_vs_cached_loss_gradients_update_and_rng(empty_mlm, nondefault):
     mlm = mlm / max(1, count)
     total_residues = sum(len(output["sequence"]) for output in outputs)
     latent = mlm.new_zeros(())
-    for begin in (0, 2):
-        sequence = torch.cat([output["sequence"] for output in outputs[begin:begin + 2]])
-        structure = torch.cat([output["structure"] for output in outputs[begin:begin + 2]])
+    for begin in range(0, len(outputs), pool_microbatches):
+        sequence = torch.cat([output["sequence"] for output in outputs[begin:begin + pool_microbatches]])
+        structure = torch.cat([output["structure"] for output in outputs[begin:begin + pool_microbatches]])
         logits = direct.logit_scale.exp().clamp_min(alignment.min_inverse_temperature) * (sequence @ structure.T)
         target = torch.arange(len(sequence))
         latent = latent + (len(sequence) / total_residues) * (
             F.cross_entropy(logits, target) + F.cross_entropy(logits.T, target)) / 2
-    (mlm + alignment.loss_weight * latent).backward()
+    (mlm_weight * mlm + alignment.loss_weight * latent).backward()
     direct_rng = capture_rng(torch.device("cpu"))
 
     seed_everything(471)
-    metrics = cached_backward(cached, batches, 2, anchor_chunk_size=3, verify_replay=True)
+    metrics = cached_backward(
+        cached,
+        batches,
+        pool_microbatches,
+        mlm_weight=mlm_weight,
+        anchor_chunk_size=3,
+        verify_replay=True,
+    )
     assert_rng_equal(direct_rng, capture_rng(torch.device("cpu")))
     for (name, expected), (other, actual) in zip(direct.named_parameters(), cached.named_parameters()):
         assert name == other and expected.grad is not None and actual.grad is not None
@@ -118,7 +129,9 @@ def test_dense_vs_cached_loss_gradients_update_and_rng(empty_mlm, nondefault):
     assert all(batch["embeddings"].grad is None for batch in batches)
     assert metrics["mlm"] == pytest.approx(float(mlm.detach()), abs=1e-12)
     assert metrics["latent"] == pytest.approx(float(latent.detach()), abs=1e-12)
-    assert metrics["total"] == pytest.approx(float((mlm + alignment.loss_weight * latent).detach()), abs=1e-12)
+    assert metrics["total"] == pytest.approx(
+        float((mlm_weight * mlm + alignment.loss_weight * latent).detach()), abs=1e-12
+    )
     if not empty_mlm:
         assert all(value > 0 for role, value in gradient_norms(cached).items()
                    if not nondefault or role != "temperature")
@@ -167,7 +180,7 @@ def test_adapter_uses_pre_norm_and_removes_hook_on_error():
 @pytest.mark.parametrize("mask_probability", [0.15, 1.0])
 def test_validation_is_fixed_and_preserves_rng_and_mode(prepared_factory, vocabulary, mask_probability):
     manifest, _, _ = prepared_factory()
-    from modules.post_train.src.dataset.latent_alignment import load_manifest
+    from modules.post_train.src.dataset.manifest import load_manifest
 
     validation = load_manifest(manifest).validation
     model = AlignmentModel(TinyStudent(), teacher_dim=1024).train()
@@ -179,5 +192,12 @@ def test_validation_is_fixed_and_preserves_rng_and_mode(prepared_factory, vocabu
     assert_rng_equal(rng, capture_rng(torch.device("cpu")))
     assert first == validation_mlm(model, validation, 17, torch.device("cpu"), vocabulary=vocabulary, mlm=mlm)
     assert first["masked_residues"] > 0
+    assert first["proteins"] == len(validation)
     if mask_probability == 1:
         assert first["masked_residues"] == sum(len(row.sequence) for row in validation)
+        many_records = [validation[0]] * 33
+        full_validation = validation_mlm(
+            model, many_records, 17, torch.device("cpu"), vocabulary=vocabulary, mlm=mlm
+        )
+        assert full_validation["proteins"] == len(many_records)
+        assert full_validation["masked_residues"] == sum(len(row.sequence) for row in many_records)

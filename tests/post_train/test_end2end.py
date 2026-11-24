@@ -13,10 +13,9 @@ def test_native_training_export_and_independent_reload(tmp_path, layout):
     environment = {**os.environ, "PYTHONPATH": str(Path.cwd()), "HF_HUB_OFFLINE": "1"}
     for phase in ("build", "train", "reload"):
         if phase == "reload":
-            # The export must not depend on either original inputs or heads.
+            # The export must not depend on the original inputs.
             shutil.rmtree(tmp_path / "student")
             shutil.rmtree(tmp_path / "data")
-            (tmp_path / "output/alignment_heads.pt").unlink()
         result = subprocess.run(
             [sys.executable, str(helper), phase, str(tmp_path), layout],
             env=environment, capture_output=True, text=True, timeout=180,

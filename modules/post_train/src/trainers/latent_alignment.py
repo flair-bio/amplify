@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
 import random
 from typing import Any
 
 import numpy as np
 import torch
+from tqdm.auto import tqdm
 
-from modules.post_train.src.contracts.config import MLMConfig, TrainingConfig
+from modules.post_train.src.config import MLMConfig, TrainingConfig
 from modules.post_train.src.dataset.collator import Batch, collate_records
-from modules.post_train.src.dataset.latent_alignment import Record
+from modules.post_train.src.dataset.manifest import Record
 from modules.post_train.src.model.alignment import AlignmentModel, forward
 from modules.post_train.src.model.tokenization import Vocabulary
 from modules.post_train.src.trainers.losses import contrastive_chunk, mlm_sum
@@ -23,6 +23,8 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def capture_rng(device: torch.device) -> tuple[Any, ...]:
@@ -47,6 +49,7 @@ def cached_backward(
     batches: list[Batch],
     pool_microbatches: int,
     *,
+    mlm_weight: float,
     anchor_chunk_size: int = 256,
     verify_replay: bool = False,
 ) -> dict[str, float | int]:
@@ -120,7 +123,7 @@ def cached_backward(
             mlm = mlm_sum(output["mlm_logits"], batch["mlm_labels"]) / max(
                 1, masked_count
             )
-            (surrogate + mlm).backward()
+            (surrogate + mlm_weight * mlm).backward()
             mlm_value += float(mlm.detach())
             offset += size
             del output, surrogate, mlm
@@ -129,7 +132,7 @@ def cached_backward(
     return {
         "mlm": mlm_value,
         "latent": latent_value,
-        "total": mlm_value + model.alignment.loss_weight * latent_value,
+        "total": (mlm_weight * mlm_value + model.alignment.loss_weight * latent_value),
         "masked_residues": masked_count,
         "aligned_residues": total_residues,
     }
@@ -165,11 +168,11 @@ def gradient_norms(model: AlignmentModel) -> dict[str, float]:
             role = (
                 "encoder"
                 if name.startswith("student.amplify.")
-                else "mlm_decoder"
-                if name.startswith("student.lm_head.")
-                else "temperature"
-                if name == "logit_scale"
-                else "projections"
+                else (
+                    "mlm_decoder"
+                    if name.startswith("student.lm_head.")
+                    else "temperature" if name == "logit_scale" else "projections"
+                )
             )
             groups[role].append(parameter.grad.detach().float().square().sum())
     return {
@@ -191,26 +194,19 @@ def validation_mlm(
     was_training = model.training
     rng = capture_rng(device)
     model.eval()
-    selected = []
-    for source in sorted({row.source for row in records}):
-        group = [row for row in records if row.source == source]
-        selected.extend(
-            sorted(
-                group,
-                key=lambda row: hashlib.sha256(
-                    (str(seed) + row.id).encode()
-                ).hexdigest(),
-            )[:32]
-        )
+    generator = torch.Generator().manual_seed(seed)
     per_source: dict[str, list[float]] = {}
     try:
-        for row in selected:
-            record_seed = int.from_bytes(
-                hashlib.sha256((str(seed) + row.id).encode()).digest()[:8], "little"
-            )
+        for row in tqdm(
+            sorted(records, key=lambda row: (row.source, row.id)),
+            desc="Validation",
+            unit="protein",
+            leave=False,
+            dynamic_ncols=True,
+        ):
             batch = collate_records(
                 [row],
-                torch.Generator().manual_seed(record_seed),
+                generator,
                 device,
                 vocabulary=vocabulary,
                 mlm=mlm,
@@ -238,7 +234,7 @@ def validation_mlm(
     return {
         "mlm": sum(entry[0] for entry in per_source.values()) / count,
         "masked_residues": count,
-        "proteins": len(selected),
+        "proteins": len(records),
         "sources": source_means,
         "balanced_mlm": sum(source_means.values()) / len(source_means),
     }

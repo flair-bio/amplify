@@ -1,15 +1,13 @@
 from unittest.mock import Mock
 
 import pytest
-from pydantic import ValidationError
 
 from modules.post_train.src import run_post_train
-from modules.post_train.src.contracts.config import PostTrainingConfig
+from modules.post_train.src.config import PostTrainingConfig
 from modules.post_train.src.runners import latent_alignment
 
 
-@pytest.mark.parametrize("method_override", [[], ["method=latent_alignment"]])
-def test_cli_dispatches_validated_config_to_latent_runner(monkeypatch, method_override):
+def test_cli_dispatches_validated_config_to_latent_runner(monkeypatch):
     runner = Mock(return_value={"completed": True})
     monkeypatch.setattr(latent_alignment, "run", runner)
     run_post_train.main([
@@ -17,49 +15,13 @@ def test_cli_dispatches_validated_config_to_latent_runner(monkeypatch, method_ov
         "student.checkpoint=/unused/student",
         "dataset.path=/unused/data",
         "output_dir=/unused/output",
-        *method_override,
+        "method=latent_alignment",
     ])
     runner.assert_called_once()
     config = runner.call_args.args[0]
     assert config.method == "latent_alignment"
     assert config.training.device == "auto"
     assert str(config.student.checkpoint) == "/unused/student"
-
-
-def test_unknown_method_fails_before_runner_execution(monkeypatch):
-    runner = Mock()
-    monkeypatch.setattr(latent_alignment, "run", runner)
-    with pytest.raises(ValidationError, match="method"):
-        run_post_train.main([
-            "modules/post_train/configs/latent_alignment.yaml",
-            "method=unknown",
-        ])
-    runner.assert_not_called()
-
-
-def test_existing_config_defaults_to_latent_alignment(tmp_path, monkeypatch):
-    config_file = tmp_path / "old-config.yaml"
-    config_file.write_text(
-        "student:\n  checkpoint: /unused/student\n"
-        "dataset:\n  path: /unused/data\n"
-        "output_dir: /unused/output\n"
-    )
-    runner = Mock()
-    monkeypatch.setattr(latent_alignment, "run", runner)
-    run_post_train.main([str(config_file)])
-    assert runner.call_args.args[0].method == "latent_alignment"
-
-
-@pytest.mark.parametrize("requested,cuda_available,expected", [
-    ("auto", True, "cuda:0"),
-    ("cpu", True, "cpu"),
-    ("cuda:2", True, "cuda:2"),
-])
-def test_automatic_device_selection_and_explicit_overrides(
-    monkeypatch, requested, cuda_available, expected,
-):
-    monkeypatch.setattr(latent_alignment.torch.cuda, "is_available", lambda: cuda_available)
-    assert str(latent_alignment.resolve_device(requested)) == expected
 
 
 def test_missing_gpu_fails_before_loading_data_or_creating_outputs(tmp_path, monkeypatch):

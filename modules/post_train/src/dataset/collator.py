@@ -6,8 +6,8 @@ from collections.abc import Sequence
 
 import torch
 
-from modules.post_train.src.contracts.config import MLMConfig
-from modules.post_train.src.dataset.latent_alignment import (
+from modules.post_train.src.config import MLMConfig
+from modules.post_train.src.dataset.manifest import (
     Record,
     load_embeddings,
 )

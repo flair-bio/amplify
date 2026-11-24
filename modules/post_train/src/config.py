@@ -1,4 +1,4 @@
-"""Strict, fresh-run-only structural-alignment configuration."""
+"""Strict, fresh-run-only post-training configuration."""
 
 from __future__ import annotations
 
@@ -9,11 +9,9 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-class StrictConfig(BaseModel):
+class DatasetConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-
-class DatasetConfig(StrictConfig):
     path: str = Field(..., min_length=1)
     revision: str | None = Field(None, min_length=1)
     manifest_file: str = "dataset.json"
@@ -32,31 +30,38 @@ class DatasetConfig(StrictConfig):
         return self
 
 
-class StudentConfig(StrictConfig):
+class StudentConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     checkpoint: Path
     # Checkpoint-owned Python must be explicitly trusted; never fetch model code.
     trust_remote_code: bool = False
 
 
-class WandbConfig(StrictConfig):
+class WandbConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool = False
     project: str = Field("flair-post-train", min_length=1)
     entity: str | None = None
     run_name: str | None = None
     tags: list[str] = Field(default_factory=list)
-    mode: Literal["online", "offline", "disabled"] = "offline"
-    dir: Path | None = None
 
 
-class AlignmentConfig(StrictConfig):
+class AlignmentConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     projection_dim: int = Field(512, gt=0)
-    pool_proteins: int = Field(64, gt=0)
+    pool_proteins: int = Field(256, gt=0)
     loss_weight: float = Field(0.5, ge=0, allow_inf_nan=False)
     initial_temperature: float = Field(0.07, gt=0, allow_inf_nan=False)
     min_inverse_temperature: float = Field(0.01, gt=0, allow_inf_nan=False)
 
 
-class MLMConfig(StrictConfig):
+class MLMConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    loss_weight: float = Field(1.0, ge=0, allow_inf_nan=False)
     mask_probability: float = Field(0.15, gt=0, le=1, allow_inf_nan=False)
     mask_replace_probability: float = Field(0.8, ge=0, le=1, allow_inf_nan=False)
     random_replace_probability: float = Field(0.1, ge=0, le=1, allow_inf_nan=False)
@@ -73,9 +78,10 @@ class MLMConfig(StrictConfig):
 AdamBeta = Annotated[float, Field(ge=0, lt=1, allow_inf_nan=False)]
 
 
-class TrainingConfig(StrictConfig):
+class TrainingConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     device: str = "auto"
-    progress_bar: bool = True
     batch_size: int = Field(256, gt=0)
     microbatch_size: int = Field(16, gt=0)
     encoder_lr: float = Field(3e-6, gt=0, allow_inf_nan=False)
@@ -93,7 +99,9 @@ class TrainingConfig(StrictConfig):
         return self
 
 
-class PostTrainingConfig(StrictConfig):
+class PostTrainingConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     method: Literal["latent_alignment"] = "latent_alignment"
     seed: int = Field(42, ge=0, lt=2**32)
     student: StudentConfig

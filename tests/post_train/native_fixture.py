@@ -1,6 +1,5 @@
 """Subprocess fixture: exercise real native code without global HF/op registries."""
 
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -17,8 +16,8 @@ checkpoint = root / "student"
 output = root / "output"
 vocab = BASE_VOCAB[1:] + BASE_VOCAB[:1] + ["<extra>"] if sys.argv[3] == "single" else BASE_VOCAB
 token_ids = {token: index for index, token in enumerate(vocab)}
-dimension = 7 if sys.argv[3] == "single" else 1024
-features = [f"latent_{i}" for i in range(dimension)] if dimension == 7 else feature_columns(dimension)
+dimension = 7
+features = [f"latent_{i}" for i in range(dimension)] if sys.argv[3] == "single" else feature_columns(dimension)
 length = 8 if sys.argv[3] == "single" else 64
 probe = torch.tensor([[token_ids[token] for token in ("<bos>", "A", "M", "L", "<eos>")]])
 attention = torch.ones_like(probe, dtype=torch.bool)
@@ -90,7 +89,6 @@ def build():
             b"embedding_dimension": str(dimension).encode(),
         })
         pq.write_table(table, path)
-        row["embedding_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
         rows.append(row)
     (data / "dataset.json").write_text(json.dumps({
         "metadata": {
@@ -106,15 +104,19 @@ def train():
     from types import SimpleNamespace
     from unittest.mock import Mock
 
-    from modules.post_train.src.contracts.config import PostTrainingConfig
-    from modules.post_train.src.run_post_train import run
+    from modules.post_train.src.config import PostTrainingConfig
     from modules.post_train.src.runners import latent_alignment
 
     load = latent_alignment.load_student
     export = latent_alignment.export_student
     before = {}
     tracker = Mock()
-    sdk = SimpleNamespace(init=Mock(return_value=tracker), Settings=Mock())
+    sdk = SimpleNamespace(
+        init=Mock(return_value=tracker),
+        Settings=Mock(),
+        run=tracker,
+        log=tracker.log,
+    )
 
     def observed_load(*args, **kwargs):
         student = load(*args, **kwargs)
@@ -141,6 +143,7 @@ def train():
         "student": {"checkpoint": str(checkpoint), "trust_remote_code": True},
         "dataset": {"path": str(root / "data")},
         "output_dir": str(output),
+        "alignment": {"pool_proteins": 64},
         "training": {"device": "cpu", "batch_size": 64, "microbatch_size": 16},
     })
     if sys.argv[3] == "single":
@@ -151,6 +154,7 @@ def train():
                 "initial_temperature": 0.2, "min_inverse_temperature": 0.5,
             },
             "mlm": {
+                "loss_weight": 0.4,
                 "mask_probability": 1.0, "mask_replace_probability": 1.0,
                 "random_replace_probability": 0.0,
             },
@@ -159,50 +163,44 @@ def train():
                 "betas": (0.8, 0.9), "weight_decay": 0.02, "gradient_clip": 0.5,
                 "validation_interval": 1,
             },
-            "wandb": {"enabled": True, "mode": "offline"},
+            "wandb": {"enabled": True},
         })
-    summary = run(config)
-    assert summary["completed"] and summary["steps"] == 64 // config.training.batch_size
-    assert summary["protein_presentations"] == 64
-    assert summary["negative_pool_proteins"] == config.alignment.pool_proteins
-    assert summary["independent_pools_per_update"] == config.training.batch_size // config.alignment.pool_proteins
-    heads = torch.load(output / "alignment_heads.pt", weights_only=True)
-    assert heads["sequence_projection"]["weight"].shape[0] == config.alignment.projection_dim
-    assert heads["structure_projection"]["weight"].shape == (config.alignment.projection_dim, dimension)
-    assert summary["method"]["vocabulary_size"] == len(vocab)
-    assert summary["provenance"]["dataset_metadata"]["preparation_note"] == "producer provenance is preserved"
-    assert summary["method"]["latent_weight"] == config.alignment.loss_weight
-    assert summary["method"]["betas"] == list(config.training.betas)
-    assert summary["method"]["gradient_clip"] == config.training.gradient_clip
-    resolved = json.loads((output / "config.json").read_text())
-    assert resolved["method"] == "latent_alignment"
-    assert resolved["seed"] == 123
-    assert resolved["training"]["device"] == summary["device"] == "cpu"
+    run_record = latent_alignment.run(config)
+    assert run_record["status"] == "completed"
+    assert run_record["results"]["training"]["steps"] == 64 // config.training.batch_size
+    assert run_record["results"]["training"]["proteins"] == 64
+    assert run_record["provenance"]["dataset_metadata"]["preparation_note"] == "producer provenance is preserved"
+    resolved = run_record["config"]
+    assert resolved["training"]["device"] == "cpu"
     assert resolved["dataset"]["path"] == str((root / "data").absolute())
-    assert summary["provenance"]["hub_revision"] is None
+    assert run_record["provenance"]["hub_revision"] is None
+    assert resolved["mlm"]["loss_weight"] == config.mlm.loss_weight
+    assert run_record["results"]["training"]["metrics"]["total"] == (
+        config.mlm.loss_weight * run_record["results"]["training"]["metrics"]["mlm"]
+        + config.alignment.loss_weight * run_record["results"]["training"]["metrics"]["latent"]
+    )
+    assert run_record["results"]["validation"]["mlm"] > 0
+    assert run_record["checkpoint"]["path"] == str(output / "amplify")
+    assert json.loads((output / "run.json").read_text()) == run_record
+    assert {path.name for path in output.iterdir()} == {"amplify", "run.json"}
     expected_source = "amplify.py" if sys.argv[3] == "single" else "modeling_amplify.py"
-    assert expected_source in summary["provenance"]["student_files_sha256"]
     assert (output / "amplify" / expected_source).is_file()
     assert not (output / "amplify/unrelated.py").exists()
-    logs = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
-    assert all(value > 0 for value in logs[1]["gradient_norms_before_clipping"].values())
-    assert "validation" in logs[0] and "validation" in logs[-1]
     if sys.argv[3] == "single":
-        from modules.post_train.src.tracking.progress import wandb_metrics
-
-        assert [row["step"] for row in logs if "validation" in row] == [0, 1, 2]
-        assert len(tracker.log.call_args_list) == len(logs)
-        for call, row in zip(tracker.log.call_args_list, logs):
-            assert call.args == (wandb_metrics(row),)
-            assert call.kwargs == {"step": row["step"]}
+        assert [call.kwargs["step"] for call in tracker.log.call_args_list] == [0, 1, 2]
+        assert tracker.log.call_args_list[-1].args[0]["train/total"] == (
+            run_record["results"]["training"]["metrics"]["total"]
+        )
+        assert tracker.log.call_args_list[-1].args[0]["validation/mlm"] == (
+            run_record["results"]["validation"]["mlm"]
+        )
         tracker.finish.assert_called_once_with(exit_code=0)
     try:
-        run(config)
+        latent_alignment.run(config)
     except FileExistsError:
         pass
     else:
         raise AssertionError("Existing output was not protected.")
-    del logs
 
 
 def reload():

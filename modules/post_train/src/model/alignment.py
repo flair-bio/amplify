@@ -12,7 +12,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from modules.post_train.src.contracts.config import AlignmentConfig
+from modules.post_train.src.config import AlignmentConfig
 from modules.post_train.src.dataset.collator import Batch
 from modules.post_train.src.model.tokenization import Vocabulary
 
@@ -194,18 +194,4 @@ def export_student(model: AlignmentModel, checkpoint: Path, output: Path) -> Pat
     for name in native_assets(checkpoint):
         (destination / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(checkpoint / name, destination / name)
-    torch.save(
-        {
-            "sequence_projection": {
-                key: value.detach().cpu()
-                for key, value in model.sequence_projection.state_dict().items()
-            },
-            "structure_projection": {
-                key: value.detach().cpu()
-                for key, value in model.structure_projection.state_dict().items()
-            },
-            "logit_scale": model.logit_scale.detach().cpu(),
-        },
-        output / "alignment_heads.pt",
-    )
     return destination
