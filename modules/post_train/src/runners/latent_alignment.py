@@ -22,17 +22,17 @@ from modules.post_train.src.model.alignment import (
     load_student,
 )
 from modules.post_train.src.model.tokenization import load_vocabulary
-from modules.post_train.src.utils.tracking import (
-    log_wandb,
-    wandb_metrics,
-    wandb_run,
-)
 from modules.post_train.src.trainers.latent_alignment import (
     cached_backward,
     gradient_norms,
     make_optimizer,
     seed_everything,
     validation_mlm,
+)
+from modules.post_train.src.utils.tracking import (
+    log_wandb,
+    wandb_metrics,
+    wandb_run,
 )
 
 logger = logging.getLogger(__name__)

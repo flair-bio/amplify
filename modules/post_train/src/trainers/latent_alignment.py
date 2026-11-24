@@ -171,7 +171,9 @@ def gradient_norms(model: AlignmentModel) -> dict[str, float]:
                 else (
                     "mlm_decoder"
                     if name.startswith("student.lm_head.")
-                    else "temperature" if name == "logit_scale" else "projections"
+                    else "temperature"
+                    if name == "logit_scale"
+                    else "projections"
                 )
             )
             groups[role].append(parameter.grad.detach().float().square().sum())
