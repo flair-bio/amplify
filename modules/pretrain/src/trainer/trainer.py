@@ -17,6 +17,7 @@ import torch
 from accelerate import Accelerator
 from accelerate.utils import DDPCommunicationHookType, DistributedDataParallelKwargs
 from pydantic import BaseModel, ConfigDict, Field
+from torch.nn.modules.utils import consume_prefix_in_state_dict_if_present
 from tqdm import tqdm
 from transformers import PreTrainedTokenizerBase
 
@@ -722,14 +723,15 @@ class Trainer:
         unwrapped_model = self.accelerator.unwrap_model(
             self.model, keep_torch_compile=False
         )
-        # Collective under FSDP/DeepSpeed, so every rank must call it.
-        state_dict = self.accelerator.get_state_dict(self.model)
-        # `get_state_dict` unwraps with `keep_torch_compile=True`, so under
-        # `trainer.compile` keys get an `_orig_mod.` prefix that won't load
-        # into a plain AMPLIFYForMaskedLM.
-        state_dict = {
-            key.removeprefix("_orig_mod."): value for key, value in state_dict.items()
-        }
+        # Every rank must call this: under FSDP/DeepSpeed it gathers weights.
+        # Don't let accelerate unwrap the model here: with torch.compile it
+        # strips the DDP wrapper off the live model, after which gradient
+        # accumulation syncs gradients on every micro-batch instead of once
+        # per step. Instead, remove the wrapper prefixes from the keys
+        # ourselves so the weights load into a plain AMPLIFYForMaskedLM.
+        state_dict = self.accelerator.get_state_dict(self.model, unwrap=False)
+        for prefix in ("_orig_mod.", "module."):
+            consume_prefix_in_state_dict_if_present(state_dict, prefix)
 
         # Makes the checkpoint self-contained: copies AMPLIFY source next to
         # the weights and records auto_map, so `from_pretrained(dir,
