@@ -20,6 +20,7 @@ from modules.pretrain.src.config import PretrainConfig
 from modules.pretrain.src.dataset.collator import get_collator
 from modules.pretrain.src.dataset.dataloader import build_split_dataloader
 from modules.pretrain.src.dataset.dataset import prepare_sources
+from modules.pretrain.src.loss import get_loss
 from modules.pretrain.src.metric.logger import TrainingLogger
 from modules.pretrain.src.model.modeling_amplify import get_amplify_masked_lm
 from modules.pretrain.src.model.tokenizer import get_tokenizer
@@ -193,6 +194,9 @@ def main() -> None:
     setup_tracking(config, accelerator)
 
     model = get_amplify_masked_lm(config.model)
+    # Recorded in exported config.json; the model's own `labels` loss stays CE.
+    model.config.pretraining_loss = config.loss.model_dump()
+    loss_fn = get_loss(config.loss)
     tokenizer = get_tokenizer(config.tokenizer)
     optimizer = get_optimizer(model=model, config=config.optimizer)
     scheduler = get_scheduler(optimizer=optimizer, scheduler_config=config.scheduler)
@@ -234,7 +238,7 @@ def main() -> None:
         )
         return accelerator.prepare(train_dataloader)
 
-    metric_logger = TrainingLogger()
+    metric_logger = TrainingLogger(log_cross_entropy=loss_fn is not None)
     trainer = Trainer(
         accelerator=accelerator,
         model=model,
@@ -245,6 +249,7 @@ def main() -> None:
         val_dataloader=val_dataloader,
         metric_logger=metric_logger,
         tokenizer=tokenizer,
+        loss_fn=loss_fn,
     )
     logger.info("Trainer instantiated. Starting training loop.")
 

@@ -17,9 +17,12 @@ model:
   rope_theta: 10000.0
   num_labels: 2
 
+# The config.yaml recipe scaled down: decay from step 120, 4x batch, averaged exports.
 scheduler:
   num_warmup_steps: 10
   num_training_steps: 150
+  kwargs:
+    num_decay_steps: 30
 
 collator:
   max_length: 256
@@ -41,8 +44,10 @@ dataloader:
 trainer:
   max_steps: 150
   gradient_accumulation_steps: 2
+  gradient_accumulation_schedule: [[120, 8]]
   output_dir: "smoke_runs/gpu"
   logging_steps: 10
   eval_steps: 50
   save_steps: 50
   hf_save_steps: 50
+  hf_save_at_steps: [140, 145, 150]

@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 import torch
 from torch import nn
+from torch.nn.functional import scaled_dot_product_attention
 
 # ---------------------------------------------------------------------------
 # Module loading
@@ -53,7 +54,10 @@ sys.modules[f"{_PKG}.modeling_amplify"] = _mod
 _mod_spec.loader.exec_module(_mod)  # type: ignore[union-attr]
 
 AMPLIFYConfig = _cfg_mod.AMPLIFYConfig
+AMPLIFYModelConfig = _mod.AMPLIFYModelConfig
 RMSNorm = _mod.RMSNorm
+ZeroCenteredRMSNorm = _mod.ZeroCenteredRMSNorm
+make_norm = _mod.make_norm
 RotaryEmbedding = _mod.RotaryEmbedding
 apply_rotary_emb = _mod.apply_rotary_emb
 Attention = _mod.Attention
@@ -168,6 +172,90 @@ class TestRMSNorm:
         norm = RMSNorm(32)
         x = torch.randn(2, 5, 32)
         assert torch.equal(norm(x), norm(x))
+
+
+# ---------------------------------------------------------------------------
+# TestZeroCenteredRMSNorm / norm factory
+# ---------------------------------------------------------------------------
+
+
+class TestZeroCenteredRMSNorm:
+    def test_weight_initialized_to_zeros(self):
+        assert torch.all(ZeroCenteredRMSNorm(16).weight == 0.0)
+
+    def test_matches_rmsnorm_with_shifted_gain(self):
+        torch.manual_seed(0)
+        zc, ref = ZeroCenteredRMSNorm(32), RMSNorm(32)
+        with torch.no_grad():
+            zc.weight.normal_()
+            ref.weight.copy_(1.0 + zc.weight)
+        x = torch.randn(2, 5, 32)
+        torch.testing.assert_close(zc(x), ref(x))
+
+    def test_bf16_input_keeps_small_gain_offsets(self):
+        """The gain is applied in FP32, so offsets below bf16 resolution of 1 count."""
+        torch.manual_seed(0)
+        norm = ZeroCenteredRMSNorm(32)
+        with torch.no_grad():
+            norm.weight.fill_(1e-3)
+        x = torch.randn(4, 32).bfloat16()
+        out = norm(x)
+        expected = torch.nn.functional.rms_norm(
+            x.float(), (32,), torch.full((32,), 1.001), norm.eps
+        ).bfloat16()
+        assert out.dtype == torch.bfloat16
+        assert torch.equal(out, expected)
+
+    @pytest.mark.parametrize(
+        "norm_cls, identity", [(RMSNorm, 1.0), (ZeroCenteredRMSNorm, 0.0)]
+    )
+    def test_reset_parameters_restores_identity(self, norm_cls, identity):
+        norm = norm_cls(8)
+        with torch.no_grad():
+            norm.weight.fill_(float("nan"))
+        norm.reset_parameters()
+        assert torch.all(norm.weight == identity)
+
+
+class TestMakeNorm:
+    @pytest.mark.parametrize("norm_type", ["RMSNorm", "ZeroCenteredRMSNorm"])
+    def test_dispatch_and_dims(self, norm_type):
+        cfg = _cfg(norm_type=norm_type, norm_eps=1e-3)
+        norm = make_norm(cfg)
+        assert type(norm).__name__ == norm_type
+        assert norm.weight.shape == (_HIDDEN,)
+        assert norm.eps == 1e-3
+        assert make_norm(cfg, 16).weight.shape == (16,)
+
+    def test_unknown_norm_type_raises(self):
+        with pytest.raises(ValueError, match="Unsupported norm_type"):
+            make_norm(_cfg(norm_type="LayerNorm"))
+
+    def test_pydantic_config_forwards_qk_norm(self):
+        assert AMPLIFYModelConfig(qk_norm=True).to_hf_config().qk_norm is True
+        assert AMPLIFYModelConfig().qk_norm is False
+
+    def test_pydantic_config_forwards_nonlinear_mlm_head(self):
+        hf = AMPLIFYModelConfig(nonlinear_mlm_head=True).to_hf_config()
+        assert hf.nonlinear_mlm_head is True
+        assert AMPLIFYModelConfig().nonlinear_mlm_head is False
+
+    def test_pydantic_config_forwards_gaussian_init(self):
+        hf = AMPLIFYModelConfig(gaussian_init=True).to_hf_config()
+        assert hf.gaussian_init is True
+        assert AMPLIFYModelConfig().gaussian_init is False
+
+    def test_pydantic_config_forwards_attention_gate(self):
+        hf = AMPLIFYModelConfig(attention_gate=True).to_hf_config()
+        assert hf.attention_gate is True
+        assert AMPLIFYModelConfig().attention_gate is False
+
+    def test_pydantic_config_validates_and_forwards_norm_type(self):
+        hf = AMPLIFYModelConfig(norm_type="ZeroCenteredRMSNorm").to_hf_config()
+        assert hf.norm_type == "ZeroCenteredRMSNorm"
+        assert AMPLIFYModelConfig().norm_type == "RMSNorm"
+        with pytest.raises(ValueError):
+            AMPLIFYModelConfig(norm_type="LayerNorm")
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +383,24 @@ class TestApplyRotaryEmbQkv:
         assert torch.equal(out.q, q)
         assert torch.equal(out.k, k)
         assert torch.equal(out.v, v)
+
+    def test_optional_qk_norms_apply_before_rotation(self):
+        total_tokens, heads, head_dim = 6, 4, 16
+        qkv = torch.randn(total_tokens, 3, heads, head_dim)
+        cos = torch.randn(total_tokens, head_dim // 2)
+        sin = torch.randn(total_tokens, head_dim // 2)
+        q_norm, k_norm = RMSNorm(head_dim), ZeroCenteredRMSNorm(head_dim)
+        with torch.no_grad():
+            q_norm.weight.normal_()
+            k_norm.weight.normal_()
+
+        q, k, v = _mod.apply_rotary_emb_qkv(qkv, cos, sin, q_norm, k_norm)
+
+        q_raw, k_raw, v_raw = qkv.unbind(1)
+        cos_b, sin_b = cos.unsqueeze(-2), sin.unsqueeze(-2)
+        assert torch.equal(q, apply_rotary_emb(q_norm(q_raw), cos_b, sin_b))
+        assert torch.equal(k, apply_rotary_emb(k_norm(k_raw), cos_b, sin_b))
+        assert torch.equal(v, v_raw)
 
 
 # ---------------------------------------------------------------------------
@@ -468,6 +574,91 @@ class TestAttentionModule:
             "max_seqlen_k": 4,
             "causal": False,
         }
+
+
+    def test_qk_norm_off_keeps_baseline_parameters(self, attn: Attention):
+        assert isinstance(attn.q_norm, nn.Identity)
+        assert isinstance(attn.k_norm, nn.Identity)
+        assert set(attn.state_dict()) == {"qkv_proj.weight", "o_proj.weight"}
+
+    @pytest.mark.parametrize("norm_type", ["RMSNorm", "ZeroCenteredRMSNorm"])
+    def test_qk_norm_is_per_head_and_follows_norm_type(self, norm_type):
+        a = Attention(_cfg(qk_norm=True, norm_type=norm_type))
+        for norm in (a.q_norm, a.k_norm):
+            assert type(norm).__name__ == norm_type
+            assert norm.weight.shape == (_HIDDEN // _HEADS,)
+        assert {"q_norm.weight", "k_norm.weight"} <= set(a.state_dict())
+
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            {"qk_norm": True},
+            {"attention_gate": True},
+            {"qk_norm": True, "attention_gate": True},
+        ],
+        ids=["qk_norm", "gate", "qk_norm+gate"],
+    )
+    def test_packed_matches_padded_with_options(
+        self, flags, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Both paths apply the QK norm (before RoPE) and gate at the same point."""
+        torch.manual_seed(0)
+        cfg = _cfg(norm_type="ZeroCenteredRMSNorm", **flags)
+        a = Attention(cfg).eval()
+        with torch.no_grad():
+            for norm in (a.q_norm, a.k_norm):
+                if not isinstance(norm, nn.Identity):
+                    norm.weight.normal_()
+        norm, rope = make_norm(cfg), RotaryEmbedding(cfg)
+        S = 8
+        hidden = torch.randn(1, S, _HIDDEN)
+        positions = torch.arange(S).unsqueeze(0)
+        cos, sin = rope(hidden, positions)
+
+        def sdpa_varlen(q, k, v, **kwargs):  # Single segment: plain SDPA.
+            q, k, v = (t.transpose(0, 1).float() for t in (q, k, v))
+            return scaled_dot_product_attention(q, k, v).transpose(0, 1)
+
+        a.fa4_attn_fn = None
+        monkeypatch.setattr(_mod, "varlen_attn", sdpa_varlen)
+        with torch.no_grad():
+            packed = a._attn_packed(
+                norm, hidden, cos[0], sin[0], torch.tensor([0, S]), max_seqlen=S
+            )
+            padded, _ = a(
+                norm, hidden, None, cos.unsqueeze(2), sin.unsqueeze(2), False
+            )
+        # The packed path runs attention in bf16, as on GPU.
+        torch.testing.assert_close(packed, padded, atol=2e-2, rtol=2e-2)
+
+
+    def test_gate_off_has_no_gate_proj(self, attn: Attention):
+        assert attn.gate_proj is None
+
+    def test_gate_proj_shape_and_no_bias(self):
+        a = Attention(_cfg(attention_gate=True))
+        assert a.gate_proj.weight.shape == (_HIDDEN, _HIDDEN)
+        assert a.gate_proj.bias is None
+        assert "gate_proj.weight" in a.state_dict()
+
+    @pytest.mark.parametrize("output_attentions", [False, True])
+    def test_zero_gate_halves_attention_update(
+        self, norm_and_rope, output_attentions
+    ):
+        """sigmoid(0) = 0.5 scales the attention output before ``o_proj``."""
+        norm, cos, sin = norm_and_rope
+        torch.manual_seed(0)
+        ungated = Attention(_cfg()).eval()
+        gated = Attention(_cfg(attention_gate=True)).eval()
+        gated.load_state_dict(ungated.state_dict(), strict=False)
+        nn.init.zeros_(gated.gate_proj.weight)
+        h = torch.randn(2, 8, _HIDDEN)
+        with torch.no_grad():
+            ref, ref_w = ungated(norm, h, None, cos, sin, output_attentions)
+            out, out_w = gated(norm, h, None, cos, sin, output_attentions)
+        torch.testing.assert_close(out - h, 0.5 * (ref - h))
+        if output_attentions:
+            torch.testing.assert_close(out_w, ref_w)
 
 
 # ---------------------------------------------------------------------------
@@ -856,6 +1047,55 @@ class TestAMPLIFYForMaskedLM:
         assert out.hidden_states is not None
         assert len(out.hidden_states) == cfg.num_hidden_layers + 1
 
+    def test_default_head_is_single_linear(self, model: AMPLIFYForMaskedLM):
+        assert isinstance(model.lm_head, nn.Linear)
+
+    @pytest.mark.parametrize("norm_type", ["RMSNorm", "ZeroCenteredRMSNorm"])
+    def test_nonlinear_head_layout(self, norm_type):
+        model = AMPLIFYForMaskedLM(
+            _cfg(nonlinear_mlm_head=True, norm_type=norm_type)
+        )
+        head_keys = {k for k in model.state_dict() if k.startswith("lm_head.")}
+        assert head_keys == {
+            "lm_head.0.weight",
+            "lm_head.0.bias",
+            "lm_head.2.weight",
+            "lm_head.3.weight",
+            "lm_head.3.bias",
+        }
+        dense, act, norm, decoder = model.lm_head
+        assert dense.weight.shape == (_HIDDEN, _HIDDEN)
+        assert isinstance(act, nn.GELU) and act.approximate == "none"
+        assert type(norm).__name__ == norm_type
+        assert decoder.weight.shape == (_VOCAB, _HIDDEN)
+
+    def test_nonlinear_head_logits_and_loss(self):
+        torch.manual_seed(0)
+        model = AMPLIFYForMaskedLM(_cfg(nonlinear_mlm_head=True)).eval()
+        ids = torch.randint(1, _VOCAB, (2, 10))
+        with torch.no_grad():
+            out = model(ids, labels=ids)
+            hidden = model.amplify(ids).last_hidden_state
+        assert out.logits.shape == (2, 10, _VOCAB)
+        torch.testing.assert_close(out.logits, model.lm_head(hidden))
+        expected = torch.nn.functional.cross_entropy(
+            out.logits.view(-1, _VOCAB), ids.view(-1)
+        )
+        torch.testing.assert_close(out.loss, expected)
+
+    def test_nonlinear_head_round_trip(self, tmp_path):
+        torch.manual_seed(0)
+        model = AMPLIFYForMaskedLM(
+            _cfg(nonlinear_mlm_head=True, norm_type="ZeroCenteredRMSNorm")
+        ).eval()
+        with torch.no_grad():
+            model.lm_head[2].weight.fill_(0.25)
+        model.save_pretrained(tmp_path)
+        reloaded = AMPLIFYForMaskedLM.from_pretrained(tmp_path).eval()
+        ids = torch.randint(1, _VOCAB, (2, 10))
+        with torch.no_grad():
+            assert torch.equal(model(ids).logits, reloaded(ids).logits)
+
 
 # ---------------------------------------------------------------------------
 # TestAMPLIFYForSequenceClassification
@@ -1221,6 +1461,73 @@ class TestCheckpointRoundTrip:
 
         assert torch.isfinite(out.loss)
         assert out.loss.item() == pytest.approx(math.log(num_labels), abs=0.5)
+
+    def test_norm_type_applies_to_every_norm(self):
+        model = AMPLIFYForMaskedLM(_cfg(norm_type="ZeroCenteredRMSNorm"))
+        norms = [m for m in model.modules() if isinstance(m, RMSNorm)]
+        assert len(norms) == 2 * _LAYERS + 1  # Block pre-norms and final norm.
+        assert all(type(m) is ZeroCenteredRMSNorm for m in norms)
+        assert all(torch.all(m.weight == 0.0) for m in norms)
+
+    def test_qk_norm_adds_two_norms_per_layer(self):
+        model = AMPLIFYForMaskedLM(
+            _cfg(norm_type="ZeroCenteredRMSNorm", qk_norm=True)
+        )
+        norms = [m for m in model.modules() if isinstance(m, RMSNorm)]
+        assert len(norms) == 4 * _LAYERS + 1
+        assert all(type(m) is ZeroCenteredRMSNorm for m in norms)
+
+    @pytest.mark.parametrize("norm_type", ["RMSNorm", "ZeroCenteredRMSNorm"])
+    def test_init_weights_resets_clobbered_norm(self, norm_type):
+        model = AMPLIFYForMaskedLM(_cfg(norm_type=norm_type))
+        norm = model.amplify.norm
+        norm.weight.data.fill_(float("nan"))
+        model._init_weights(norm)
+        assert torch.all(norm.weight == (1.0 if norm_type == "RMSNorm" else 0.0))
+
+    @pytest.mark.parametrize("gaussian", [False, True])
+    def test_init_weights_distribution(self, gaussian):
+        """Ranges are a uniform bound by default and a Gaussian std when enabled."""
+        model = AMPLIFYForMaskedLM(
+            _cfg(
+                gaussian_init=gaussian,
+                decoder_init_range=0.05,
+                embedding_init_range=0.03,
+            )
+        )
+        torch.manual_seed(0)
+        linear, embedding = nn.Linear(512, 512), nn.Embedding(512, 512)
+        model._init_weights(linear)
+        model._init_weights(embedding)
+        for weight, scale in ((linear.weight, 0.05), (embedding.weight, 0.03)):
+            if gaussian:
+                assert weight.abs().max() > scale
+                assert weight.std().item() == pytest.approx(scale, rel=0.02)
+            else:
+                assert weight.abs().max() <= scale
+                assert weight.std().item() == pytest.approx(
+                    scale / math.sqrt(3), rel=0.02
+                )
+            assert weight.mean().abs() < scale / 50
+        bound = 1.0 / math.sqrt(512)
+        assert linear.bias.abs().max() <= bound
+
+    def test_zero_centered_gains_survive_round_trip(self, tmp_path):
+        """Loaded gains are kept; only checkpoint-missing ones get the identity init."""
+        cfg = _cfg(norm_type="ZeroCenteredRMSNorm")
+        model = AMPLIFYForMaskedLM(cfg)
+        with torch.no_grad():
+            for m in model.modules():
+                if isinstance(m, ZeroCenteredRMSNorm):
+                    m.weight.fill_(0.25)
+        model.save_pretrained(tmp_path)
+
+        reloaded = AMPLIFYForMaskedLM.from_pretrained(tmp_path)
+        assert reloaded.config.norm_type == "ZeroCenteredRMSNorm"
+        for m in reloaded.modules():
+            if isinstance(m, RMSNorm):
+                assert type(m) is ZeroCenteredRMSNorm
+                assert torch.all(m.weight == 0.25)
 
     def test_from_pretrained_matches_live_model(self, cfg: AMPLIFYConfig, tmp_path):
         torch.manual_seed(0)

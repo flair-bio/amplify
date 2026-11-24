@@ -42,6 +42,16 @@ class _TinyModel(nn.Module):
 		return x.mean()
 
 
+class _DecayedGainNorm(nn.Module):
+	"""Stand-in for a zero-centered norm: a 1D gain flagged for weight decay."""
+
+	apply_weight_decay = True
+
+	def __init__(self):
+		super().__init__()
+		self.weight = nn.Parameter(torch.zeros(8))
+
+
 def _base_kwargs() -> dict[str, object]:
 	return {
 		"type": "AdamW",
@@ -143,6 +153,21 @@ class TestGetOptimizerConstructorBehavior:
 		# Frozen parameters are excluded from all groups.
 		assert id(model.frozen) not in decay_ids
 		assert id(model.frozen) not in no_decay_ids
+
+	def test_modules_flagged_apply_weight_decay_are_decayed(self):
+		model = _TinyModel()
+		model.gain_norm = _DecayedGainNorm()
+		cfg = OptimizerConfig(**_base_kwargs())
+
+		optimizer = get_optimizer(model, cfg)
+
+		group_by_wd = {group["weight_decay"]: group for group in optimizer.param_groups}
+		decay_ids = {id(p) for p in group_by_wd[0.1]["params"]}
+		no_decay_ids = {id(p) for p in group_by_wd[0.0]["params"]}
+		assert id(model.gain_norm.weight) in decay_ids
+		# Unflagged 1D params keep the default no-decay rule.
+		assert id(model.norm.weight) in no_decay_ids
+		assert id(model.linear.bias) in no_decay_ids
 
 	def test_fused_on_cpu_raises_runtime_error(self, monkeypatch: pytest.MonkeyPatch):
 		model = _TinyModel()

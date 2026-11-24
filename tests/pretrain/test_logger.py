@@ -25,6 +25,7 @@ def accelerator():
     acc.process_index = 0
     acc.is_main_process = True
     acc.distributed_type = DistributedType.NO
+    acc.gradient_accumulation_steps = 1
     acc.reduce.side_effect = lambda tensor, reduction: tensor
     return acc
 
@@ -122,6 +123,51 @@ class TestEvalMetrics:
         assert metrics["eval/val/perplexity"] == pytest.approx(math.exp(2.0))
         assert "train/loss" not in metrics
         assert "train/accuracy" not in metrics
+
+
+class TestCrossEntropyTracking:
+    """With a non-CE objective, perplexity must come from CE, not the loss."""
+
+    @staticmethod
+    def _batch():
+        logits = torch.tensor([[[2.0, 0.0, 0.0, 0.0, 0.0], [0.0, 1.0, 3.0, 0.0, 0.0]]])
+        labels = torch.tensor([[0, 1]])
+        ce = torch.nn.functional.cross_entropy(logits[0], labels[0]).item()
+        batch = {
+            "labels": labels,
+            "num_sequences": torch.tensor(1),
+            "num_tokens": torch.tensor(2),
+        }
+        return batch, SimpleNamespace(logits=logits), ce
+
+    def test_train_and_eval_report_cross_entropy(self, accelerator, tmp_path):
+        logger = TrainingLogger(log_cross_entropy=True)
+        batch, out, ce = self._batch()
+        logger.add_train_batch(batch, out, torch.tensor(0.3))
+        logger.add_eval_batch("val", batch, out, torch.tensor(0.2))
+
+        metrics = flush(logger, accelerator, tmp_path)
+
+        assert metrics["train/loss"] == pytest.approx(0.3)
+        assert metrics["train/cross_entropy"] == pytest.approx(ce)
+        assert metrics["train/perplexity"] == pytest.approx(math.exp(ce))
+        assert metrics["eval/val/loss"] == pytest.approx(0.2)
+        assert metrics["eval/val/cross_entropy"] == pytest.approx(ce)
+        assert metrics["eval/val/perplexity"] == pytest.approx(math.exp(ce))
+
+    def test_default_reuses_loss_and_omits_cross_entropy_key(
+        self, accelerator, tmp_path
+    ):
+        logger = TrainingLogger()
+        batch, out, _ = self._batch()
+        logger.add_train_batch(batch, out, torch.tensor(0.3))
+        logger.add_eval_batch("val", batch, out, torch.tensor(0.2))
+
+        metrics = flush(logger, accelerator, tmp_path)
+
+        assert metrics["train/perplexity"] == pytest.approx(math.exp(0.3))
+        assert metrics["eval/val/perplexity"] == pytest.approx(math.exp(0.2))
+        assert not any(k.endswith("/cross_entropy") for k in metrics)
 
 
 class TestDataloaderMetrics:

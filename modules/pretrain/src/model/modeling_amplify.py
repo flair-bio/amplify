@@ -1,7 +1,18 @@
 """AMPLIFY model: encoder, task heads, and HF integration."""
 
 import math
-from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple, Type, Union
+from typing import (
+    Any,
+    ClassVar,
+    Dict,
+    List,
+    Literal,
+    NamedTuple,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+)
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field
@@ -32,18 +43,20 @@ class AMPLIFYModelConfig(BaseModel):
         hidden_size: Dimension of hidden representations.
         num_hidden_layers: Number of transformer encoder layers.
         num_attention_heads: Number of attention heads per layer.
-        qk_norm: Apply per-head normalization to queries and keys before RoPE.
-        attention_gate: Apply elementwise sigmoid gating before the attention output projection.
-        nonlinear_mlm_head: Add a dense-GELU-norm MLM head transform.
-        layernorm_scaling: Scale block pre-norm outputs by inverse square root of depth.
         intermediate_size: Dimension of the SwiGLU feed-forward inner layer.
-        gaussian_init: Use zero-mean Gaussian initialization for linear and embedding weights.
-        embedding_init_range: Uniform bound or Gaussian standard deviation for token embeddings.
-        decoder_init_range: Uniform bound or Gaussian standard deviation for linear weights.
-        norm_eps: Epsilon for the configured normalization layers.
-        norm_type: Normalization layer type: ``"RMSNorm"``, ``"CenteredRMSNorm"``,
-            ``"ZeroCenteredRMSNorm"``, or ``"LayerNorm"``. Also applies to enabled
-            QK normalization and the nonlinear MLM head.
+        embedding_init_range: Uniform init bound for the token embedding, or the
+            Gaussian std when ``gaussian_init``.
+        decoder_init_range: Uniform init bound for linear layers, or the Gaussian
+            std when ``gaussian_init``.
+        norm_eps: Epsilon for RMSNorm layers.
+        norm_type: Normalization layer used throughout the model.
+        qk_norm: Normalize queries and keys per head (over ``head_dim``) before RoPE.
+        attention_gate: Gate the attention output elementwise with a sigmoid of
+            the block input, before the output projection.
+        nonlinear_mlm_head: Use a dense-GELU-norm transform before the MLM
+            decoder instead of a single linear layer.
+        gaussian_init: Initialize linear and embedding weights from a zero-mean
+            Gaussian instead of a uniform distribution.
         vocab_size: Number of tokens in the amino-acid vocabulary.
         pad_token_id: Index of the padding token.
         bos_token_id: Index of the beginning-of-sequence token.
@@ -58,18 +71,15 @@ class AMPLIFYModelConfig(BaseModel):
     hidden_size: int = Field(960, gt=0)
     num_hidden_layers: int = Field(32, gt=0)
     num_attention_heads: int = Field(15, gt=0)
-    qk_norm: bool = False
-    attention_gate: bool = False
-    nonlinear_mlm_head: bool = False
-    layernorm_scaling: bool = False
     intermediate_size: int = Field(2560, gt=0)
-    gaussian_init: bool = False
     embedding_init_range: float = Field(0.02, gt=0.0)
     decoder_init_range: float = Field(0.02, gt=0.0)
     norm_eps: float = Field(1e-5, gt=0.0)
-    norm_type: Literal[
-        "RMSNorm", "CenteredRMSNorm", "ZeroCenteredRMSNorm", "LayerNorm"
-    ] = "RMSNorm"
+    norm_type: Literal["RMSNorm", "ZeroCenteredRMSNorm"] = "RMSNorm"
+    qk_norm: bool = False
+    attention_gate: bool = False
+    nonlinear_mlm_head: bool = False
+    gaussian_init: bool = False
     vocab_size: int = Field(32, gt=0)
     pad_token_id: int = 0
     bos_token_id: int = 3
@@ -97,8 +107,13 @@ class RMSNorm(nn.Module):
 
     def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.weight = nn.Parameter(torch.empty(hidden_size))
         self.eps = eps
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        """Set the gain to identity."""
+        nn.init.ones_(self.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Normalize *x* over its last dimension."""
@@ -107,25 +122,18 @@ class RMSNorm(nn.Module):
         )
 
 
-class CenteredRMSNorm(RMSNorm):
-    """RMS normalization after subtracting each token's feature mean.
+class ZeroCenteredRMSNorm(RMSNorm):
+    """RMSNorm whose gain is stored as an offset from one: ``rms_norm(x) * (1 + weight)``.
 
-    Like RMSNorm, this uses a learned scale without an additive bias. Centering
-    makes its normalization equivalent to LayerNorm without LayerNorm's bias.
+    Weight decay then pulls the gain toward identity instead of zero.
+    ``apply_weight_decay`` tells the optimizer to decay this 1-D gain. Computed
+    in FP32 because in bf16 ``1 + weight`` rounds away small offsets.
     """
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Use the LayerNorm kernel to center and rescale without a bias."""
-        return torch.nn.functional.layer_norm(
-            x, self.weight.shape, self.weight.to(x.dtype), None, self.eps
-        )
+    apply_weight_decay: ClassVar[bool] = True
 
-
-class ZeroCenteredRMSNorm(RMSNorm):
-    """RMSNorm with a zero-initialized gain offset applied as ``1 + weight``."""
-
-    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
-        super().__init__(hidden_size, eps)
+    def reset_parameters(self) -> None:
+        """Set the gain offset to zero (identity gain)."""
         nn.init.zeros_(self.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -135,20 +143,21 @@ class ZeroCenteredRMSNorm(RMSNorm):
         ).to(x.dtype)
 
 
-def _make_norm(config: AMPLIFYConfig, hidden_size: Optional[int] = None) -> nn.Module:
-    """Construct the configured norm over hidden_size (default: model width)."""
-    hidden_size = config.hidden_size if hidden_size is None else hidden_size
-    if config.norm_type == "RMSNorm":
-        return RMSNorm(hidden_size, config.norm_eps)
-    if config.norm_type == "CenteredRMSNorm":
-        return CenteredRMSNorm(hidden_size, config.norm_eps)
-    if config.norm_type == "ZeroCenteredRMSNorm":
-        return ZeroCenteredRMSNorm(hidden_size, config.norm_eps)
-    if config.norm_type == "LayerNorm":
-        return nn.LayerNorm(hidden_size, eps=config.norm_eps)
-    raise ValueError(
-        f"Unknown norm_type {config.norm_type!r}; expected 'RMSNorm', "
-        "'CenteredRMSNorm', 'ZeroCenteredRMSNorm', or 'LayerNorm'."
+_NORMS: Dict[str, Type[RMSNorm]] = {
+    "RMSNorm": RMSNorm,
+    "ZeroCenteredRMSNorm": ZeroCenteredRMSNorm,
+}
+
+
+def make_norm(config: AMPLIFYConfig, dim: Optional[int] = None) -> RMSNorm:
+    """Build the configured norm over *dim* (default: ``config.hidden_size``)."""
+    norm_type = config.norm_type
+    if norm_type not in _NORMS:
+        raise ValueError(
+            f"Unsupported norm_type {norm_type!r}; expected one of {sorted(_NORMS)}."
+        )
+    return _NORMS[norm_type](
+        config.hidden_size if dim is None else dim, config.norm_eps
     )
 
 
@@ -220,7 +229,7 @@ def apply_rotary_emb_qkv(
     q_norm: Optional[nn.Module] = None,
     k_norm: Optional[nn.Module] = None,
 ) -> RotaryQKV:
-    """Optionally normalize q/k before packed RoPE; leave v unchanged."""
+    """RoPE for the packed path: optionally normalizes q/k first, returns v as-is."""
     q, k, v = qkv.unbind(1)
     if q_norm is not None:
         q = q_norm(q)
@@ -233,33 +242,38 @@ def apply_rotary_emb_qkv(
 
 
 class Attention(nn.Module):
-    """MHSA with RoPE.
+    """MHSA with RoPE, optional QK norm and optional output gate.
 
     Supports padded batches (PyTorch SDPA) and packed sequences (FlashAttention
     when optionally installed, otherwise PyTorch variable-length attention).
     Receives the pre-norm layer from the caller, applies it internally, and returns
     ``hidden_states`` with the attention residual already added.
+
+    With ``qk_norm``, queries and keys are normalized over ``head_dim`` with a
+    gain shared across heads, before RoPE, which bounds the attention logits.
+
+    With ``attention_gate``, the attention output is multiplied elementwise by
+    ``sigmoid(gate_proj(normed))`` before ``o_proj`` (Qiu et al. 2025, "Gated
+    Attention for Large Language Models").
     """
 
-    def __init__(self, config: AMPLIFYConfig, norm_scale: float = 1.0) -> None:
+    def __init__(self, config: AMPLIFYConfig) -> None:
         super().__init__()
-        self.norm_scale = norm_scale
         self.num_heads = config.num_attention_heads
         self.head_dim = config.hidden_size // config.num_attention_heads
         self.fa4_attn_fn = get_fa4_varlen_func()
-        # Separate query/key norms over head_dim, shared across heads.
-        self.q_norm = (
-            _make_norm(config, self.head_dim) if config.qk_norm else nn.Identity()
-        )
-        self.k_norm = (
-            _make_norm(config, self.head_dim) if config.qk_norm else nn.Identity()
-        )
 
         # Multi-head attention projections (query, key, value combined + output).
         self.qkv_proj = nn.Linear(
             config.hidden_size, config.hidden_size * 3, bias=False
         )
         self.o_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        self.q_norm = (
+            make_norm(config, self.head_dim) if config.qk_norm else nn.Identity()
+        )
+        self.k_norm = (
+            make_norm(config, self.head_dim) if config.qk_norm else nn.Identity()
+        )
         self.gate_proj = (
             nn.Linear(config.hidden_size, config.hidden_size, bias=False)
             if config.attention_gate
@@ -282,8 +296,8 @@ class Attention(nn.Module):
         )
         batch_size, total_tokens = hidden_states.shape[:2]
         hidden_states_flat = hidden_states.view(-1, self.num_heads * self.head_dim)
-        # Pre-norm + QKV projection + optional QK normalization + RoPE.
-        normed = layernorm(hidden_states_flat) * self.norm_scale
+        # Pre-norm + QKV projection + QK norm + RoPE.
+        normed = layernorm(hidden_states_flat)
         qkv = self.qkv_proj(normed).view(total_tokens, 3, self.num_heads, self.head_dim)
         q, k, v = apply_rotary_emb_qkv(qkv, cos, sin, self.q_norm, self.k_norm)
         if q.dtype not in _HALF_DTYPES:
@@ -313,8 +327,7 @@ class Attention(nn.Module):
             -1, self.num_heads * self.head_dim
         )
         if self.gate_proj is not None:
-            gate = self.gate_proj(normed).sigmoid()
-            attn_output = attn_output * gate.to(attn_output.dtype)
+            attn_output = attn_output * torch.sigmoid(self.gate_proj(normed))
         # Fused attention residual: hidden + attn_output @ o_proj.weight.T
         hidden_states_flat = torch.addmm(
             hidden_states_flat, attn_output, self.o_proj.weight.t()
@@ -334,7 +347,7 @@ class Attention(nn.Module):
         """PyTorch SDPA path for padded batches."""
         batch_size, seq_len = hidden_states.shape[:2]
         # Pre-norm before attention.
-        normed = layernorm(hidden_states) * self.norm_scale
+        normed = layernorm(hidden_states)
         # Project to Q, K, V and reshape to (batch, seq, heads, dim).
         qkv = self.qkv_proj(normed).view(
             batch_size, seq_len, 3, self.num_heads, self.head_dim
@@ -365,8 +378,7 @@ class Attention(nn.Module):
             attn_weights = None
 
         if self.gate_proj is not None:
-            gate = self.gate_proj(normed).sigmoid()
-            attn_output = attn_output * gate.to(attn_output.dtype)
+            attn_output = attn_output * torch.sigmoid(self.gate_proj(normed))
         return hidden_states + self.o_proj(attn_output), attn_weights
 
     def forward(
@@ -399,9 +411,8 @@ class SwiGLU(nn.Module):
     ``hidden_states`` with the FFN residual added.
     """
 
-    def __init__(self, config: AMPLIFYConfig, norm_scale: float = 1.0) -> None:
+    def __init__(self, config: AMPLIFYConfig) -> None:
         super().__init__()
-        self.norm_scale = norm_scale
         self.gate_up_proj = nn.Linear(
             config.hidden_size, 2 * config.intermediate_size, bias=False
         )
@@ -417,7 +428,7 @@ class SwiGLU(nn.Module):
         """Packed path using the same "silu(gate) * up" as the padded path below."""
         batch_size, total_tokens = hidden_states.shape[:2]
         hidden_states_flat = hidden_states.view(-1, hidden_states.shape[-1])
-        normed = layernorm(hidden_states_flat) * self.norm_scale
+        normed = layernorm(hidden_states_flat)
         gate, up = self.gate_up_proj(normed).chunk(2, dim=-1)
         swiglu_out = self.act_fn(gate) * up
         # Fused residual: hidden + swiglu(gate, up) @ down_proj.weight.T
@@ -433,8 +444,7 @@ class SwiGLU(nn.Module):
     ) -> torch.Tensor:
         """Padded path using standard SiLU gating."""
         # Pre-norm + SwiGLU FFN + residual connection.
-        normed = layernorm(hidden_states) * self.norm_scale
-        gate, up = self.gate_up_proj(normed).chunk(2, dim=-1)
+        gate, up = self.gate_up_proj(layernorm(hidden_states)).chunk(2, dim=-1)
         return hidden_states + self.down_proj(self.act_fn(gate) * up)
 
     def forward(
@@ -460,17 +470,16 @@ class EncoderBlock(nn.Module):
         "down_proj.weight": "mlp.down_proj.weight",
     }
 
-    def __init__(self, config: AMPLIFYConfig, layer_idx: int = 0) -> None:
+    def __init__(self, config: AMPLIFYConfig) -> None:
         super().__init__()
-        norm_scale = (layer_idx + 1) ** -0.5 if config.layernorm_scaling else 1.0
         # Pre-normalization layer applied before attention.
-        self.input_layernorm = _make_norm(config)
+        self.input_layernorm = make_norm(config)
         # Attention module.
-        self.attention = Attention(config, norm_scale=norm_scale)
+        self.attention = Attention(config)
         # Pre-normalization layer applied before FFN.
-        self.post_attention_layernorm = _make_norm(config)
+        self.post_attention_layernorm = make_norm(config)
         # FFN module.
-        self.mlp = SwiGLU(config, norm_scale=norm_scale)
+        self.mlp = SwiGLU(config)
 
     def _load_from_state_dict(
         self,
@@ -538,19 +547,17 @@ class AMPLIFYPreTrainedModel(PreTrainedModel):
     config_class = AMPLIFYConfig
     base_model_prefix = "amplify"
 
+    def _init_weight(self, weight: torch.Tensor, scale: float) -> None:
+        """Draw from N(0, scale) if `gaussian_init`, else U(-scale, scale)."""
+        if self.config.gaussian_init:
+            nn.init.normal_(weight, mean=0.0, std=scale)
+        else:
+            nn.init.uniform_(weight, -scale, scale)
+
     def _init_weights(self, module: nn.Module) -> None:
-        """Initialize projections, embeddings, and non-persistent buffers."""
+        """Initialize linear layers and embeddings, norms to identity."""
         if isinstance(module, nn.Linear):
-            if self.config.gaussian_init:
-                nn.init.normal_(
-                    module.weight, mean=0.0, std=self.config.decoder_init_range
-                )
-            else:
-                nn.init.uniform_(
-                    module.weight,
-                    -self.config.decoder_init_range,
-                    self.config.decoder_init_range,
-                )
+            self._init_weight(module.weight, self.config.decoder_init_range)
             if module.bias is not None:
                 # `from_pretrained` fills checkpoint-missing params via this hook
                 # only; skipping bias left task heads on uninitialised memory.
@@ -558,21 +565,8 @@ class AMPLIFYPreTrainedModel(PreTrainedModel):
                 bound = 1.0 / math.sqrt(fan_in) if fan_in > 0 else 0.0
                 nn.init.uniform_(module.bias, -bound, bound)
         elif isinstance(module, nn.Embedding):
-            if self.config.gaussian_init:
-                nn.init.normal_(
-                    module.weight, mean=0.0, std=self.config.embedding_init_range
-                )
-            else:
-                nn.init.uniform_(
-                    module.weight,
-                    -self.config.embedding_init_range,
-                    self.config.embedding_init_range,
-                )
-        elif isinstance(module, ZeroCenteredRMSNorm):
-            nn.init.zeros_(module.weight)
+            self._init_weight(module.weight, self.config.embedding_init_range)
         elif isinstance(module, RMSNorm):
-            nn.init.ones_(module.weight)
-        elif isinstance(module, nn.LayerNorm):
             module.reset_parameters()
         elif isinstance(module, RotaryEmbedding):
             # RoPE tables are non-persistent buffers, so they are absent from the
@@ -594,9 +588,9 @@ class AMPLIFYModel(AMPLIFYPreTrainedModel):
             config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id
         )
         self.layers = nn.ModuleList(
-            [EncoderBlock(config, layer_idx=i) for i in range(config.num_hidden_layers)]
+            [EncoderBlock(config) for _ in range(config.num_hidden_layers)]
         )
-        self.norm = _make_norm(config)
+        self.norm = make_norm(config)
         self.rotary_emb = RotaryEmbedding(config)
         self.post_init()
 
@@ -726,7 +720,7 @@ class AMPLIFYModel(AMPLIFYPreTrainedModel):
             if all_attentions is not None:
                 all_attentions.append(attn_weights)
 
-        # Final normalization uses the same norm type as the encoder blocks.
+        # Final layer norm.
         hidden_states = self.norm(hidden_states)
 
         if all_hidden_states is not None:
@@ -749,16 +743,16 @@ class AMPLIFYForMaskedLM(AMPLIFYPreTrainedModel):
     def __init__(self, config: AMPLIFYConfig, **kwargs: Any) -> None:
         super().__init__(config)
         self.amplify = AMPLIFYModel(config)
-        self.lm_head = (
-            nn.Sequential(
+        if config.nonlinear_mlm_head:
+            # Dense-GELU-norm transform, then the decoder; keys `lm_head.{0,2,3}`.
+            self.lm_head = nn.Sequential(
                 nn.Linear(config.hidden_size, config.hidden_size),
                 nn.GELU(),
-                _make_norm(config),
+                make_norm(config),
                 nn.Linear(config.hidden_size, config.vocab_size),
             )
-            if config.nonlinear_mlm_head
-            else nn.Linear(config.hidden_size, config.vocab_size)
-        )
+        else:
+            self.lm_head = nn.Linear(config.hidden_size, config.vocab_size)
         self.post_init()
 
     def forward(

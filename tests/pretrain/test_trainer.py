@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from accelerate import Accelerator
+from accelerate.state import AcceleratorState, GradientState
 
+from modules.pretrain.src.metric.logger import TrainingLogger
 from modules.pretrain.src.trainer import Trainer, TrainerConfig
 
 
@@ -168,34 +173,256 @@ class TestGradientAccumulation:
         )
         assert trainer.gradient_accumulation_steps == 4
 
-    @pytest.mark.parametrize(
-        "batches,accum,expected_optimizer_steps",
-        [(8, 1, 8), (8, 2, 4), (8, 4, 2), (7, 2, 4), (1, 4, 1)],
-    )
-    def test_steps_per_epoch_is_in_optimizer_steps(
-        self, accelerator, tmp_path, batches, accum, expected_optimizer_steps
-    ):
-        """`metric_logger.num_steps` counts optimizer steps, so the per-epoch
-        denominator must too or `train/epoch` is off by the accumulation factor."""
-        accelerator.gradient_accumulation_steps = accum
+
+class _CountingModel(torch.nn.Module):
+    """Counts forward passes; returns the `(loss, logits)` the trainer expects."""
+
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(2, 3)
+        self.calls = 0
+
+    def forward(self, x, labels, attention_mask):
+        self.calls += 1
+        logits = self.linear(x)
+        loss = torch.nn.functional.cross_entropy(logits.flatten(0, 1), labels.flatten())
+        return SimpleNamespace(loss=loss, logits=logits)
+
+
+@pytest.fixture
+def fresh_accelerate_state():
+    def reset():
+        AcceleratorState._reset_state(reset_partial_state=True)
+        GradientState._reset_state()
+
+    reset()
+    yield
+    reset()
+
+
+class TestGradientAccumulationSchedule:
+    """`gradient_accumulation_schedule` switches the accumulation count between
+    optimizer steps (e.g. a larger batch for the LR decay phase)."""
+
+    def test_lookup_uses_last_reached_key(self):
+        config = TrainerConfig(
+            gradient_accumulation_steps=1,
+            gradient_accumulation_schedule=[(10, 4), (5, 2)],
+        )
+        counts = [config.gradient_accumulation_at(s) for s in (0, 4, 5, 9, 10, 99)]
+        assert counts == [1, 1, 2, 2, 4, 4]
+
+    def test_lookup_without_schedule_is_constant(self):
+        config = TrainerConfig(gradient_accumulation_steps=3)
+        assert config.gradient_accumulation_at(1000) == 3
+
+    @pytest.mark.parametrize("step,ok", [(9, True), (10, False)])
+    def test_steps_must_be_below_max_steps(self, step, ok):
+        kwargs = dict(max_steps=10, gradient_accumulation_schedule=[(step, 2)])
+        if ok:
+            TrainerConfig(**kwargs)
+        else:
+            with pytest.raises(ValueError, match="max_steps"):
+                TrainerConfig(**kwargs)
+
+    def test_rejects_duplicate_steps(self):
+        with pytest.raises(ValueError, match="duplicate"):
+            TrainerConfig(gradient_accumulation_schedule=[(5, 2), (5, 4)])
+
+    def test_init_applies_schedule_after_resume(self, accelerator, tmp_path):
+        accelerator.step = 7
+
+        def fake_load(self, path):
+            self.global_step = 5
+
+        with patch.object(Trainer, "load_checkpoint", fake_load):
+            trainer = Trainer(
+                accelerator=accelerator,
+                model=torch.nn.Linear(2, 2),
+                optimizer=MagicMock(),
+                scheduler=MagicMock(),
+                train_dataloader_provider=lambda epoch: [],
+                config=TrainerConfig(
+                    output_dir=tmp_path / "ckpt",
+                    resume_from_checkpoint=tmp_path,
+                    gradient_accumulation_schedule=[(5, 4)],
+                ),
+            )
+        assert trainer.gradient_accumulation_steps == 4
+        assert accelerator.gradient_accumulation_steps == 4
+        assert accelerator.step == 0
+
+    def test_real_accelerator_follows_schedule(self, tmp_path, fresh_accelerate_state):
+        """16 micro-batches with accumulation 2, then 4 from step 3: optimizer
+        steps take [2, 2, 2, 4, 4, 2] micro-batches (Accelerate syncs the
+        trailing partial group at the end of the dataloader). A switch at an
+        odd step also checks the Accelerate counter restarts."""
+        accelerator = Accelerator(cpu=True, gradient_accumulation_steps=2)
+        model = _CountingModel()
+        # lr=0 and identical batches: every micro-batch has the same gradient.
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
+        samples = [
+            {
+                "x": torch.ones(1, 2),
+                "labels": torch.zeros(1, dtype=torch.long),
+                "attention_mask": torch.ones(1, dtype=torch.long),
+            }
+        ] * 16
+        dataloader = torch.utils.data.DataLoader(samples, batch_size=1)
+        model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
+
+        micro_batches, last = [], 0
+
+        def record_step():
+            nonlocal last
+            micro_batches.append(model.calls - last)
+            last = model.calls
+
+        output_dir = tmp_path / "run"
+        output_dir.mkdir()
+        trainer = Trainer(
+            accelerator=accelerator,
+            model=model,
+            optimizer=optimizer,
+            scheduler=MagicMock(step=MagicMock(side_effect=record_step)),
+            train_dataloader_provider=lambda epoch: dataloader,
+            config=TrainerConfig(
+                num_epochs=1,
+                output_dir=output_dir,
+                logging_steps=1,
+                gradient_accumulation_steps=2,
+                gradient_accumulation_schedule=[(3, 4)],
+                tf32=False,
+            ),
+            metric_logger=TrainingLogger(),
+        )
+        trainer.save_checkpoint = MagicMock()
+        trainer.save_hf_checkpoint = MagicMock()
+        trainer.train()
+
+        assert micro_batches == [2, 2, 2, 4, 4, 2]
+        rows = [json.loads(line) for line in trainer.metric_json_path.open()]
+        # Logged before the switch, so each row describes its own step.
+        accumulation = [r["train/gradient_accumulation_steps"] for r in rows]
+        assert accumulation == [2, 2, 2, 4, 4, 4]
+        assert [r["train/epoch"] for r in rows] == pytest.approx(
+            [2 / 16, 4 / 16, 6 / 16, 10 / 16, 14 / 16, 1.0]
+        )
+        # The loss is divided by the current count, so full groups give the
+        # same (mean) gradient before and after the switch.
+        grad_norms = [r["train/grad_norm"] for r in rows[:5]]
+        assert grad_norms == pytest.approx([grad_norms[0]] * 5)
+
+
+class TestHfSaveAtSteps:
+    """`hf_save_at_steps` adds exports (e.g. the end of the decay, for
+    averaging) on top of the periodic `hf_save_steps`."""
+
+    @pytest.mark.parametrize("step,ok", [(10, True), (11, False)])
+    def test_steps_must_not_exceed_max_steps(self, step, ok):
+        kwargs = dict(max_steps=10, hf_save_at_steps=[step])
+        if ok:
+            TrainerConfig(**kwargs)
+        else:
+            with pytest.raises(ValueError, match="hf_save_at_steps"):
+                TrainerConfig(**kwargs)
+
+    def test_rejects_non_positive_steps(self):
+        with pytest.raises(ValueError):
+            TrainerConfig(hf_save_at_steps=[0])
+
+    def test_saves_listed_and_periodic_steps_once(self, accelerator, tmp_path):
         trainer = Trainer(
             accelerator=accelerator,
             model=torch.nn.Linear(2, 2),
             optimizer=MagicMock(),
             scheduler=MagicMock(),
-            train_dataloader_provider=lambda epoch: [None] * batches,
+            train_dataloader_provider=lambda epoch: [{}] * 12,
             config=TrainerConfig(
-                num_epochs=1,
                 output_dir=tmp_path / "ckpt",
-                gradient_accumulation_steps=accum,
+                max_steps=10,
+                hf_save_steps=4,
+                hf_save_at_steps=[4, 9, 10],
             ),
+            metric_logger=MagicMock(),
         )
-        trainer._train_one_epoch = MagicMock()
-        trainer.evaluate = MagicMock()
+        trainer.training_step = MagicMock(return_value=(torch.tensor(0.0), None))
         trainer.save_checkpoint = MagicMock()
+        saved = []
+
+        def save_hf_checkpoint():
+            saved.append(trainer.global_step)
+            trainer._last_hf_save_step = trainer.global_step
+
+        trainer.save_hf_checkpoint = save_hf_checkpoint
         trainer.train()
 
-        assert trainer.metric_logger.steps_per_epoch == expected_optimizer_steps
+        # Step 4 is requested twice and step 10 is also the final save.
+        assert saved == [4, 8, 9, 10]
+
+
+class TestAverageHfCheckpoints:
+    """`average_hf_checkpoints` averages the `hf_save_at_steps` exports
+    into `hf_checkpoints/averaged` once training ends."""
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            dict(hf_save_at_steps=[9, 10]),  # no max_steps
+            dict(max_steps=10, hf_save_at_steps=[10]),
+            # Periodic saves at 8 and 10 rotate out the export at step 7.
+            dict(
+                max_steps=10,
+                hf_save_at_steps=[7, 9],
+                hf_save_steps=2,
+                hf_save_total_limit=3,
+            ),
+        ],
+    )
+    def test_rejects_configs_that_cannot_average(self, kwargs):
+        with pytest.raises(ValueError, match="average_hf_checkpoints"):
+            TrainerConfig(average_hf_checkpoints=True, **kwargs)
+
+    def test_accepts_a_limit_that_keeps_every_export(self):
+        TrainerConfig(
+            average_hf_checkpoints=True,
+            max_steps=10,
+            hf_save_at_steps=[8, 9, 10],
+            hf_save_steps=2,
+            hf_save_total_limit=3,
+        )
+
+    def test_averages_once_at_the_end_of_training(self, accelerator, tmp_path):
+        trainer = Trainer(
+            accelerator=accelerator,
+            model=torch.nn.Linear(2, 2),
+            optimizer=MagicMock(),
+            scheduler=MagicMock(),
+            train_dataloader_provider=lambda epoch: [{}] * 12,
+            config=TrainerConfig(
+                output_dir=tmp_path,
+                max_steps=10,
+                hf_save_at_steps=[10, 8, 9],
+                average_hf_checkpoints=True,
+            ),
+            metric_logger=MagicMock(),
+        )
+        trainer.training_step = MagicMock(return_value=(torch.tensor(0.0), None))
+        trainer.save_checkpoint = MagicMock()
+        trainer.save_hf_checkpoint = MagicMock()
+        target = "modules.pretrain.src.trainer.trainer.average_checkpoints"
+        with patch(target) as average:
+            trainer.train()
+            hf_root = tmp_path / "hf_checkpoints"
+            average.assert_called_once_with(
+                [hf_root / f"checkpoint_{step}" for step in (8, 9, 10)],
+                hf_root / "averaged",
+            )
+
+            # A resumed, already averaged run does not average again.
+            (hf_root / "averaged").mkdir(parents=True)
+            trainer.average_hf_checkpoints()
+            average.assert_called_once()
 
 
 class TestResumeGuardsAgainstShorterEpoch:
