@@ -9,9 +9,9 @@ import polars as pl
 import pytest
 
 from modules.core.utils.config_loader import load_and_parse
-from modules.evaluate.src.contracts.config import EvaluationConfig
-from modules.evaluate.src.dataset.workspace import EvaluationWorkspace
-from modules.evaluate.src.contracts.config import EvaluationWorkspaceConfig
+from modules.evaluate.src.artifacts.workspace import EvaluationWorkspace
+from modules.evaluate.src.config import EvaluationConfig
+from modules.evaluate.src.config import EvaluationWorkspaceConfig
 
 
 def workspace_config(base_dir, **overrides):
@@ -48,7 +48,8 @@ def test_output_layout_uses_labels_not_source_paths(tmp_path, model_repo_id):
     root = tmp_path / "default/sequence_classification/toy_dataset/toy_model"
     assert workspace.scores_path == root / "test"
     assert workspace.embeddings_path == (
-        tmp_path / "default/tmp/sequence_classification/toy_dataset/toy_model/embeddings"
+        tmp_path
+        / "default/tmp/sequence_classification/toy_dataset/toy_model/embeddings"
     )
 
 
@@ -149,8 +150,9 @@ def test_seed_manifests_replace_workspace_and_experiment_sidecars(tmp_path):
         second.validate_experiment("config", {"mode": "other"})
     with first.reserve_run(overwrite=True) as targets:
         first.initialize_run(targets, overwrite=True, config={"seed": 1, "mode": "mlp"})
-    assert json.loads(first.run_manifest_path.read_text())["experiment"] == (
-        manifest["experiment"]
+    assert (
+        json.loads(first.run_manifest_path.read_text())["experiment"]
+        == (manifest["experiment"])
     )
 
 
@@ -158,7 +160,9 @@ def test_seed_manifests_replace_workspace_and_experiment_sidecars(tmp_path):
 def test_seeded_and_unseeded_runs_cannot_mix(tmp_path, seeded_first):
     config = workspace_config(tmp_path)
     first = EvaluationWorkspace(config, variant="mlp", seed=1 if seeded_first else None)
-    second = EvaluationWorkspace(config, variant="mlp", seed=None if seeded_first else 1)
+    second = EvaluationWorkspace(
+        config, variant="mlp", seed=None if seeded_first else 1
+    )
     with first.reserve_run() as targets:
         first.initialize_run(targets, overwrite=False, config={})
     with pytest.raises(ValueError, match="seed|Seed"), second.reserve_run():
@@ -429,6 +433,8 @@ def test_overwrite_rejects_checkpoint_inside_target(tmp_path):
 
 
 def test_cli_passes_explicit_overwrite_to_pipeline(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+
     from modules.evaluate.src import run_evaluate
 
     path = tmp_path / "config.json"
@@ -438,20 +444,20 @@ def test_cli_passes_explicit_overwrite_to_pipeline(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.argv", ["run_evaluate.py", "--overwrite", str(path)])
     monkeypatch.setattr(
         run_evaluate,
-        "Accelerator",
-        lambda **kwargs: SimpleNamespace(is_main_process=True),
+        "initialize_runtime",
+        lambda *args, **kwargs: nullcontext(SimpleNamespace(is_main_process=True)),
     )
-    monkeypatch.setattr(run_evaluate, "seed_everything", lambda seed: None)
     run = Mock()
-    monkeypatch.setattr(run_evaluate, "run_pipeline", run)
+    monkeypatch.setattr("modules.evaluate.src.runners.pipeline.run_evaluation", run)
     run_evaluate.main()
     assert run.call_args.kwargs["overwrite"] is True
-    assert run.call_args.args[1].config.run_id == "test"
+    assert run.call_args.args[0].workspace.run_id == "test"
 
 
-def test_cli_rejects_baseline_overwrite_without_touching_artifacts(monkeypatch):
+def test_cli_rejects_baseline_overwrite_without_touching_artifacts(monkeypatch, capsys):
     from modules.evaluate.src import run_evaluate
 
     monkeypatch.setattr("sys.argv", ["run_evaluate.py", "--baselines", "--overwrite"])
-    with pytest.raises(SystemExit, match="model runs only"):
+    with pytest.raises(SystemExit):
         run_evaluate.main()
+    assert "model runs only" in capsys.readouterr().err

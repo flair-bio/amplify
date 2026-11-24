@@ -13,9 +13,12 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from modules.evaluate.src.dataset.collator import input_id_rows, unpack_packed
+from modules.evaluate.src.dataset.types import TestData
 from modules.evaluate.src.model.controls import (
     NO_INFERENCE_CONTROLS,
     RANDOMIZED_TRUNK_CONTROLS,
+    ControlPredictors,
+    make_sequence_scrambler,
 )
 from modules.evaluate.src.model.embeddings import (
     AUTOCAST_DTYPES,
@@ -23,16 +26,15 @@ from modules.evaluate.src.model.embeddings import (
     pool_hidden_states,
     residue_attention_mask,
 )
+from modules.evaluate.src.model.factory import Predictor
 from modules.evaluate.src.model.heads import EmbeddingProbeHead
 from modules.evaluate.src.model.inference import pad_for_gather, unique_id_indices
-from modules.evaluate.src.tasks import get_task
+from modules.evaluate.src.tasks.registry import get_flat_task
 from modules.evaluate.src.tasks.token_classification import IGNORE_INDEX
 
 if TYPE_CHECKING:
-    from modules.evaluate.src.contracts.config import LayerwiseConfig
-
-# Floor for standard deviations so constant features or targets don't divide by zero.
-MIN_STANDARD_DEVIATION = 1e-6
+    from modules.evaluate.src.config import LayerwiseConfig, PredictConfig
+MIN_STANDARD_DEVIATION = 1e-06
 
 
 def resolve_layers(layers: str | list[int], count: int) -> list[int]:
@@ -48,7 +50,7 @@ def resolve_layers(layers: str | list[int], count: int) -> list[int]:
         if isinstance(layers, str)
         else [index % count if -count <= index < count else index for index in layers]
     )
-    if not resolved or any(index < 0 or index >= count for index in resolved):
+    if not resolved or any((index < 0 or index >= count for index in resolved)):
         raise ValueError(
             f"Requested layers {layers} outside the {count} hidden states."
         )
@@ -76,7 +78,6 @@ class LayerwiseProbeModel(nn.Module):
     ) -> None:
         super().__init__()
         self.trunk: nn.Module = task_model.base_model
-        # Every probe reads from the same frozen representation at its depth.
         self.trunk.requires_grad_(False)
         self.trunk.eval()
         self.num_hidden_states = task_model.config.num_hidden_layers + 1
@@ -94,7 +95,6 @@ class LayerwiseProbeModel(nn.Module):
         self.task_type = task_type
         self.config = config
         self.tokenizer = tokenizer
-        # Identity until fit_standardization runs.
         self.register_buffer(
             "feature_mean", torch.zeros(len(self.layers), self.embedding_size)
         )
@@ -116,7 +116,7 @@ class LayerwiseProbeModel(nn.Module):
         token_level = self.task_type == "token_classification"
         regression = self.task_type == "sequence_regression"
         standardize = self.config.standardize_features
-        if not standardize and not regression:
+        if not standardize and (not regression):
             return
         count = torch.zeros(1, dtype=torch.float64)
         sums = torch.zeros(len(self.layers), self.embedding_size, dtype=torch.float64)
@@ -136,10 +136,8 @@ class LayerwiseProbeModel(nn.Module):
                     if token_level:
                         rows = rows[labels != IGNORE_INDEX]
                     rows = rows.reshape(-1, self.embedding_size).float()
-                    # Per-batch float32 sums; float64 totals stay on CPU (MPS lacks float64).
                     sums[position] += rows.sum(dim=0).cpu().double()
                     squares[position] += rows.square().sum(dim=0).cpu().double()
-                # Every layer contributes the same number of rows.
                 count += rows.shape[0]
             if regression:
                 targets = labels.cpu().double()
@@ -154,7 +152,7 @@ class LayerwiseProbeModel(nn.Module):
         totals = torch.cat([count, sums.flatten(), squares.flatten(), target_sums])
         if accelerator.num_processes > 1:
             totals = accelerator.reduce(totals.to(accelerator.device), "sum").cpu()
-        count, totals = totals[0], totals[1:]
+        count, totals = (totals[0], totals[1:])
         sums, squares, target_sums = totals.split([sums.numel(), sums.numel(), 3])
         mean, std = _mean_std(sums, squares, count)
         if standardize:
@@ -239,7 +237,6 @@ class LayerwiseProbeModel(nn.Module):
         labels = batch.pop("labels", None)
         embeddings = batch.pop("inputs_embeds", None)
         if embeddings is not None:
-            # Cached features concatenate layers along the width dimension.
             if embeddings.ndim != 2 or embeddings.shape[
                 -1
             ] != self.embedding_size * len(self.layers):
@@ -285,7 +282,7 @@ class LayerwiseProbeModel(nn.Module):
                     )
                     for layer, state in states.items()
                 }
-        return features_by_layer, labels, unpack
+        return (features_by_layer, labels, unpack)
 
     def forward_conditions(
         self, head_sets: Mapping[str, nn.ModuleDict], **batch: Any
@@ -319,7 +316,6 @@ class LayerwiseProbeModel(nn.Module):
         if self.task_type == "token_classification":
             output = head(inputs_embeds=features)
             logits = output.logits if unpack is None else unpack(output.logits)
-            # The head's loss is row-wise; padded token rows need ignore_index.
             loss = (
                 None
                 if labels is None
@@ -354,19 +350,11 @@ def _mean_std(
     total = count.clamp(min=1)
     mean = sums / total
     variance = (squares / total - mean.square()).clamp(min=0)
-    return mean.float(), variance.sqrt().clamp(min=MIN_STANDARD_DEVIATION).float()
+    return (mean.float(), variance.sqrt().clamp(min=MIN_STANDARD_DEVIATION).float())
 
 
-"""Gather per-layer predictions and controls from live or cached probe features."""
-
-
+"Gather per-layer predictions and controls from live or cached probe features."
 logger = logging.getLogger(__name__)
-
-if TYPE_CHECKING:
-    from modules.evaluate.src.contracts.artifacts import PreparedArtifacts
-    from modules.evaluate.src.contracts.config import PredictConfig
-
-# With a frozen trunk these two controls are identical, so they share one run.
 FRESH_HEAD_CONTROLS = frozenset({"untrained", "random_head"})
 CONSTANT_CONTROLS = frozenset({"majority_class", "train_mean"})
 
@@ -402,7 +390,9 @@ def fresh_heads(
 
 
 def run_layerwise_control_conditions(
-    prepared: PreparedArtifacts,
+    predictor: Predictor,
+    test: TestData,
+    control_predictors: ControlPredictors,
     task_type: str,
     accelerator: Accelerator,
     config: PredictConfig,
@@ -413,7 +403,7 @@ def run_layerwise_control_conditions(
     Head-only controls share the trained probes' features. Scrambled inputs
     and random-trunk controls use original token batches because cached
     features cannot reflect those changes. ``random_trunk`` uses probes that
-    ControlsStep trained on the random trunk; ``random_both`` uses untrained heads
+    control fitting trained on the random trunk; ``random_both`` uses untrained heads
     on it. Constant and label-only controls are handled downstream. Every
     inferred condition must return the same layer positions.
     """
@@ -428,22 +418,22 @@ def run_layerwise_control_conditions(
     if unsupported:
         raise ValueError(f"Unsupported layerwise controls: {sorted(unsupported)}")
     if controls & RANDOMIZED_TRUNK_CONTROLS and (
-        prepared.layerwise is None or prepared.layerwise.random_trunk_model is None
+        test.layerwise is None or control_predictors.random_trunk_model is None
     ):
         raise ValueError(
-            "random_trunk/random_both need the random-trunk probes from "
-            "ControlsStep; pass the predict controls to ControlsStep.run."
+            "random_trunk/random_both require fitted random-trunk probes; call "
+            "prepare_control_predictors with the requested controls before prediction."
         )
-    inner = accelerator.unwrap_model(prepared.model)
-    using_embeddings = prepared.embedding is not None
-    layerwise = prepared.layerwise
+    inner = accelerator.unwrap_model(predictor.model)
+    using_embeddings = test.embedding is not None
+    layerwise = test.layerwise
     token_dataloader = (
         layerwise.token_dataloaders["test"]
         if layerwise is not None
-        else prepared.test_dataloader
+        else test.test_dataloader
     )
     fresh_head_controls = controls & FRESH_HEAD_CONTROLS
-    prediction_dataloader = prepared.test_dataloader
+    prediction_dataloader = test.test_dataloader
     if using_embeddings and config.embedding_batch_size is not None:
         assert prediction_dataloader is not None
         prediction_dataloader = accelerator.prepare(
@@ -455,21 +445,17 @@ def run_layerwise_control_conditions(
             )
         )
     conditions = run_layerwise_conditions(
-        prepared.model,
+        predictor.model,
         prediction_dataloader,
         task_type,
         accelerator,
         collect_probabilities=config.collect_probabilities,
-        tokenizer=(
-            prepared.tokenizer
-            if config.store_sequences and not using_embeddings
-            else None
-        ),
-        extra_heads=(
-            {"fresh": fresh_heads(inner, seed, accelerator.device)}
-            if fresh_head_controls
-            else None
-        ),
+        tokenizer=predictor.tokenizer
+        if config.store_sequences and (not using_embeddings)
+        else None,
+        extra_heads={"fresh": fresh_heads(inner, seed, accelerator.device)}
+        if fresh_head_controls
+        else None,
         progress_label="Layerwise prediction: "
         + ", ".join(["trained", *sorted(fresh_head_controls)]),
     )
@@ -484,27 +470,25 @@ def run_layerwise_control_conditions(
             task_type,
             accelerator,
             collect_probabilities=config.collect_probabilities,
-            batch_transform=get_task(task_type).make_sequence_scrambler(
-                prepared.tokenizer, seed
-            ),
-            tokenizer=prepared.tokenizer,
+            batch_transform=make_sequence_scrambler(predictor.tokenizer, seed),
+            tokenizer=predictor.tokenizer,
             progress_label="Layerwise prediction: scrambled_sequences",
         )["trained"]
     if controls & RANDOMIZED_TRUNK_CONTROLS:
         assert layerwise is not None
-        assert layerwise.random_trunk_model is not None
-        random_inner = accelerator.unwrap_model(layerwise.random_trunk_model)
+        assert control_predictors.random_trunk_model is not None
+        random_inner = accelerator.unwrap_model(control_predictors.random_trunk_model)
         random_conditions = run_layerwise_conditions(
-            layerwise.random_trunk_model,
+            control_predictors.random_trunk_model,
             token_dataloader,
             task_type,
             accelerator,
             collect_probabilities=config.collect_probabilities,
-            extra_heads=(
-                {"random_both": fresh_heads(random_inner, seed, accelerator.device)}
-                if "random_both" in controls
-                else None
-            ),
+            extra_heads={
+                "random_both": fresh_heads(random_inner, seed, accelerator.device)
+            }
+            if "random_both" in controls
+            else None,
             flatten_ragged=using_embeddings,
             progress_label="Layerwise prediction: "
             + ", ".join(sorted(controls & RANDOMIZED_TRUNK_CONTROLS)),
@@ -513,13 +497,11 @@ def run_layerwise_control_conditions(
             conditions["random_trunk"] = random_conditions["trained"]
         if "random_both" in controls:
             conditions["random_both"] = random_conditions["random_both"]
-
     expected_layers = set(inner.layers)
     for condition, layer_outputs in conditions.items():
         if set(layer_outputs) != expected_layers:
             raise RuntimeError(
-                f"Layerwise condition '{condition}' returned layers "
-                f"{sorted(layer_outputs)}, expected {sorted(expected_layers)}."
+                f"Layerwise condition '{condition}' returned layers {sorted(layer_outputs)}, expected {sorted(expected_layers)}."
             )
     return conditions
 
@@ -548,7 +530,7 @@ def run_layerwise_conditions(
     are assigned as results are appended.
     """
     model.eval()
-    task = get_task(task_type)
+    task = get_flat_task(task_type)
     inner = accelerator.unwrap_model(model)
     layer_ids = inner.layers
     started = last_log = monotonic()
@@ -581,8 +563,6 @@ def run_layerwise_conditions(
                 batch = batch_transform(batch)
             outputs = inner.forward_conditions(head_sets, **batch)
             if "cu_seqlens" in batch and task.is_ragged:
-                # Expand packed targets before gathering so they align with the
-                # per-sequence rows emitted by each token-classification head.
                 labels = unpack_packed(
                     labels, batch["cu_seqlens"], batch["num_sequences"], IGNORE_INDEX
                 )
@@ -607,16 +587,12 @@ def run_layerwise_conditions(
                 targets["input_ids"] = pad_for_gather(
                     input_id_rows(batch, pad_id), accelerator, pad_id
                 )
-            # Gather labels and every condition together to keep row ordering
-            # identical across layers and distributed workers.
             gathered = accelerator.gather_for_metrics(targets)
             if ids is not None:
                 ids = accelerator.gather_for_metrics(ids, use_gather_object=True)
                 ids = ids[: gathered["labels"].shape[0]]
-                # Cached ragged inputs repeat a source ID for each residue; those
-                # rows are predictions, not distributed sampler padding.
-                if getattr(accelerator, "num_processes", 1) > 1 and not (
-                    task.is_ragged and "inputs_embeds" in batch
+                if getattr(accelerator, "num_processes", 1) > 1 and (
+                    not (task.is_ragged and "inputs_embeds" in batch)
                 ):
                     indices = unique_id_indices(ids, seen_ids)
                     ids = [ids[index] for index in indices]
@@ -627,7 +603,6 @@ def run_layerwise_conditions(
                 )
             if flatten:
                 example_offset += gathered["labels"].shape[0]
-            # One device-to-host copy per batch rather than one per layer and condition.
             gathered = {key: value.cpu() for key, value in gathered.items()}
             sequences = (
                 tokenizer.batch_decode(
@@ -643,18 +618,16 @@ def run_layerwise_conditions(
                     layer_rows_data = task.split_batch_rows_with_context(
                         predictions,
                         gathered["labels"],
-                        batch_metadata=(
-                            {"residue_lengths": gathered["residue_lengths"]}
-                            if "residue_lengths" in gathered
-                            else None
-                        ),
+                        batch_metadata={"residue_lengths": gathered["residue_lengths"]}
+                        if "residue_lengths" in gathered
+                        else None,
                     )
                     for index, (pred, label) in enumerate(layer_rows_data):
                         row_id = ids[index] if ids is not None else len(layer_rows.ids)
                         if flatten:
                             layer_rows.ids.extend([row_id] * len(pred))
-                            layer_rows.predictions.extend([value] for value in pred)
-                            layer_rows.labels.extend([value] for value in label)
+                            layer_rows.predictions.extend(([value] for value in pred))
+                            layer_rows.labels.extend(([value] for value in label))
                         else:
                             layer_rows.ids.append(row_id)
                             layer_rows.predictions.append(pred)

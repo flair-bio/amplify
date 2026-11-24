@@ -14,7 +14,7 @@ import numpy as np
 import polars as pl
 import torch
 
-from modules.evaluate.src.contracts.config import BaselineName
+from modules.evaluate.src.config import BaselineName
 from modules.evaluate.src.tasks import get_task
 
 AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"

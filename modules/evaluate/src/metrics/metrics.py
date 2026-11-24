@@ -2,7 +2,7 @@
 Shared metric callables reused by the task handlers.
 
 Each callable takes the uniform ``(values, labels, average)`` signature that
-:meth:`modules.evaluate.src.tasks.base.FlatMetricsTask.compute_metrics` dispatches
+:meth:`modules.evaluate.src.tasks.base.FlatTask.compute_metrics` dispatches
 with; ``values`` is the predictions except for probability-based metrics such
 as ``roc_auc``. Which of these a task actually supports is declared by that
 task's handler in ``modules/evaluate/src/tasks/``.

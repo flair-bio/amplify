@@ -5,44 +5,26 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 import torch
-from transformers import AutoModelForMaskedLM
 
 from modules.evaluate.src.metrics import metrics
-from modules.evaluate.src.tasks.base import FlatMetricsTask, MetricFn
-from modules.evaluate.src.tasks.registry import register_task
+from modules.evaluate.src.tasks.base import FlatTask, MetricFn
 
 IGNORE_INDEX = -100
 
 
-@register_task
-class PseudoPerplexityTask(FlatMetricsTask):
+class PseudoPerplexityTask(FlatTask):
     """Score each residue by masking it and reading its MLM log-probability."""
 
     evaluation_modes = frozenset({"evaluate_as_is"})
     dataset_baselines = frozenset({"amino_acid_frequency"})
-
     name = "pseudo_perplexity"
-    auto_model_class = AutoModelForMaskedLM
     requires_source_labels = False
     tokenization_batch_size = 1
-
     metrics: ClassVar[dict[str, MetricFn]] = {
         "pseudo_perplexity": metrics.pseudo_perplexity,
         "mean_log_prob": metrics.mean_log_prob,
     }
     default_metric_names = ("pseudo_perplexity",)
-
-    def build_model(
-        self,
-        model_id: str,
-        num_labels: int,
-        model_kwargs: dict[str, Any] | None = None,
-    ) -> Any:
-        return self.auto_model_class.from_pretrained(
-            model_id,
-            trust_remote_code=True,
-            **{**self.model_kwargs(), **(model_kwargs or {})},
-        )
 
     def resolve_num_labels(self, num_labels: int | None, dataset_name: str) -> int:
         return 1
@@ -62,7 +44,6 @@ class PseudoPerplexityTask(FlatMetricsTask):
         mask_token_id = tokenizer.mask_token_id
         if mask_token_id is None:
             raise ValueError("pseudo_perplexity requires a tokenizer mask token.")
-
         rows: list[dict[str, Any]] = []
         for pos in range(res_start, res_end):
             masked_ids = list(input_ids)
@@ -96,7 +77,6 @@ class PseudoPerplexityTask(FlatMetricsTask):
             raise ValueError(
                 "pseudo_perplexity requires labels to score masked tokens."
             )
-
         scored = labels != IGNORE_INDEX
         target_ids = labels[scored]
         log_probs = logits[scored].log_softmax(dim=-1)
@@ -109,6 +89,6 @@ class PseudoPerplexityTask(FlatMetricsTask):
     ) -> list[tuple[Any, Any]]:
         rows: list[tuple[Any, Any]] = []
         for pred, label_row in zip(predictions.cpu().tolist(), labels.cpu().tolist()):
-            target = next(value for value in label_row if value != IGNORE_INDEX)
+            target = next((value for value in label_row if value != IGNORE_INDEX))
             rows.append((float(pred), int(target)))
         return rows

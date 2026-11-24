@@ -1,7 +1,7 @@
-"""Pure statistical helpers behind ScoreStep's bootstrap confidence intervals
+"""Pure statistical helpers behind scoring's bootstrap confidence intervals
 and trained-vs-control comparisons: array conversion, per-resample/full-set
 metric scoring, the paired permutation test, and multiple-comparisons
-correction. Kept out of score.py since none of these need ScoreStep's own
+correction. Kept out of score.py since none of these need scoring's own
 state (config/workspace/IO) -- each takes everything it needs as a plain
 argument, so they're independently testable and reusable.
 """
@@ -13,12 +13,9 @@ from typing import Any
 
 import numpy as np
 
-from modules.evaluate.src.contracts.artifacts import (
-    ConfidenceInterval,
-    PredictOutput,
-)
+from modules.evaluate.src.artifacts.results import ConfidenceInterval, PredictOutput
 from modules.evaluate.src.metrics import metrics
-from modules.evaluate.src.tasks.base import FlatMetricsTask
+from modules.evaluate.src.tasks.base import FlatTask
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +66,7 @@ def bootstrap_indices(
 
 
 def token_confusion_matrices(
-    task: FlatMetricsTask,
+    task: FlatTask,
     conditions: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray | None]],
     groups: np.ndarray | None,
     metric_names: list[str],
@@ -232,7 +229,7 @@ def mean_per_example_scores(
 
 
 def full_scores(
-    task: FlatMetricsTask,
+    task: FlatTask,
     predictions: Any,
     labels: Any,
     probabilities: Any | None,
@@ -303,10 +300,10 @@ def collect_control_arrays(
     labels_col: list[Any],
     probabilities_col: list[Any] | None,
     rng: np.random.Generator,
-    task: FlatMetricsTask,
+    task: FlatTask,
 ) -> dict[str, tuple[list[Any], list[Any], list[Any] | None]]:
     """Build (predictions, labels, probabilities) arrays for each control
-    condition PredictStep was configured to produce, row-aligned to the
+    condition prediction was configured to produce, row-aligned to the
     trained model's predictions."""
     control_arrays: dict[str, tuple[list[Any], list[Any], list[Any] | None]] = {}
 

@@ -1,13 +1,7 @@
-"""
-Shared model-inference primitive: run a model over a dataloader and gather
-per-example ids/predictions/labels[/probabilities/sequences]. Used by
-:class:`~modules.evaluate.src.steps.predict.PredictStep` for the trained
-model's own predictions, by
-:class:`~modules.evaluate.src.steps.controls.ControlBuilder` for
-model-based control conditions, and by
-:class:`~modules.evaluate.src.steps.tune.TuneStep` for validation-time
-scoring -- kept in its own module so none of those need to import from
-one another just to share this loop.
+"""Shared inference for primary models, controls and validation.
+
+Gather example IDs, predictions, labels and optional probabilities/sequences
+without coupling prediction, control or fitting services to one another.
 """
 
 from __future__ import annotations
@@ -24,13 +18,13 @@ from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
 from modules.evaluate.src.dataset.collator import input_id_rows, unpack_packed
-from modules.evaluate.src.tasks import TaskType, get_task
-
-logger = logging.getLogger(__name__)
+from modules.evaluate.src.dataset.types import TrainingData
+from modules.evaluate.src.tasks import TaskType
+from modules.evaluate.src.tasks.registry import get_flat_task
 
 if TYPE_CHECKING:
-    from modules.evaluate.src.contracts.artifacts import PreparedArtifacts
     from modules.evaluate.src.dataset.contact import ContactChain, ContactDataset
+logger = logging.getLogger(__name__)
 
 
 def run_contact_inference(
@@ -48,7 +42,7 @@ def run_contact_inference(
             (
                 chain
                 for chain in shared
-                if any(unit.labels_available for unit in chain.units)
+                if any((unit.labels_available for unit in chain.units))
             ),
             None,
         )
@@ -66,7 +60,7 @@ def run_contact_inference(
                     "Predictor must return a full retained-chain score matrix"
                 )
         for chain in shared:
-            yield chain, scores
+            yield (chain, scores)
         del scores
 
 
@@ -85,20 +79,18 @@ def pad_for_gather(
 
 
 def gather_training_labels(
-    prepared: PreparedArtifacts, accelerator: Accelerator
+    training: TrainingData, accelerator: Accelerator
 ) -> torch.Tensor:
     """Gather training targets for a model-independent prediction baseline."""
-    if prepared.train_dataloader is None:
+    if training.train_dataloader is None:
         raise ValueError("A train_dataloader is required for a train baseline.")
-
     from modules.evaluate.src.dataset.embeddings import find_embedding_dataset
 
-    embedding_dataset = find_embedding_dataset(prepared.train_dataloader)
+    embedding_dataset = find_embedding_dataset(training.train_dataloader)
     if embedding_dataset is not None:
         return torch.as_tensor(embedding_dataset.labels).reshape(-1)
-
     label_rows: list[torch.Tensor] = []
-    for batch in prepared.train_dataloader:
+    for batch in training.train_dataloader:
         labels = accelerator.gather_for_metrics(
             pad_for_gather(batch["labels"], accelerator, -100)
         )
@@ -140,7 +132,7 @@ def run_inference(
     to ``predictions[i]`` and ``labels[i]``. For ``token_classification``,
     ``predictions[i]``/``labels[i]`` are themselves lists of per-token
     values (ignore-index ``-100`` positions already dropped); use
-    :meth:`~modules.evaluate.src.tasks.base.TaskHandler.flatten_for_metrics`
+    :meth:`~modules.evaluate.src.tasks.base.FlatTask.flatten_for_metrics`
     to get
     the single flat sequence metrics expect. ``ids`` come from the dataset's
     ``id`` column when present (passed through by :class:`EvaluationCollator`);
@@ -168,19 +160,13 @@ def run_inference(
     shared validation callers remain silent by default.
     """
     model.eval()
-    task = get_task(task_type)
-
+    task = get_flat_task(task_type)
     all_ids: list[Any] = []
     all_predictions: list[Any] = []
     all_labels: list[Any] = []
     all_probabilities: list[Any] | None = [] if collect_probabilities else None
     all_sequences: list[str] | None = [] if tokenizer is not None else None
     has_ids = False
-
-    # Batches are moved to CPU right after gathering (but not converted to
-    # Python lists) so GPU memory doesn't grow with the number of batches
-    # accumulated across the whole test set; `.tolist()`/decoding is still
-    # deferred to a single pass below.
     pred_batches: list[torch.Tensor] = []
     label_batches: list[torch.Tensor] = []
     prob_batches: list[torch.Tensor] | None = [] if collect_probabilities else None
@@ -188,7 +174,6 @@ def run_inference(
     residue_length_batches: list[torch.Tensor] | None = None
     id_batches: list[Any] = []
     processed_rows = 0
-
     started = last_log = monotonic()
     with torch.inference_mode():
         for batch_idx, batch in enumerate(test_dataloader):
@@ -196,10 +181,7 @@ def run_inference(
                 break
             if isinstance(batch, (tuple, list)):
                 inputs_embeds, labels = batch
-                batch = {
-                    "inputs_embeds": inputs_embeds,
-                    "labels": labels,
-                }
+                batch = {"inputs_embeds": inputs_embeds, "labels": labels}
             else:
                 batch = dict(batch)
             ids = batch.pop("id", None)
@@ -214,7 +196,6 @@ def run_inference(
                 num_sequences = batch["num_sequences"]
                 logits = unpack_packed(logits, cu_seqlens, num_sequences)
                 labels = unpack_packed(labels, cu_seqlens, num_sequences, -100)
-
             gather_dims = (1, 2) if task.pairwise else (1,)
             preds = pad_for_gather(
                 task.extract_predictions(logits, labels=labels),
@@ -223,7 +204,6 @@ def run_inference(
                 gather_dims,
             )
             labels = pad_for_gather(labels, accelerator, -100, gather_dims)
-
             gather_targets: tuple[Any, ...] = (preds, labels)
             if prob_batches is not None:
                 probabilities = pad_for_gather(
@@ -238,10 +218,6 @@ def run_inference(
                 gather_targets = gather_targets + (input_ids,)
             if residue_lengths is not None:
                 gather_targets = gather_targets + (residue_lengths,)
-
-            # Gathers across processes (and drops padding introduced by
-            # the distributed sampler) so metrics reflect the full test
-            # set exactly once, regardless of world size.
             gathered = accelerator.gather_for_metrics(gather_targets)
             preds, labels, *rest = gathered
             processed_rows += preds.shape[0]
@@ -263,8 +239,6 @@ def run_inference(
             if ids is not None:
                 has_ids = True
                 ids = accelerator.gather_for_metrics(ids, use_gather_object=True)
-                # Object gathers do not remove sampler padding, unlike tensor
-                # gathers. The gathered prediction tensor is authoritative.
                 ids = ids[: preds.shape[0]]
             id_batches.append(ids)
             if progress_label and accelerator.is_main_process:
@@ -279,12 +253,11 @@ def run_inference(
                             elapsed,
                         )
                     else:
-                        rows_per_second = processed_rows / max(elapsed, 1e-9)
+                        rows_per_second = processed_rows / max(elapsed, 1e-09)
                         remaining_rows = max(0, progress_total_rows - processed_rows)
-                        eta = remaining_rows / max(rows_per_second, 1e-9)
+                        eta = remaining_rows / max(rows_per_second, 1e-09)
                         logger.info(
-                            "%s: batch %d/%d | %d/%d %s (%.1f%%) | "
-                            "%.1f %s/s | elapsed=%.1fs | ETA=%.1fs",
+                            "%s: batch %d/%d | %d/%d %s (%.1f%%) | %.1f %s/s | elapsed=%.1fs | ETA=%.1fs",
                             progress_label,
                             batch_idx + 1,
                             progress_total_batches,
@@ -298,19 +271,13 @@ def run_inference(
                             eta,
                         )
                     last_log = now
-
-    # Single host-sync pass over the whole split: every `.cpu()`/`.tolist()`
-    # call (and sequence decoding) happens here, once the full split has
-    # already been gathered, instead of once per batch inside the loop above.
     for batch_idx, (preds, labels) in enumerate(zip(pred_batches, label_batches)):
         if prob_batches is not None:
             assert all_probabilities is not None
             all_probabilities.extend(prob_batches[batch_idx].cpu().tolist())
         decoded = None
         if input_ids_batches is not None:
-            assert (
-                tokenizer is not None
-            )  # input_ids_batches is only set when tokenizer is
+            assert tokenizer is not None
             decoded = tokenizer.batch_decode(
                 input_ids_batches[batch_idx].cpu().tolist(), skip_special_tokens=True
             )
@@ -331,10 +298,7 @@ def run_inference(
             if decoded is not None:
                 assert all_sequences is not None
                 all_sequences.append(decoded[i])
-
     if not has_ids:
-        # No 'id' column on the dataset: fall back to a positional index
-        # over the final (gathered) example order.
         all_ids = list(range(len(all_predictions)))
     elif getattr(accelerator, "num_processes", 1) > 1:
         indices = unique_id_indices(all_ids, set())
@@ -345,8 +309,7 @@ def run_inference(
             all_probabilities = [all_probabilities[index] for index in indices]
         if all_sequences is not None:
             all_sequences = [all_sequences[index] for index in indices]
-
-    return all_ids, all_predictions, all_labels, all_probabilities, all_sequences
+    return (all_ids, all_predictions, all_labels, all_probabilities, all_sequences)
 
 
 def run_local_embedding_inference(
@@ -362,11 +325,10 @@ def run_local_embedding_inference(
 ) -> tuple[list[Any], list[Any], list[Any], list[Any] | None]:
     """Run a probe over a complete, locally replicated embedding split."""
     model.eval()
-    task = get_task(task_type)
+    task = get_flat_task(task_type)
     all_predictions: list[Any] = []
     all_labels: list[Any] = []
     all_probabilities: list[Any] | None = [] if collect_probabilities else None
-
     started = last_log = monotonic()
     with torch.inference_mode():
         for batch_idx, start in enumerate(range(0, embeddings.shape[0], batch_size), 1):
@@ -392,8 +354,7 @@ def run_local_embedding_inference(
                         now - started,
                     )
                     last_log = now
-
-    return ids, all_predictions, all_labels, all_probabilities
+    return (ids, all_predictions, all_labels, all_probabilities)
 
 
 def run_local_head_inference(
@@ -424,7 +385,7 @@ def run_local_head_inference(
     unsharded dataset (identical on every rank).
     """
     head_model.eval()
-    task = get_task(task_type)
+    task = get_flat_task(task_type)
     expected_examples = len(dataloader.dataset)
     seen: dict[Any, int] = {}
     all_ids: list[Any] = []
@@ -438,13 +399,8 @@ def run_local_head_inference(
             labels = batch.pop("labels", None)
             if torch.is_tensor(labels):
                 labels = labels.to(accelerator.device)
-            # This dataloader is deliberately not accelerator-prepared (see
-            # docstring), so batches aren't auto-moved to the device the
-            # way accelerator.prepare(dataloader) would -- move them here
-            # so the head runs on-device and produces dense CUDA
-            # predictions/probabilities for the gather_for_metrics() below.
             batch = {
-                key: (value.to(accelerator.device) if torch.is_tensor(value) else value)
+                key: value.to(accelerator.device) if torch.is_tensor(value) else value
                 for key, value in batch.items()
             }
             logits = head_model(**batch).logits
@@ -496,8 +452,6 @@ def run_local_head_inference(
                         assert batch_probabilities is not None
                         all_probabilities.append(batch_probabilities[position])
             else:
-                # No sampler padding to dedup here (see docstring): keep
-                # every row, including ones that share an id.
                 all_ids.extend(batch_ids)
                 all_predictions.extend(batch_predictions)
                 if all_probabilities is not None:
@@ -515,7 +469,6 @@ def run_local_head_inference(
                     last_log = now
     if len(all_predictions) != expected_examples:
         raise RuntimeError(
-            f"Local head inference produced {len(all_predictions)} unique "
-            f"predictions for {expected_examples} examples."
+            f"Local head inference produced {len(all_predictions)} unique predictions for {expected_examples} examples."
         )
-    return all_ids, all_predictions, all_probabilities
+    return (all_ids, all_predictions, all_probabilities)

@@ -11,11 +11,14 @@ import math
 from pathlib import Path
 
 import numpy as np
+import polars as pl
+import pyarrow as pa
 import pytest
 
 from modules.pretrain.src.dataset.dataset import (
     ClusterIndex,
     CurriculumConfig,
+    _build_cluster_index,
     _cluster_hash,
     _cluster_split_filter,
     build_source_epoch_plan,
@@ -403,6 +406,50 @@ def _hf_dataset(num_rows: int = 200):
 
 class TestClusterIndexCache:
     """``order`` indexes positionally, so a wrong hit corrupts data silently."""
+
+    @pytest.mark.parametrize("dictionary_encoded", [False, True])
+    def test_exact_lexical_groups_and_stable_score_order(
+        self, tmp_path, dictionary_encoded
+    ):
+        from datasets import Dataset as HFDataset
+        from datasets.table import InMemoryTable
+
+        dataset = HFDataset.from_dict(
+            {
+                _CLUSTER_COL: ["z", None, "A", "z", "", "A", None, "é", "A"],
+                "red_score": [0.5, 0.1, 0.8, 0.5, 0.5, 0.4, 0.8, 0.9, 0.8],
+                "sequence_length": list(range(10, 19)),
+            }
+        )
+        table = dataset.data.table
+        chunks = [
+            table.column(_CLUSTER_COL).slice(i, n).chunk(0) for i, n in [(0, 4), (4, 5)]
+        ]
+        if dictionary_encoded:
+            chunks = [chunk.dictionary_encode() for chunk in chunks]
+        # Keep distinct Arrow dictionaries/chunks on input to the index builder.
+        dataset._data = InMemoryTable(
+            table.set_column(0, _CLUSTER_COL, pa.chunked_array(chunks))
+        )
+        index = load_or_build_cluster_index(
+            dataset, _CLUSTER_COL, "red_score", tmp_path
+        )
+
+        expected_order = [4, 2, 8, 5, 0, 3, 7, 6, 1]
+        np.testing.assert_array_equal(index.order, expected_order)
+        np.testing.assert_array_equal(index.boundaries, [0, 1, 4, 6, 7, 9])
+        np.testing.assert_array_equal(index.lengths, np.array(expected_order) + 10)
+        assert index.order.dtype == index.boundaries.dtype == np.int64
+
+    def test_polars_capacity_checked_before_accessing_arrow(self, monkeypatch):
+        monkeypatch.setattr(pl, "get_index_type", lambda: pl.UInt32)
+
+        class OversizedDataset:
+            def __len__(self):
+                return 2**32
+
+        with pytest.raises(ValueError, match="4,294,967,295.*64-bit Polars"):
+            _build_cluster_index(OversizedDataset(), _CLUSTER_COL, "red_score")
 
     def test_identical_dataset_hits_the_cache(self, tmp_path):
         built = load_or_build_cluster_index(

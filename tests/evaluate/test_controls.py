@@ -1,5 +1,3 @@
-from modules.evaluate.src.steps.controls import ControlsStep
-from modules.evaluate.src.contracts.config import PrepareConfig
 """Control probes use the correct features, training protocol, and preprocessing."""
 
 import json
@@ -12,24 +10,36 @@ from accelerate import Accelerator
 from torch import nn
 from torch.utils.data import DataLoader
 
-from modules.evaluate.src.model.heads import EmbeddingProbeHead
-from modules.evaluate.src.contracts.config import HeadConfig
-from modules.evaluate.src.contracts.artifacts import EmbeddingArtifacts, PreparedArtifacts
-from modules.evaluate.src.contracts.config import PredictConfig
-from modules.evaluate.src.steps.predict import PredictStep
-from modules.evaluate.src.contracts.config import HyperparameterSearchConfig, HyperparameterSearchSpaceConfig, TuneConfig
-from modules.evaluate.src.steps.tune import TuneStep
-from modules.evaluate.src.trainers.selection import PredictorSelection
-from modules.evaluate.src.steps.controls import ControlBuilder
-from modules.evaluate.src.model.controls import build_random_trunk
-from modules.evaluate.src.model.inference import run_local_head_inference
-from modules.evaluate.src.contracts.config import EmbeddingCacheConfig
-from modules.evaluate.src.dataset.embedding_cache import weights_fingerprint
+from modules.evaluate.src.artifacts.cache import weights_fingerprint
+from modules.evaluate.src.config import (
+    HeadConfig,
+    HyperparameterSearchConfig,
+    HyperparameterSearchSpaceConfig,
+    PredictConfig,
+    TuneConfig,
+)
+from modules.evaluate.src.config import EmbeddingCacheConfig
+from modules.evaluate.src.controls.inference import (
+    _get_or_build_control_embeddings,
+    _run_embedding_control_inference,
+)
 from modules.evaluate.src.dataset.embeddings import (
     EmbeddingDataset,
     find_embedding_dataset,
 )
+from modules.evaluate.src.dataset.types import CachedFeatures
+from modules.evaluate.src.model.controls import build_random_trunk
+from modules.evaluate.src.model.heads import EmbeddingProbeHead
+from modules.evaluate.src.model.inference import run_local_head_inference
+from modules.evaluate.src.trainers.selection import _search_hyperparameters
 
+from .helpers import (
+    fit_controls,
+    fit_inputs,
+    make_inputs,
+    patch_function,
+    predict_inputs,
+)
 from .test_prepare import _make_workspace, _run_prepare
 
 
@@ -65,20 +75,21 @@ def test_randomized_heads_preserve_training_feature_statistics(
     features = torch.tensor([[-2.0, -4.0, -6.0, -8.0], [1.0, 3.0, 5.0, 7.0]])
     labels = torch.tensor([0, 1])
     ids = ["a", "b"]
-    prepared = PreparedArtifacts(
+    prepared = make_inputs(
         model=trained_head,
         tokenizer=None,
+        trunk=_ControlTrunk(4),
         train_dataloader=None,
         val_dataloader=None,
         test_dataloader=DataLoader(
             EmbeddingDataset(features, ids, labels), batch_size=2
         ),
-        embedding=EmbeddingArtifacts(backend=SimpleNamespace(trunk=_ControlTrunk(4))),
+        embedding=CachedFeatures(backend=SimpleNamespace()),
     )
-    builder = ControlBuilder(collect_probabilities=True)
-    monkeypatch.setattr(
-        builder,
-        "_get_or_build_control_embeddings",
+    builder = PredictConfig(collect_probabilities=True)
+    patch_function(
+        monkeypatch,
+        _get_or_build_control_embeddings,
         lambda *args: (features, ids, labels),
     )
     inference = run_local_head_inference
@@ -89,17 +100,18 @@ def test_randomized_heads_preserve_training_feature_statistics(
         return inference(head, *args, **kwargs)
 
     monkeypatch.setattr(
-        "modules.evaluate.src.steps.controls.run_local_head_inference", capture_head
+        "modules.evaluate.src.controls.inference.run_local_head_inference", capture_head
     )
-
-    actual_ids, _, probabilities, _ = builder._run_embedding_control_inference(
+    actual_ids, _, probabilities, _ = _run_embedding_control_inference(
+        builder,
         control,
         SimpleNamespace(task_type="sequence_classification"),
-        prepared,
+        prepared.predictor,
+        prepared.test,
+        prepared.controls,
         Accelerator(cpu=True),
         seed=42,
     )
-
     assert actual_ids == ids
     (control_head,) = control_heads
     assert control_head is not trained_head
@@ -120,12 +132,14 @@ def test_randomized_heads_preserve_training_feature_statistics(
         assert control_head.feature_mean is None
         assert control_head.feature_std is None
     assert any(
-        not torch.equal(parameter, trained_parameter)
-        for parameter, trained_parameter in zip(
-            control_head.parameters(), trained_head.parameters()
+        (
+            not torch.equal(parameter, trained_parameter)
+            for parameter, trained_parameter in zip(
+                control_head.parameters(), trained_head.parameters()
+            )
         )
     )
-    assert all(torch.all(parameter == 1.5) for parameter in trained_head.parameters())
+    assert all((torch.all(parameter == 1.5) for parameter in trained_head.parameters()))
     with torch.inference_mode():
         expected = control_head(inputs_embeds=features).logits.softmax(dim=-1)
     torch.testing.assert_close(torch.tensor(probabilities), expected)
@@ -145,8 +159,8 @@ def test_randomized_heads_preserve_training_feature_statistics(
 def test_cached_random_trunk_selects_and_refits_its_own_probe(
     monkeypatch, tmp_path, model_family, refit, head_type, task_type
 ):
-    from modules.evaluate.src.steps import controls as controls_module
-    from modules.evaluate.src.trainers import selection as selection_module
+    from modules.evaluate.src.controls import fitting as controls_module
+    from modules.evaluate.src.trainers import fitting as fitting_module
 
     torch.manual_seed(1234)
     prepared = _run_prepare(
@@ -159,9 +173,9 @@ def test_cached_random_trunk_selects_and_refits_its_own_probe(
     workspace = _make_workspace(tmp_path, task_type)
     accelerator = Accelerator(cpu=True)
     original_loaders = (
-        prepared.train_dataloader,
-        prepared.val_dataloader,
-        prepared.test_dataloader,
+        prepared.training.train_dataloader,
+        prepared.training.val_dataloader,
+        prepared.test.test_dataloader,
     )
     extracted = []
     original_build = controls_module.build_embedding_dataloaders
@@ -176,31 +190,21 @@ def test_cached_random_trunk_selects_and_refits_its_own_probe(
         controls_module, "build_embedding_dataloaders", capture_features
     )
     searches = []
-    original_search = PredictorSelection._search_hyperparameters
+    original_search = _search_hyperparameters
 
-    def capture_search(self, ws, *args, **kwargs):
-        searches.append((ws, self.config.hyperparameter_search.model_dump()))
-        return original_search(self, ws, *args, **kwargs)
+    def capture_search(config, train_trunk, _fit_result, ws, *args, **kwargs):
+        searches.append((ws, config.hyperparameter_search.model_dump()))
+        return original_search(config, train_trunk, _fit_result, ws, *args, **kwargs)
 
-    monkeypatch.setattr(
-        PredictorSelection, "_search_hyperparameters", capture_search
-    )
-    run_workspaces = []
-    original_run = TuneStep.run
-
-    def capture_run(self, run_workspace, *args, **kwargs):
-        run_workspaces.append(run_workspace.variant)
-        return original_run(self, run_workspace, *args, **kwargs)
-
-    monkeypatch.setattr(TuneStep, "run", capture_run)
-    original_fit = selection_module.fit_predictor
+    patch_function(monkeypatch, _search_hyperparameters, capture_search)
+    original_fit = fitting_module.fit_predictor
     fit_requests = []
 
     def capture_fit(**kwargs):
         fit_requests.append(kwargs["workspace"])
         return original_fit(**kwargs)
 
-    monkeypatch.setattr(selection_module, "fit_predictor", capture_fit)
+    patch_function(monkeypatch, original_fit, capture_fit)
     config = TuneConfig(
         head=HeadConfig(
             head_type=head_type,
@@ -224,24 +228,28 @@ def test_cached_random_trunk_selects_and_refits_its_own_probe(
             ),
         ),
     )
-    TuneStep(config).run(workspace, prepared, seed=42, accelerator=accelerator)
-    ControlsStep(config, PrepareConfig()).run(workspace, prepared, seed=42, controls=['random_trunk'], accelerator=accelerator)
-    assert run_workspaces == [workspace.variant]
+    fit_inputs(config, workspace, prepared, seed=42, accelerator=accelerator)
+    fit_controls(
+        config,
+        workspace,
+        prepared,
+        seed=42,
+        controls=["random_trunk"],
+        accelerator=accelerator,
+    )
     assert fit_requests == [
         workspace.config,
         workspace.control_workspace("random_trunk").config,
     ]
-    assert not hasattr(TuneStep, "_fit_cached_control_probe")
-    assert prepared.controls.random_trunk_model is not prepared.model
+    assert prepared.controls.random_trunk_model is not prepared.predictor.model
     assert original_loaders == (
-        prepared.train_dataloader,
-        prepared.val_dataloader,
-        prepared.test_dataloader,
+        prepared.training.train_dataloader,
+        prepared.training.val_dataloader,
+        prepared.test.test_dataloader,
     )
     ((trunk, loaders),) = extracted
-    backend = prepared.embedding.backend
     assert weights_fingerprint(trunk) == weights_fingerprint(
-        build_random_trunk(backend.trunk, 42)
+        build_random_trunk(prepared.predictor.trunk, 42)
     )
     train = find_embedding_dataset(loaders["train"])
     validation = find_embedding_dataset(loaders["validation"])
@@ -252,13 +260,13 @@ def test_cached_random_trunk_selects_and_refits_its_own_probe(
     )
     assert not torch.equal(
         train.embeddings,
-        find_embedding_dataset(prepared.train_dataloader).embeddings,
+        find_embedding_dataset(prepared.training.train_dataloader).embeddings,
     )
     if head_type == "sklearn_linear":
         np.testing.assert_allclose(
             prepared.controls.random_trunk_model.named_steps["scaler"].mean_,
             fitted_features.double().mean(0).numpy(),
-            atol=1e-6,
+            atol=1e-06,
         )
         filename = "tune_config.json"
     else:
@@ -281,36 +289,51 @@ def test_cached_random_trunk_selects_and_refits_its_own_probe(
             return infer(head, *args, **kwargs)
 
         monkeypatch.setattr(
-            "modules.evaluate.src.steps.controls.run_local_head_inference",
+            "modules.evaluate.src.controls.inference.run_local_head_inference",
             check_head,
         )
-    result = PredictStep(
-        PredictConfig(controls=["random_trunk"], persist_to_disk=False)
-    ).run(workspace, prepared, seed=42, accelerator=accelerator)
+    result = predict_inputs(
+        PredictConfig(controls=["random_trunk"], persist_to_disk=False),
+        workspace,
+        prepared,
+        seed=42,
+        accelerator=accelerator,
+    )
     assert (
         result.controls["random_trunk"]["id"].to_list()
         == result.predictions["id"].to_list()
     )
     with pytest.raises(ValueError, match="seed must match its tuning seed"):
-        ControlBuilder(False)._run_embedding_control_inference(
-            "random_trunk", workspace, prepared, accelerator, seed=43
+        _run_embedding_control_inference(
+            PredictConfig(collect_probabilities=False),
+            "random_trunk",
+            workspace,
+            prepared.predictor,
+            prepared.test,
+            prepared.controls,
+            accelerator,
+            seed=43,
         )
 
 
 def test_cached_random_trunk_requires_tuning():
-    prepared = PreparedArtifacts(
+    prepared = make_inputs(
         model=EmbeddingProbeHead(4, 2, "sequence_classification"),
         tokenizer=None,
+        trunk=_ControlTrunk(4),
         train_dataloader=None,
         val_dataloader=None,
         test_dataloader=None,
-        embedding=EmbeddingArtifacts(backend=SimpleNamespace(trunk=_ControlTrunk(4))),
+        embedding=CachedFeatures(backend=SimpleNamespace()),
     )
-    with pytest.raises(ValueError, match="controls to ControlsStep.run"):
-        ControlBuilder(False)._run_embedding_control_inference(
+    with pytest.raises(ValueError, match="requested controls before prediction"):
+        _run_embedding_control_inference(
+            PredictConfig(collect_probabilities=False),
             "random_trunk",
             SimpleNamespace(task_type="sequence_classification"),
-            prepared,
+            prepared.predictor,
+            prepared.test,
+            prepared.controls,
             Accelerator(cpu=True),
             seed=42,
         )

@@ -6,8 +6,8 @@ import pytest
 from omegaconf import OmegaConf
 
 from modules.core.utils.config_loader import load_and_parse
-from modules.evaluate.src.contracts.config import EvaluationConfig
-from modules.evaluate.src.contracts.config_loader import (
+from modules.evaluate.src.config import EvaluationConfig
+from modules.evaluate.src.utils.config_utils import (
     load_baseline_config,
     load_evaluation_config,
 )
@@ -269,12 +269,12 @@ def test_go_selects_fmax_and_interpro_declares_macro_f1_metrics(dataset):
     assert config.steps.tune.hyperparameter_search.metric == ("fmax" if is_go else "f1")
     assert config.steps.tune.hyperparameter_search.direction == "maximize"
     assert config.steps.score.metrics == (
-        ["fmax", "f1"]
-        if is_go
-        else ["f1", "multilabel_mcc", "average_precision"]
+        ["fmax", "f1"] if is_go else ["f1", "multilabel_mcc", "average_precision"]
     )
     assert config.steps.score.metric_aggregation == "macro"
-    assert config.steps.predict.collect_probabilities is (is_go or dataset.startswith("interpro"))
+    assert config.steps.predict.collect_probabilities is (
+        is_go or dataset.startswith("interpro")
+    )
 
 
 def test_shared_baselines_require_a_baseline_overlay_for_model_runs():
@@ -436,28 +436,20 @@ def test_task_control_defaults(task, dataset, controls):
         assert baseline.baselines.names == expected_baselines
 
 
-def test_baseline_loader_preserves_dataset_multi_target_config(tmp_path):
+def test_baseline_loader_rejects_removed_multi_target_config(tmp_path):
     overlay = tmp_path / "multi_target.yaml"
     overlay.write_text(
-        "multi_target:\n"
-        "  target_columns: [first_target, second_target]\n"
-        "  metric: r2\n"
-        "  target_key: label_name\n"
-        "  score_table_filename: custom_scores.parquet\n"
+        "multi_target:\n  target_columns: [first_target, second_target]\n  metric: r2\n  target_key: label_name\n  score_table_filename: custom_scores.parquet\n"
     )
-    baseline = load_baseline_config(
-        [
-            CONFIGS / "config.yaml",
-            CONFIGS / "datasets/stability_prediction.yaml",
-            CONFIGS / "baselines/sequence_regression.yaml",
-            overlay,
-        ]
-    )
-    assert baseline.multi_target is not None
-    assert baseline.multi_target.target_columns == ["first_target", "second_target"]
-    assert baseline.multi_target.metric == "r2"
-    assert baseline.multi_target.target_key == "label_name"
-    assert baseline.multi_target.score_table_filename == "custom_scores.parquet"
+    with pytest.raises(ValueError, match="multi_target evaluation has been removed"):
+        load_baseline_config(
+            [
+                CONFIGS / "config.yaml",
+                CONFIGS / "datasets/stability_prediction.yaml",
+                CONFIGS / "baselines/sequence_regression.yaml",
+                overlay,
+            ]
+        )
 
 
 @pytest.mark.parametrize("task_first", [True, False])

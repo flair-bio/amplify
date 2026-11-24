@@ -1,3 +1,5 @@
+workflow: proteingym_supervised
+
 # ProteinGym supervised scoring configuration.
 # Uses the regular workspace disk layout with a dedicated assay runner.
 

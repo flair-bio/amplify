@@ -7,7 +7,7 @@ import warnings
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from time import monotonic
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import numpy as np
 import torch
@@ -16,6 +16,9 @@ from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
 from transformers import PreTrainedTokenizerBase
 
+from modules.evaluate.src.artifacts.results import FitResult
+from modules.evaluate.src.dataset.contact import ContactDataset
+from modules.evaluate.src.dataset.types import FeatureSet
 from modules.evaluate.src.model.contact_attention import (
     ATTENTION_C,
     ATTENTION_HEAD_TYPE,
@@ -24,14 +27,15 @@ from modules.evaluate.src.model.contact_attention import (
     ContactAttentionModel,
     _encoder_layers,
 )
+from modules.evaluate.src.model.contact_jacobian import ContactJacobianModel
 from modules.evaluate.src.model.contact_model import (
     BilinearHead,
     ContactPredictionModel,
 )
+from modules.evaluate.src.model.factory import Predictor
 
 if TYPE_CHECKING:
-    from modules.evaluate.src.dataset.contact import ContactDataset
-
+    from modules.evaluate.src.config import TuneConfig
 logger = logging.getLogger(__name__)
 
 
@@ -51,8 +55,6 @@ class BilinearProtocol:
 
 
 BILINEAR_PROTOCOL = BilinearProtocol()
-
-
 ContactEpoch = TypedDict(
     "ContactEpoch", {"epoch": int, "loss": float, "validation_P@L": float}
 )
@@ -118,7 +120,7 @@ def fit_contact_head(
     from modules.evaluate.src.dataset.contact import candidate_pairs
     from modules.evaluate.src.metrics.contact_metrics import score_contact_unit
 
-    training, validation = dataset.splits["train"], dataset.splits["validation"]
+    training, validation = (dataset.splits["train"], dataset.splits["validation"])
     protocol = BILINEAR_PROTOCOL
     if len(training) != protocol.batch_size or len(validation) != protocol.batch_size:
         raise ValueError(
@@ -127,11 +129,10 @@ def fit_contact_head(
     if max_epochs <= protocol.early_stopping_patience:
         raise ValueError("Contact epoch limit must allow validation patience 10")
     pairs = [candidate_pairs(chain.units[0], chain.alignment) for chain in training]
-    if any(not len(pair.i) for pair in pairs):
+    if any((not len(pair.i) for pair in pairs)):
         raise ValueError("Every training structure requires eligible contact pairs")
-    if any(not chain.units[0].labels_available for chain in (*training, *validation)):
+    if any((not chain.units[0].labels_available for chain in (*training, *validation))):
         raise ValueError("All development structures require available labels")
-    # Backbone loading/extraction must not affect head initialization randomness.
     devices = [device.index or 0] if device.type == "cuda" else []
     with torch.random.fork_rng(devices=devices):
         torch.manual_seed(seed)
@@ -146,18 +147,16 @@ def fit_contact_head(
         ],
         lr=protocol.learning_rate,
     )
-    total = sum(len(pair.i) for pair in pairs)
+    total = sum((len(pair.i) for pair in pairs))
     logger.info(
-        "Starting contact-head fit | seed=%d | train_structures=%d | "
-        "validation_structures=%d | training_pairs=%d | max_epochs=%d | "
-        "patience=10 | lr=0.001 | matrix_weight_decay=10",
+        "Starting contact-head fit | seed=%d | train_structures=%d | validation_structures=%d | training_pairs=%d | max_epochs=%d | patience=10 | lr=0.001 | matrix_weight_decay=10",
         seed,
         len(training),
         len(validation),
         total,
         max_epochs,
     )
-    best_score, best_state, best_epoch, stale = -np.inf, None, 0, 0
+    best_score, best_state, best_epoch, stale = (-np.inf, None, 0, 0)
     history: list[ContactEpoch] = []
     fit_started = monotonic()
     for epoch in range(1, max_epochs + 1):
@@ -190,22 +189,21 @@ def fit_contact_head(
                 )["P@L"]
                 for c in validation
             ]
-        if any(value is None for value in scores):
+        if any((value is None for value in scores)):
             raise ValueError(
                 "Every validation structure requires eligible contact pairs"
             )
         value = float(np.mean(scores))
         history.append({"epoch": epoch, "loss": loss_sum, "validation_P@L": value})
         if value > best_score:
-            best_score, best_epoch, stale = value, epoch, 0
+            best_score, best_epoch, stale = (value, epoch, 0)
             best_state = deepcopy(model.head.state_dict())
             improved = True
         else:
             stale += 1
             improved = False
         logger.info(
-            "Contact fit epoch %d/%d | train BCE=%.6f | validation mean P@L=%.6f | "
-            "best=%s (epoch %d, %.6f) | patience=%d/10 | elapsed=%.1fs",
+            "Contact fit epoch %d/%d | train BCE=%.6f | validation mean P@L=%.6f | best=%s (epoch %d, %.6f) | patience=%d/10 | elapsed=%.1fs",
             epoch,
             max_epochs,
             loss_sum,
@@ -218,8 +216,7 @@ def fit_contact_head(
         )
         if stale == protocol.early_stopping_patience:
             logger.info(
-                "Contact fit early stopping at epoch %d/%d; restoring best head "
-                "from epoch %d (validation mean P@L=%.6f, total fit time=%.1fs)",
+                "Contact fit early stopping at epoch %d/%d; restoring best head from epoch %d (validation mean P@L=%.6f, total fit time=%.1fs)",
                 epoch,
                 max_epochs,
                 best_epoch,
@@ -234,8 +231,7 @@ def fit_contact_head(
     model.head.load_state_dict(best_state)
     model.head.eval()
     logger.info(
-        "Contact fit complete | best_epoch=%d | validation mean P@L=%.6f | "
-        "epochs=%d | restored_best_head=true",
+        "Contact fit complete | best_epoch=%d | validation mean P@L=%.6f | epochs=%d | restored_best_head=true",
         best_epoch,
         best_score,
         len(history),
@@ -282,7 +278,6 @@ def fit_contact_attention_head(
             raise ValueError(f"{chain.record_id}: no eligible training pairs")
         pairs_by_chain.append((chain, pairs))
         total_pairs += len(pairs.i)
-
     X = np.empty((total_pairs, feature_count), dtype=np.float32)
     y = np.empty(total_pairs, dtype=np.int64)
     offset = 0
@@ -304,7 +299,6 @@ def fit_contact_attention_head(
             len(pairs.i),
         )
         offset = end
-
     if len(np.unique(y)) != 2:
         raise ValueError(
             "Attention logistic fitting requires positive and negative pairs"
@@ -321,8 +315,7 @@ def fit_contact_attention_head(
         classifier.fit(X, y)
     model.classifier = classifier
     logger.info(
-        "Fitted CASP attention head | seed=%d | structures=%d | pairs=%d | "
-        "features=%d | C=%.2f | solver=liblinear | iterations=%d",
+        "Fitted CASP attention head | seed=%d | structures=%d | pairs=%d | features=%d | C=%.2f | solver=liblinear | iterations=%d",
         seed,
         len(training),
         len(y),
@@ -345,3 +338,61 @@ def fit_contact_attention_head(
         "iterations": int(classifier.n_iter_[0]),
         "standardized": False,
     }
+
+
+def fit_contact_predictor(
+    predictor: Predictor,
+    dataset: ContactDataset,
+    features: dict[str, FeatureSet],
+    input_identity: dict[str, Any],
+    config: TuneConfig,
+    *,
+    seed: int,
+    device: torch.device,
+) -> FitResult:
+    if dataset is None or predictor.tokenizer is None:
+        raise ValueError("Contact fitting requires data and a tokenizer.")
+    model, tokenizer, dataset = (predictor.model, predictor.tokenizer, dataset)
+    if isinstance(model, ContactJacobianModel):
+        return FitResult(
+            model=model,
+            seed=seed,
+            checkpoint_settings={"fitting": "zero_shot"},
+            statistics={"contact_training": {"fitting": "zero_shot"}},
+            serialization="local",
+        )
+    if isinstance(model, ContactAttentionModel):
+        settings = dict(
+            fit_contact_attention_head(model, dataset, tokenizer, seed=seed)
+        )
+    elif isinstance(model, ContactPredictionModel):
+        if "development" not in features:
+            raise ValueError(
+                "Contact development features must be prepared before fitting."
+            )
+        development = features["development"]
+        chains = [*dataset.splits["train"], *dataset.splits["validation"]]
+        features = {
+            chain.record_id: development.values[str(index)]
+            for index, chain in enumerate(chains)
+        }
+        settings = dict(
+            fit_contact_head(
+                model,
+                dataset,
+                features,
+                seed=seed,
+                max_epochs=config.max_epochs,
+                device=device,
+            )
+        )
+    else:
+        raise TypeError("Unsupported contact predictor.")
+    return FitResult(
+        model=model,
+        seed=seed,
+        input_identity=input_identity,
+        statistics={"contact_training": settings},
+        checkpoint_settings=settings,
+        serialization="local",
+    )

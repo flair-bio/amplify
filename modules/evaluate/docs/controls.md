@@ -172,7 +172,8 @@ Details that change the interpretation:
   train+validation features. Test features never enter selection or fitting.
   Predict regenerates the same seeded random trunk and uses that fitted probe,
   not the pretrained-feature probe's weights or scaler. Pass the requested
-  controls to `ControlsStep.run` after tuning and before prediction; a missing fitted probe is an
+  controls to `controls/fitting.py::prepare_control_predictors` after fitting
+  and before prediction; a missing fitted probe is an
   error. Checkpoints/settings use a separate `<variant>-random_trunk` workspace.
   This adds a second search/refit when HPO is enabled.
 - **`random_trunk` in layerwise mode:** probes are retrained on a random trunk
@@ -192,9 +193,11 @@ Details that change the interpretation:
 - **Randomness:** each control re-seeds from the run seed, so its result
   doesn't depend on the order in which controls are built.
 
-Prediction/cache coordination is in [`steps/controls.py`](../src/steps/controls.py);
+Control fitting/cache coordination is in [`controls/fitting.py`](../src/controls/fitting.py);
+inference-time controls are in [`controls/inference.py`](../src/controls/inference.py);
 weight ablations are in [`model/controls.py`](../src/model/controls.py).
-Label and input scrambling belong to task handlers in [`src/tasks/`](../src/tasks/).
+Label scrambling belongs to task semantics in [`src/tasks/`](../src/tasks/);
+sequence scrambling is a model input transformation in `model/controls.py`.
 
 ## Defaults and compatibility
 
@@ -232,7 +235,7 @@ performance. The versioned MMseqs protocol uses new artifacts; existing constant
 and composition artifacts remain reusable. Both sequence methods are deterministic
 and use no validation/test labels.
 
-Config validation ([`contracts/validation.py`](../src/contracts/validation.py))
+Config validation ([`config_utils.py`](../src/utils/config_utils.py))
 rejects these combinations before any work starts:
 
 - `scrambled_sequences` on ragged tasks (`token_classification`, contact
@@ -284,22 +287,23 @@ Per (control, metric), Score reports:
   Calibration fits each condition's temperatures once, before resampling.
 
 Column layout and a loading snippet: [Reading results](../README.md#reading-results).
-Settings: [Step 4 — Score](../README.md#step-4--score). Implementation:
+Settings: [Scoring](../README.md#scoring). Implementation:
 [`metrics/bootstrap.py`](../src/metrics/bootstrap.py) and
 [`metrics/comparisons.py`](../src/metrics/comparisons.py).
 
 ## Adding a control
 
 1. Declare the name in `ControlCondition` in
-   [`contracts/config.py`](../src/contracts/config.py), with weight-ablation
+   [`config.py`](../src/config.py), with weight-ablation
    constants in [`model/controls.py`](../src/model/controls.py) where applicable.
-2. Coordinate predictions in [`steps/controls.py`](../src/steps/controls.py),
+2. Coordinate independent fitting in [`controls/fitting.py`](../src/controls/fitting.py)
+   and predictions in [`controls/inference.py`](../src/controls/inference.py),
    using model inference and task transformations. Keep model-independent
    heuristic calculations in
    [`dataset/baseline_data.py`](../src/dataset/baseline_data.py);
-   the standalone runner is [`runners/baselines.py`](../src/runners/baselines.py).
-3. Declare task support in its handler. Generic head/stage compatibility checks
-   remain in [`contracts/validation.py`](../src/contracts/validation.py).
+   the baseline workflow is [`runners/baselines.py`](../src/runners/baselines.py).
+3. Declare task support in its handler. Generic head/workflow compatibility checks
+   remain in [`config_utils.py`](../src/utils/config_utils.py).
 4. Support or explicitly reject it in layerwise mode
    ([`model/layerwise.py`](../src/model/layerwise.py)).
 5. Add it to the relevant task presets in `configs/tasks/`.

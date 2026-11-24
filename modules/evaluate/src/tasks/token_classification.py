@@ -7,18 +7,14 @@ from typing import Any, ClassVar
 
 import numpy as np
 import torch
-from transformers import AutoModelForTokenClassification
 
 from modules.evaluate.src.metrics import metrics
-from modules.evaluate.src.tasks.base import FlatMetricsTask, MetricFn
-from modules.evaluate.src.tasks.registry import register_task
+from modules.evaluate.src.tasks.base import FlatTask, MetricFn
 
-# Loss/metric ignore index used for special-token and padding positions.
 IGNORE_INDEX = -100
 
 
-@register_task
-class TokenClassificationTask(FlatMetricsTask):
+class TokenClassificationTask(FlatTask):
     """One class label per residue.
 
     Per-example predictions/labels are variable-length sequences: labels are
@@ -30,14 +26,11 @@ class TokenClassificationTask(FlatMetricsTask):
 
     supports_layerwise = True
     dataset_baselines = frozenset({"majority_class"})
-
     name = "token_classification"
-    auto_model_class = AutoModelForTokenClassification
     is_ragged = True
     aligns_labels = True
     accepted_target_types = frozenset({"categorical"})
     accepted_label_formats = frozenset({"per_token"})
-
     metrics: ClassVar[dict[str, MetricFn]] = {
         "accuracy": metrics.accuracy,
         "f1": metrics.f1,
@@ -48,11 +41,7 @@ class TokenClassificationTask(FlatMetricsTask):
     default_metric_names = ("f1", "accuracy", "precision", "recall", "mcc")
 
     def validate_num_labels(
-        self,
-        dataset: Any,
-        label_column: str,
-        num_labels: int,
-        dataset_name: str,
+        self, dataset: Any, label_column: str, num_labels: int, dataset_name: str
     ) -> None:
         self._validate_categorical_num_labels(
             dataset, label_column, num_labels, dataset_name, ignore_index=IGNORE_INDEX
@@ -71,12 +60,9 @@ class TokenClassificationTask(FlatMetricsTask):
     ) -> Any:
         if len(label) != num_residues:
             raise ValueError(
-                "Token-classification labels must contain one label per "
-                f"tokenized residue; got {len(label)} labels and "
-                f"{num_residues} residues at dataset index {example_index}."
+                f"Token-classification labels must contain one label per tokenized residue; got {len(label)} labels and {num_residues} residues at dataset index {example_index}."
             )
         cropped = label[start : start + kept]
-        # Reserve special-token positions for the ignore index expected by the loss.
         aligned = [IGNORE_INDEX] * input_len
         aligned[offset : offset + len(cropped)] = cropped
         return aligned
@@ -84,8 +70,6 @@ class TokenClassificationTask(FlatMetricsTask):
     def collate_labels(
         self, labels: list[Any], batch_size: int, seq_len: int
     ) -> torch.Tensor:
-        # Labels were aligned during tokenization, so padding just extends the
-        # ignore index through the batch width.
         padded = torch.full((batch_size, seq_len), IGNORE_INDEX, dtype=self.label_dtype)
         for i, label_seq in enumerate(labels):
             padded[i, : len(label_seq)] = torch.tensor(
@@ -105,8 +89,6 @@ class TokenClassificationTask(FlatMetricsTask):
         return rows
 
     def flatten_for_metrics(self, values: list[Any]) -> list[Any]:
-        # Kept as one list per example so predictions can be keyed by id;
-        # metrics need a single flat sequence.
         return list(itertools.chain.from_iterable(values))
 
     def scramble_labels(self, labels: list[Any], rng: np.random.Generator) -> list[Any]:
