@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from modules.pretrain.src.dataset.collator import CollatorConfig
 from modules.pretrain.src.dataset.dataloader import DataLoaderConfig
 from modules.pretrain.src.dataset.dataset import DatasetConfig
+from modules.pretrain.src.loss import LossConfig
 from modules.pretrain.src.model.modeling_amplify import AMPLIFYModelConfig
 from modules.pretrain.src.model.tokenizer import TokenizerConfig
 from modules.pretrain.src.optimizer import OptimizerConfig
@@ -30,4 +31,5 @@ class PretrainConfig(BaseModel):
     dataloader: DataLoaderConfig
     trainer: TrainerConfig
     ddp: DDPConfig
+    loss: LossConfig = Field(default_factory=LossConfig)
     wandb: WandbConfig = Field(default_factory=WandbConfig)

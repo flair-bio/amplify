@@ -16,13 +16,14 @@ from typing import Any, Literal
 import torch
 from accelerate import Accelerator
 from accelerate.utils import DDPCommunicationHookType, DistributedDataParallelKwargs
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 from torch.nn.modules.utils import consume_prefix_in_state_dict_if_present
 from tqdm import tqdm
 from transformers import PreTrainedTokenizerBase
 
 from modules.pretrain.src.metric.logger import TrainingLogger
 from modules.pretrain.src.model.modeling_amplify import register_amplify_auto_classes
+from modules.pretrain.src.utils.checkpoint_averaging import average_checkpoints
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,20 @@ class TrainerConfig(BaseModel):
             "validates this on init."
         ),
     )
+    gradient_accumulation_schedule: list[tuple[PositiveInt, PositiveInt]] | None = (
+        Field(
+            None,
+            description=(
+                "Optional `[optimizer_step, accumulation_steps]` pairs, e.g. a "
+                "larger batch for the LR decay phase. Each count applies once "
+                "`global_step` reaches its step; `gradient_accumulation_steps` "
+                "applies before the first one. Changes take effect between "
+                "optimizer steps, so the micro-batch size and memory are unchanged. "
+                "A list (not a dict) so config overlays replace it instead of "
+                "merging keys."
+            ),
+        )
+    )
     output_dir: Path = Field(
         Path("./checkpoints"), description="Directory for training-state checkpoints."
     )
@@ -166,6 +181,21 @@ class TrainerConfig(BaseModel):
     )
     hf_save_steps: int | None = Field(
         None, description="Save HF checkpoint every N steps."
+    )
+    hf_save_at_steps: list[PositiveInt] | None = Field(
+        None,
+        description=(
+            "Extra optimizer steps at which to save an HF checkpoint, e.g. the "
+            "end of the LR decay for checkpoint averaging. Combined with "
+            "`hf_save_steps`; a step requested by both is saved once."
+        ),
+    )
+    average_hf_checkpoints: bool = Field(
+        False,
+        description=(
+            "At the end of training, uniformly average the `hf_save_at_steps` "
+            "exports into `output_dir/hf_checkpoints/averaged`."
+        ),
     )
     save_total_limit: int | None = Field(
         None,
@@ -211,7 +241,7 @@ class TrainerConfig(BaseModel):
         False,
         description=(
             "Compile the model with `torch.compile` (inductor backend), "
-            "fusing normalization/SwiGLU/rotary elementwise chains. Adds 1-3 min "
+            "fusing RMSNorm/SwiGLU/rotary elementwise chains. Adds 1-3 min "
             "one-time warmup; see `compile_dynamic` with token-budget "
             "batching."
         ),
@@ -246,6 +276,63 @@ class TrainerConfig(BaseModel):
         gt=0,
         description="NCCL/Gloo collective timeout.",
     )
+
+    @model_validator(mode="after")
+    def _validate_step_fields(self) -> "TrainerConfig":
+        schedule = sorted(s for s, _ in self.gradient_accumulation_schedule or ())
+        if len(set(schedule)) != len(schedule):
+            raise ValueError(
+                f"gradient_accumulation_schedule has duplicate steps: {schedule}"
+            )
+        if not self.max_steps:
+            return self
+        if any(step >= self.max_steps for step in schedule):
+            raise ValueError(
+                "gradient_accumulation_schedule steps must be < max_steps "
+                f"({self.max_steps}), got {schedule}"
+            )
+        hf_steps = sorted(self.hf_save_at_steps or ())
+        if any(step > self.max_steps for step in hf_steps):
+            raise ValueError(
+                f"hf_save_at_steps must be <= max_steps ({self.max_steps}), "
+                f"got {hf_steps}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_averaging(self) -> "TrainerConfig":
+        if not self.average_hf_checkpoints:
+            return self
+        steps = set(self.hf_save_at_steps or ())
+        if not self.max_steps or len(steps) < 2:
+            raise ValueError(
+                "average_hf_checkpoints requires max_steps and at least two "
+                "hf_save_at_steps"
+            )
+        limit, every = self.hf_save_total_limit, self.hf_save_steps
+        if limit is None:
+            return self
+        # HF saves from the first averaged step on; rotation keeps the newest.
+        saves = steps | {self.max_steps}
+        if every:
+            saves.update(range(every, self.max_steps + 1, every))
+        needed = sum(step >= min(steps) for step in saves)
+        if needed > limit:
+            raise ValueError(
+                f"average_hf_checkpoints: hf_save_total_limit={limit} would "
+                f"delete exports before averaging ({needed} HF saves from step "
+                f"{min(steps)} on)"
+            )
+        return self
+
+    def gradient_accumulation_at(self, step: int) -> int:
+        """Accumulation count for the optimizer step following `step`."""
+        steps = self.gradient_accumulation_steps
+        for start, scheduled in sorted(self.gradient_accumulation_schedule or ()):
+            if step < start:
+                break
+            steps = scheduled
+        return steps
 
 
 class Trainer:
@@ -287,6 +374,7 @@ class Trainer:
         self.tokenizer = tokenizer
 
         self.config = config
+        self._hf_save_at_steps = frozenset(config.hf_save_at_steps or ())
         self.max_grad_norm = config.max_grad_norm
         self.output_dir = config.output_dir
 
@@ -332,6 +420,29 @@ class Trainer:
         # Load checkpoint if provided
         if config.resume_from_checkpoint:
             self.load_checkpoint(config.resume_from_checkpoint)
+        self._update_gradient_accumulation()
+
+    def _update_gradient_accumulation(self) -> None:
+        """Apply `gradient_accumulation_schedule` for the next optimizer step."""
+        steps = self.config.gradient_accumulation_at(self.global_step)
+        if steps == self.gradient_accumulation_steps:
+            return
+        self.gradient_accumulation_steps = steps
+        # `accumulate` syncs on `accelerator.step % steps == 0` and `backward`
+        # divides the loss by `steps`; restart the counter for a full group.
+        self.accelerator.gradient_accumulation_steps = steps
+        self.accelerator.step = 0
+        if self.is_main:
+            logger.info(
+                f"gradient_accumulation_steps={steps} from step {self.global_step}"
+            )
+
+    def _should_hf_save(self) -> bool:
+        """Whether `hf_save_steps` or `hf_save_at_steps` hits `global_step`."""
+        every = self.config.hf_save_steps
+        return bool(every and self.global_step % every == 0) or (
+            self.global_step in self._hf_save_at_steps
+        )
 
     def _register_signal_handlers(self) -> None:
         """Saves state and exits gracefully on cluster preemptions."""
@@ -418,15 +529,8 @@ class Trainer:
             # Record original length to maintain correct tqdm totals when resuming
             try:
                 total_batches = len(train_dataloader)
-                # Optimizer-step units (else `train/epoch` is off by the
-                # accumulation factor); `ceil` since Accelerate also syncs a
-                # trailing partial group.
-                self.metric_logger.steps_per_epoch = max(
-                    math.ceil(total_batches / self.gradient_accumulation_steps), 1
-                )
             except TypeError:
                 total_batches = None
-                self.metric_logger.steps_per_epoch = 1.0
 
             if self.is_main:
                 batches_msg = (
@@ -441,9 +545,14 @@ class Trainer:
                 )
 
             # Refresh the bar's total each epoch since the mixture length can
-            # shift slightly (e.g. under a score curriculum).
+            # shift slightly (e.g. under a score curriculum). Optimizer-step
+            # units; `ceil` since Accelerate also syncs a trailing partial
+            # group. An estimate under `gradient_accumulation_schedule`.
             if not max_steps and total_batches is not None:
-                pbar.total = math.ceil(self.metric_logger.steps_per_epoch * num_epochs)
+                steps_per_epoch = math.ceil(
+                    total_batches / self.gradient_accumulation_steps
+                )
+                pbar.total = max(steps_per_epoch, 1) * num_epochs
 
             # If resuming mid-epoch, skip already processed batches. A config
             # change can shorten the epoch, leaving the saved count out of
@@ -490,6 +599,8 @@ class Trainer:
             self.save_checkpoint()
         if self._last_hf_save_step != self.global_step:
             self.save_hf_checkpoint()
+        if self.config.average_hf_checkpoints:
+            self.average_hf_checkpoints()
 
         self.accelerator.end_training()
 
@@ -523,6 +634,11 @@ class Trainer:
             if self.accelerator.sync_gradients:
                 self.global_step += 1
                 self.metric_logger.num_steps = self.global_step
+                self.metric_logger.epoch = epoch + (
+                    self.batches_completed_in_epoch / total_batches
+                    if total_batches
+                    else 0.0
+                )
                 pbar.update(1)
                 self.metric_logger.add_dataloader_stall(data_stall_ms)
                 data_stall_ms = 0.0
@@ -563,11 +679,10 @@ class Trainer:
                     self.save_checkpoint()
 
                 # Mid-epoch HF format checkpoint
-                if (
-                    self.config.hf_save_steps
-                    and self.global_step % self.config.hf_save_steps == 0
-                ):
+                if self._should_hf_save():
                     self.save_hf_checkpoint()
+
+                self._update_gradient_accumulation()
 
                 # Stop mid-epoch once the step budget is exhausted, rather
                 # than running the rest of this epoch's batches needlessly.
@@ -766,6 +881,25 @@ class Trainer:
             "checkpoint_*",
             self.config.hf_save_total_limit,
         )
+
+    def average_hf_checkpoints(self) -> None:
+        """Averages the `hf_save_at_steps` exports into `hf_checkpoints/averaged`.
+
+        Runs on the main process; skipped if the output already exists (e.g.
+        when resuming a finished run).
+        """
+        hf_root = self.output_dir / "hf_checkpoints"
+        output_dir = hf_root / "averaged"
+        if self.is_main:
+            if output_dir.exists():
+                logger.info(f"{output_dir} already exists; skipping averaging.")
+            else:
+                steps = sorted(set(self.config.hf_save_at_steps or ()))
+                average_checkpoints(
+                    [hf_root / f"checkpoint_{step}" for step in steps], output_dir
+                )
+                logger.info(f"Averaged HF checkpoints {steps} into {output_dir}")
+        self.accelerator.wait_for_everyone()
 
     def _rotate_checkpoints(
         self, base_dir: Path, pattern: str, limit: int | None

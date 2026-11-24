@@ -1,19 +1,15 @@
-# Default pretraining config for the AMPLIFY 350M architecture
+# Default pretraining config: the AMPLIFY 350M-class recipe (~384M params
+# with the attention gate and two-layer MLM head). Batch sizes assume 8 GPUs:
+# 62,500 tokens x 4 micro-batches x 8 = 2M tokens per step, 8M in the decay.
 
 model:
   hidden_size: 960
   num_hidden_layers: 32
-  num_attention_heads: 15      # head_dim = 64
-  qk_norm: false
-  attention_gate: false
-  nonlinear_mlm_head: false
-  layernorm_scaling: false
+  num_attention_heads: 10      # head_dim = 96
   intermediate_size: 2560
-  gaussian_init: false
   embedding_init_range: 0.02
   decoder_init_range: 0.02
   norm_eps: 1e-5
-  norm_type: RMSNorm
   vocab_size: 32
   pad_token_id: 0
   bos_token_id: 3
@@ -21,6 +17,11 @@ model:
   max_position_embeddings: 2048  # allows later context extension without redefining the model
   rope_theta: 10000.0
   num_labels: 2
+  norm_type: ZeroCenteredRMSNorm
+  qk_norm: true
+  attention_gate: true
+  nonlinear_mlm_head: true
+  gaussian_init: true            # N(0, *_init_range) instead of uniform
 
 tokenizer:
   vocab:
@@ -75,22 +76,32 @@ tokenizer:
 
 optimizer:
   type: AdamW
-  lr: 1e-3
+  lr: 5e-4
   betas: [0.9, 0.95]
   eps: 1e-8
   weight_decay: 0.01
   fused: true
 
+# Warmup-stable-decay: 5K linear warmup, stable to 90K, linear decay to 10% of
+# the peak LR. `kwargs` are scheduler-specific and overlays merge them key by
+# key, so switching `type` means editing this block (see README).
 scheduler:
-  type: cosine_with_min_lr
-  num_warmup_steps: 1000
-  num_training_steps: 90000
+  type: warmup_stable_decay
+  num_warmup_steps: 5000
+  num_training_steps: 100000
   kwargs:
-    min_lr_rate: 0.1
+    num_decay_steps: 10000
+    warmup_type: linear
+    decay_type: linear
+    min_lr_ratio: 0.1
+
+loss:
+  type: focal
+  gamma: 0.5
 
 collator:
   mlm: true
-  mlm_probability: 0.15
+  mlm_probability: 0.10           # train and validation
   masking_type: fixed
   masking_k: 10
   max_length: 512
@@ -105,25 +116,25 @@ dataset:
       type: hub
       repo_id: "flair-bio/bfd"
       split: train
-      cluster_column: cluster_rep_at_30
+      cluster_column: cluster_rep_at_70
       split_column: cluster_rep_at_30
       extra_cluster_columns: [cluster_rep_at_30, cluster_rep_at_40, cluster_rep_at_50, cluster_rep_at_60, cluster_rep_at_70, cluster_rep_at_80, cluster_rep_at_90]
-      sampling_fraction: 1.0
+      sampling_fraction: 0.1
       madvise_random: true   # 260GiB is too large for page cache
     mgnify:
       type: hub
       repo_id: "flair-bio/mgnify"
       split: train
-      cluster_column: cluster_rep_at_30
+      cluster_column: cluster_rep_at_70
       split_column: cluster_rep_at_30
       extra_cluster_columns: [cluster_rep_at_30, cluster_rep_at_40, cluster_rep_at_50, cluster_rep_at_60, cluster_rep_at_70, cluster_rep_at_80, cluster_rep_at_90]
-      sampling_fraction: 1.0
+      sampling_fraction: 0.1
       madvise_random: true   # 404 GiB is too large for page cache
     uniref:
       type: hub
       repo_id: "flair-bio/uniref"
       split: train
-      cluster_column: cluster_rep_at_30
+      cluster_column: cluster_rep_at_70
       split_column: cluster_rep_at_30
       extra_cluster_columns: [cluster_rep_at_30, cluster_rep_at_40, cluster_rep_at_50, cluster_rep_at_60, cluster_rep_at_70, cluster_rep_at_80, cluster_rep_at_90]
       sampling_fraction: 1.0
@@ -132,16 +143,16 @@ dataset:
       type: hub
       repo_id: "flair-bio/oas"
       split: train
-      cluster_column: cluster_rep_at_80   # OAS contains 99-80% thresholds
-      split_column: cluster_rep_at_80
+      cluster_column: cluster_rep_at_95   # OAS contains 99-80% thresholds
+      split_column: cluster_rep_at_90
       extra_cluster_columns: [cluster_rep_at_80, cluster_rep_at_85, cluster_rep_at_90, cluster_rep_at_91, cluster_rep_at_92, cluster_rep_at_93, cluster_rep_at_94, cluster_rep_at_95, cluster_rep_at_96, cluster_rep_at_97, cluster_rep_at_98, cluster_rep_at_99]
       sampling_fraction: 1.0
       madvise_random: false  # 400 MiB fits in page cache
   score_column: red_score
   score_curriculum:
     type: linear       # "linear", "cosine", or "exponential"
-    start_score: 0.0
-    end_score: 0.0
+    start_score: 0.01
+    end_score: 0.01
     ramp_epochs: 1
   val_min_score: 0.0
   val_holdout_modulus: 200
@@ -154,7 +165,7 @@ dataset:
   export_dir: null               # with prepare_only, export sources as portable folders (type: prepared)
 
 dataloader:
-  max_tokens: 32768
+  max_tokens: 62500
   batch_size: null
   dataloader_num_workers: 8
   persistent_workers: true
@@ -167,15 +178,22 @@ trainer:
   num_epochs: 1       # ignored while max_steps is set (kept only as a schema default)
   max_steps: 100000
   max_grad_norm: 1.0
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 4
+  # [step, accumulation] pairs: 4x batch for the LR decay phase, which starts at
+  # num_training_steps - num_decay_steps.
+  gradient_accumulation_schedule: [[90000, 16]]
   output_dir: "runs/350M"
   resume_from_checkpoint: null
   logging_steps: 100
   eval_steps: 1000
   save_steps: 10000
-  hf_save_steps: 2000
-  save_total_limit: null      # cap on resumable checkpoints kept; null = unlimited
-  hf_save_total_limit: null   # cap on HF checkpoints kept; null = unlimited
+  hf_save_steps: 10000
+  # Exports averaged into the final model (hf_checkpoints/averaged) at the end of
+  # training; with hf_save_total_limit 5, they are exactly the ones kept.
+  hf_save_at_steps: [98000, 98500, 99000, 99500, 100000]
+  average_hf_checkpoints: true
+  save_total_limit: 3         # cap on resumable checkpoints kept; null = unlimited
+  hf_save_total_limit: 5      # cap on HF checkpoints kept; null = unlimited
   tf32: true
   # minimizes GPU memory fragmentation using PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   expandable_segments: true
