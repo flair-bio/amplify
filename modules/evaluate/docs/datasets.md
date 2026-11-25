@@ -728,6 +728,11 @@ paper. It is a test-only, label-free dataset for zero-shot pseudo-perplexity;
 the existing `uniprot_protparams` regression dataset remains separate.
 
 - **Readout:** pseudo-perplexity over masked residues.
+- **Compute:** the task defaults use bfloat16 and packed evaluation, requiring
+  CUDA and a compatible AMPLIFY checkpoint. For CPU or other models, set
+  `steps.prepare.packed=false` and `steps.prepare.max_tokens_per_batch=null`;
+  adjust the batch size and dtype as needed. Masked rows are materialized during
+  tokenization and can require substantial host memory and disk space.
 - **Sequences:** 10,000 records, with a maximum length of 15,997 residues.
   The artifact preserves complete sequences and repeated records.
 - **Length policy:** the dataset overlay defaults to `max_length: 2048`,
