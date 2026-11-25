@@ -84,6 +84,58 @@ your environment and the four core pipeline steps (Download → Preprocess → C
 
 ---
 
+## OAS-nano — run one step at a time
+
+The [`configs/oas_nano.yaml`](configs/oas_nano.yaml) overlay contains all 347 URLs
+from the bulk-download script. It overrides only the dataset name and URLs;
+all other settings are inherited from `config.yaml`.
+Set `dataset.base_path` on the command line to choose the output location.
+Downloads go to `<base_path>/oas_nano/download/`;
+generated artifacts go under the same `oas_nano/` root. All steps remain disabled
+unless enabled on the command line. Run these commands from the repository root:
+
+```bash
+# Download (inherits the base config's overwrite setting).
+uv run python -m modules.data.src.run_data \
+    modules/data/configs/config.yaml modules/data/configs/oas_nano.yaml \
+    dataset.base_path=/path/to/pretrain_data \
+    steps.download.enabled=true
+
+# Preprocess into single-chain FASTA and Parquet shards.
+uv run python -m modules.data.src.run_data \
+    modules/data/configs/config.yaml modules/data/configs/oas_nano.yaml \
+    dataset.base_path=/path/to/pretrain_data \
+    steps.preprocess.enabled=true
+
+# Score the generated Parquet shards; run on a GPU compute node.
+uv run python -m modules.data.src.run_data \
+    modules/data/configs/config.yaml modules/data/configs/oas_nano.yaml \
+    dataset.base_path=/path/to/pretrain_data \
+    steps.score.enabled=true
+```
+
+Preprocessing reads the JSON metadata line before each CSV header, uses
+`sequence_aa` (including terminal residues), and does not impose an additional
+truncation filter based on upstream `ANARCII_status` flags.
+It does not concatenate chains or repeat sequences by `Redundancy`.
+Species/isotype are included in descriptions. Additional CSV annotations can be
+retained via `steps.preprocess.extra_columns`. The reader writes Parquet directly
+and skips generic FASTA-to-Parquet conversion automatically.
+This is ingestion of OAS-nano's processed data, not a rerun of
+its IgBLAST/ANARCII or upstream deduplication workflow.
+
+For a first preprocessing check, add `steps.preprocess.test_mode=true` to process
+only the first two CSV files, and use a separate scratch output via
+`dataset.tmp_path=/path/to/nano-smoke`. Point scoring to those same shards by
+using the same `dataset.tmp_path` override. Production preprocessing overwrites
+generated artifacts (as configured in the base YAML); it does not modify raw CSVs.
+Clustering, assembly, upload, and statistics use the usual
+`steps.<step>.enabled=true` overrides after the required preceding artifacts exist.
+Clustering inherits the base thresholds, not the paper's CD-HIT
+deduplication criteria. Scoring inherits packed BF16 inference from the base
+config; for hardware without packed-attention support, add
+`steps.score.packed=false`.
+
 ## Directory Layout
 
 ```
