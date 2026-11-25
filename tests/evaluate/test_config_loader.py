@@ -403,7 +403,7 @@ def test_uniprot_regions_uses_2048_token_context():
             "contact_prediction_casp",
             ["random_trunk"],
         ),
-        ("pseudo_perplexity", "uniprot_protparams", ["random_trunk"]),
+        ("pseudo_perplexity", "uniprot_protparams", []),
         ("calibration", "omicmsa_calibration", ["random_trunk"]),
     ],
 )

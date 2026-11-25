@@ -9,11 +9,12 @@ import pytest
 
 from modules.core.utils.config_loader import load_and_parse
 from modules.evaluate.src.config import (
+    EmbeddingCacheConfig,
     EvaluationConfig,
     LayerwiseConfig,
     PrepareConfig,
 )
-from modules.evaluate.src.config import EmbeddingCacheConfig
+from modules.evaluate.src.utils.config_utils import load_evaluation_config
 
 
 def _base_config_dict() -> dict:
@@ -342,16 +343,27 @@ class TestShippedConfigOverlays:
         assert not smoke.steps.prepare.embedding_cache.enabled
 
     def test_pseudo_perplexity_defaults_to_deterministic_test_data(self):
-        config = load_and_parse(
+        config = load_evaluation_config(
             [
                 self._CONFIG_ROOT / "config.yaml",
-                self._CONFIG_ROOT / "tasks" / "pseudo_perplexity.yaml",
+                self._CONFIG_ROOT / "models" / "amplify_120m.yaml",
                 self._CONFIG_ROOT / "datasets" / "uniprot_ur100p_test.yaml",
-            ],
-            EvaluationConfig,
+            ]
         )
+        assert config.workspace.task_type == "pseudo_perplexity"
+        assert config.workspace.model_kwargs["dtype"] == "bfloat16"
         assert config.steps.mode == "evaluate_as_is"
+        assert not config.steps.tune.hyperparameter_search.enabled
+        assert not config.steps.tune.refit_on_train_validation
+        assert config.steps.score.metrics == ["pseudo_perplexity"]
+        assert config.steps.score.bootstrap_enabled
+        assert config.steps.prepare.batch_size == 1024
+        assert config.steps.prepare.packed
+        assert config.steps.prepare.max_tokens_per_batch == 2097152
+        assert config.steps.prepare.dataloader_num_workers == 8
+        assert config.steps.prepare.tokenize_num_proc == 1
         assert not config.steps.prepare.embedding_cache.enabled
+        assert config.steps.predict.controls == []
         split = config.steps.prepare.split
         assert (split.train, split.validation, split.test) == (
             "train",
