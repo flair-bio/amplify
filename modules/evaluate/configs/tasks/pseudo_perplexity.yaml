@@ -1,5 +1,7 @@
 workspace:
   task_type: pseudo_perplexity
+  model_kwargs:
+    dtype: bfloat16
 
 steps:
   mode: evaluate_as_is
@@ -9,13 +11,17 @@ steps:
     refit_on_train_validation: false
   score:
     metrics: [pseudo_perplexity]
+    bootstrap_enabled: true
   prepare:
     # Keep the suite's test-only roles; do not expand it again as train/validation.
-    batch_size: 8 # one masked residue per row
-    tokenize_num_proc: 1 # expansion can produce millions of rows; avoid parallel copies
+    batch_size: 1024 # fallback when max_tokens_per_batch is null
+    packed: true
+    max_tokens_per_batch: 2097152
+    dataloader_num_workers: 8
+    tokenize_num_proc: 1 # tokenize each protein once and expand masked rows
     random_truncate_by_split:
       train: false
     embedding_cache:
       enabled: false
   predict:
-    controls: [random_trunk]
+    controls: []
