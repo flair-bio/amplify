@@ -382,4 +382,4 @@ steps:
         num_join_buckets: 10  # fewer join buckets than the base default (32); OAS's stricter thresholds produce far fewer/smaller clusters to merge
 
   upload:
-    repo_id: flair-bio/oas-nano  # OAS is published under the "oas-archive" repo name, not "oas"
+    repo_id: flair-bio/oas-nano
