@@ -67,7 +67,7 @@ your environment and the four core pipeline steps (Download → Preprocess → C
 
 
 > **Running a real dataset:** `configs/config.yaml` is the base config — it defines every field
-> with the yeast smoke-test defaults. `configs/{uniref,mgnify,bfd,oas}.yaml` are overlays that
+> with the yeast smoke-test defaults. `configs/{uniref,mgnify,bfd,oas,oas_nano}.yaml` are overlays that
 > only set the fields that differ for that dataset (source URLs, thread counts, cluster
 > thresholds, repo IDs, etc.). Always pass the base config first, then the overlay — later files
 > win on shared keys (OmegaConf merge):
@@ -84,58 +84,6 @@ your environment and the four core pipeline steps (Download → Preprocess → C
 
 ---
 
-## OAS-nano — run one step at a time
-
-The [`configs/oas_nano.yaml`](configs/oas_nano.yaml) overlay contains all 347 URLs
-from the bulk-download script. It overrides only the dataset name and URLs;
-all other settings are inherited from `config.yaml`.
-Set `dataset.base_path` on the command line to choose the output location.
-Downloads go to `<base_path>/oas_nano/download/`;
-generated artifacts go under the same `oas_nano/` root. All steps remain disabled
-unless enabled on the command line. Run these commands from the repository root:
-
-```bash
-# Download (inherits the base config's overwrite setting).
-uv run python -m modules.data.src.run_data \
-    modules/data/configs/config.yaml modules/data/configs/oas_nano.yaml \
-    dataset.base_path=/path/to/pretrain_data \
-    steps.download.enabled=true
-
-# Preprocess into single-chain FASTA and Parquet shards.
-uv run python -m modules.data.src.run_data \
-    modules/data/configs/config.yaml modules/data/configs/oas_nano.yaml \
-    dataset.base_path=/path/to/pretrain_data \
-    steps.preprocess.enabled=true
-
-# Score the generated Parquet shards; run on a GPU compute node.
-uv run python -m modules.data.src.run_data \
-    modules/data/configs/config.yaml modules/data/configs/oas_nano.yaml \
-    dataset.base_path=/path/to/pretrain_data \
-    steps.score.enabled=true
-```
-
-Preprocessing reads the JSON metadata line before each CSV header, uses
-`sequence_aa` (including terminal residues), and does not impose an additional
-truncation filter based on upstream `ANARCII_status` flags.
-It does not concatenate chains or repeat sequences by `Redundancy`.
-Species/isotype are included in descriptions. Additional CSV annotations can be
-retained via `steps.preprocess.extra_columns`. The reader writes Parquet directly
-and skips generic FASTA-to-Parquet conversion automatically.
-This is ingestion of OAS-nano's processed data, not a rerun of
-its IgBLAST/ANARCII or upstream deduplication workflow.
-
-For a first preprocessing check, add `steps.preprocess.test_mode=true` to process
-only the first two CSV files, and use a separate scratch output via
-`dataset.tmp_path=/path/to/nano-smoke`. Point scoring to those same shards by
-using the same `dataset.tmp_path` override. Production preprocessing overwrites
-generated artifacts (as configured in the base YAML); it does not modify raw CSVs.
-Clustering, assembly, upload, and statistics use the usual
-`steps.<step>.enabled=true` overrides after the required preceding artifacts exist.
-Clustering inherits the base thresholds, not the paper's CD-HIT
-deduplication criteria. Scoring inherits packed BF16 inference from the base
-config; for hardware without packed-attention support, add
-`steps.score.packed=false`.
-
 ## Directory Layout
 
 ```
@@ -148,7 +96,8 @@ modules/data/
 │   ├── uniref.yaml                  ← UniRef overlay: fields that differ from config.yaml (source_urls, thread counts, etc.)
 │   ├── mgnify.yaml                  ← MGnify overlay
 │   ├── bfd.yaml                     ← BFD overlay
-│   └── oas.yaml                     ← OAS (paired antibody) overlay
+│   ├── oas.yaml                     ← OAS (paired antibody) overlay
+│   └── oas_nano.yaml                ← OAS-nano (single-chain VHH) overlay
 │
 └── src/
     ├── config.py                    ← DataPipelineConfig: top-level Pydantic schema that
@@ -231,12 +180,14 @@ After a full pipeline run, the dataset directory looks like this:
 
 `oas` is handled differently: it reads paired heavy/light antibody CSVs with Polars, drops rows where ANARCI flags either chain as `"Shorter"`, and writes a FASTA record per pair (`heavy_seq` + `XXXXX` linker + `light_seq`) for downstream clustering. It writes each base Parquet shard directly from its source CSV, bypassing the generic FASTA→Parquet converter (`convert_fasta_to_parquet` is forced to `false`). Set `extra_columns` to carry additional source columns into Parquet. In `test_mode`, OAS processes only the first two source CSV files.
 
+`oas_nano` streams unpaired VHH CSVs, using `sequence_aa` for each sequence and writing FASTA and Parquet directly. It preserves rows without deduplication or an additional truncation filter; `extra_columns` can retain source annotations. In `test_mode`, it processes the first two source CSV files.
+
 **Sequence IDs:** FASTA headers receive a dataset prefix and a zero-padded, 12-digit decimal counter, for example `UNIREF_000000000123`. The original header is retained as the description and converted to the `original_id` column.
 
 **Sub-stages:**
 
 1. **FASTA generation** — extract and normalize sequences, write `<name>_all.fasta.gz` and per-chunk split files
-2. **Parquet conversion** — convert FASTA chunks to Parquet shards in parallel (OAS writes Parquet directly from CSV)
+2. **Parquet conversion** — convert FASTA chunks to Parquet shards in parallel (OAS and OAS-nano write Parquet directly from CSV)
 
 **Key config fields (`steps.preprocess`):**
 
@@ -256,7 +207,7 @@ After a full pipeline run, the dataset directory looks like this:
 | `fasta_write_threads` | `2` | `seqkit`/`pigz` threads for linearizing and writing the monolithic FASTA |
 | `fasta_split_threads` | `2` | `pigz` threads for compressing each split chunk |
 | `fasta_split_compression_level` | `1` | gzip level for temporary split chunks (1 = fastest, final output stays at the default level) |
-| `extra_columns` | `[]` | Extra source columns to carry into the base Parquet (`oas` only); requires `convert_fasta_to_parquet=false` |
+| `extra_columns` | `[]` | Extra source columns to carry into the base Parquet (`oas` and `oas_nano`); these readers write Parquet directly |
 | `convert_fasta_to_parquet` | `true` | Run FASTA → Parquet conversion sub-stage |
 | `parquet_conversion_workers` | `2` | Number of shards converted in parallel |
 
