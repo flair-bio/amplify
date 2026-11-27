@@ -1,7 +1,12 @@
+import csv
+import gzip
+import itertools
+import json
 import logging
 import shlex
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 from pydantic import BaseModel, ConfigDict
@@ -66,6 +71,7 @@ class PreprocessStep:
             "mgnify": self._generate_mgnify_fasta,
             "bfd": self._generate_bfd_fasta,
             "oas": self._generate_oas_fasta,
+            "oas_nano": self._generate_oas_nano_fasta,
         }
         self.split_lines = (
             self.config.seqkit_split_size * 2
@@ -337,6 +343,111 @@ class PreprocessStep:
                 )
 
         logger.info(f"Successfully formatted and routed {n} OAS sequences.")
+
+    def _generate_oas_nano_fasta(
+        self,
+        dataset: Dataset,
+        fasta_output: Path,
+        split_fasta_dir: Path,
+        parquet_output_dir: Path,
+    ) -> None:
+        """Stream unpaired VHH CSVs into matching FASTA and Parquet shards."""
+        self.config.convert_fasta_to_parquet = False
+        source_files = sorted(get_multiple_files(dataset.download_path, "*.csv.gz"))
+        if self.config.test_mode:
+            source_files = source_files[:2]
+        if self.config.seqkit_split_size <= 0:
+            raise ValueError("seqkit_split_size must be positive")
+
+        n = 0
+        chunk_index = 0
+        with gzip.open(fasta_output, "wt", compresslevel=1) as fasta:
+            for file_path in tqdm(source_files, desc="Parsing OAS-nano CSVs"):
+                with gzip.open(file_path, "rt", newline="") as source:
+                    metadata = json.loads(source.readline())
+                    reader = csv.DictReader(source)
+                    required = {"sequence_id", "sequence_aa"}
+                    missing = required - set(reader.fieldnames or [])
+                    if missing:
+                        raise ValueError(
+                            f"{file_path.name}: missing required columns {sorted(missing)}"
+                        )
+                    missing_extra = set(self.config.extra_columns) - set(
+                        reader.fieldnames or []
+                    )
+                    if missing_extra:
+                        logger.warning(
+                            "%s: missing extra columns %s; filled with null.",
+                            file_path.name,
+                            sorted(missing_extra),
+                        )
+
+                    # sequence_aa retains terminal residues omitted by IgBLAST's
+                    # sequence_alignment_aa; upstream quality flags are not filters.
+                    retained_columns = (
+                        required | {"v_call", "j_call"} | set(self.config.extra_columns)
+                    )
+                    rows = (
+                        {column: row.get(column) for column in retained_columns}
+                        for row in reader
+                        if row["sequence_aa"]
+                    )
+                    while batch := list(
+                        itertools.islice(rows, self.config.seqkit_split_size)
+                    ):
+                        row_ids = [
+                            f"{dataset.name.upper()}_{i:0{SEQUENCE_ID_WIDTH}d}"
+                            for i in range(n, n + len(batch))
+                        ]
+                        original_ids = [
+                            f"{file_path.name.removesuffix('.csv.gz')}:{row['sequence_id']}"
+                            for row in batch
+                        ]
+                        sequences = [row["sequence_aa"] for row in batch]
+                        descriptions = [
+                            f"source={file_path.name}; species={metadata.get('Species', '')}; "
+                            f"isotype={metadata.get('Isotype', '')}; "
+                            f"v_call={row.get('v_call', '')}; j_call={row.get('j_call', '')}"
+                            for row in batch
+                        ]
+                        chunk_name = f"chunk_{chunk_index:06d}"
+                        with gzip.open(
+                            split_fasta_dir / f"{chunk_name}.fasta.gz",
+                            "wt",
+                            compresslevel=self.config.fasta_split_compression_level,
+                        ) as split_fasta:
+                            for row_id, original_id, sequence in zip(
+                                row_ids, original_ids, sequences
+                            ):
+                                record = f">{row_id} {original_id}\n{sequence}\n"
+                                fasta.write(record)
+                                split_fasta.write(record)
+
+                        out_path = parquet_output_dir / f"{chunk_name}.parquet"
+                        if self.config.overwrite_parquet or not out_path.exists():
+                            frame_data: dict[str, Any] = {
+                                self.config.fasta_id_column: row_ids,
+                                self.config.fasta_source_id_column: original_ids,
+                                self.config.fasta_description_column: descriptions,
+                                self.config.fasta_sequence_column: sequences,
+                                **{
+                                    column: [row.get(column) for row in batch]
+                                    for column in self.config.extra_columns
+                                },
+                            }
+                            frame = pl.DataFrame(
+                                frame_data,
+                                schema_overrides={
+                                    column: pl.String
+                                    for column in self.config.extra_columns
+                                },
+                            )
+                            tmp_path = out_path.with_suffix(".parquet.tmp")
+                            frame.write_parquet(tmp_path)
+                            tmp_path.rename(out_path)
+                        n += len(batch)
+                        chunk_index += 1
+        logger.info("Formatted and routed %d OAS-nano sequences.", n)
 
     def _generate_mgnify_fasta(
         self,
