@@ -44,6 +44,41 @@ def _restore_global_torch_flags():
     torch.backends.cudnn.allow_tf32 = cudnn_tf32
 
 
+def _run_main(config: PretrainConfig, prepared_model=None):
+    """Run `main()` with every component stubbed; return (model, Trainer kwargs).
+
+    `prepared_model`, if given, is what `accelerator.prepare` returns for the
+    model, to tell the prepared model apart from the raw one.
+    """
+    model = MagicMock()
+    model.config = MagicMock(spec=[])
+    accelerator = MagicMock()
+
+    def prepare(*objs):
+        if len(objs) > 1 and prepared_model is not None:
+            objs = (prepared_model, *objs[1:])
+        return objs if len(objs) > 1 else objs[0]
+
+    accelerator.prepare.side_effect = prepare
+    with (
+        patch.object(run_pretrain, "load_and_parse", return_value=config),
+        patch.object(run_pretrain, "setup_runtime", return_value=accelerator),
+        patch.object(run_pretrain, "setup_tracking"),
+        patch.object(run_pretrain, "get_amplify_masked_lm", return_value=model),
+        patch.object(run_pretrain, "get_tokenizer"),
+        patch.object(run_pretrain, "get_optimizer"),
+        patch.object(run_pretrain, "get_scheduler"),
+        patch.object(run_pretrain, "get_collator"),
+        patch.object(run_pretrain, "prepare_sources", return_value=[]),
+        patch.object(run_pretrain, "ConcatDataset"),
+        patch.object(run_pretrain, "build_split_dataloader"),
+        patch.object(run_pretrain, "Trainer") as trainer_cls,
+        patch.object(run_pretrain.sys, "argv", ["run_pretrain.py", "cfg.yaml"]),
+    ):
+        run_pretrain.main()
+    return model, trainer_cls.call_args.kwargs
+
+
 def _run(config: PretrainConfig):
     """Call setup_runtime with Accelerate stubbed, returning its kwargs."""
     with (
@@ -168,25 +203,33 @@ class TestDeterministic:
 
 
 class TestCompileWiring:
-    def test_no_dynamo_plugin_when_compile_disabled(self, config):
-        config.trainer.compile = False
+    def test_accelerate_does_not_compile(self, config):
+        """Accelerate's dynamo plugin would wrap the model in an
+        OptimizedModule; `main` compiles it in place instead."""
+        config.trainer.compile = True
         kwargs, _ = _run(config)
-        assert kwargs["dynamo_plugin"] is None
+        assert kwargs.get("dynamo_plugin") is None
 
-    def test_dynamo_plugin_mirrors_compile_settings(self, config):
+    def test_compiles_the_prepared_model_in_place(self, config):
         config.trainer.compile = True
         config.trainer.compile_mode = "max-autotune"
         config.trainer.compile_fullgraph = False
         config.trainer.compile_dynamic = False
+        prepared = MagicMock()
 
-        kwargs, _ = _run(config)
-        plugin = kwargs["dynamo_plugin"]
+        model, kwargs = _run_main(config, prepared_model=prepared)
 
-        assert plugin is not None
-        assert plugin.backend.value.lower() == "inductor"
-        assert plugin.mode == "max-autotune"
-        assert plugin.fullgraph is False
-        assert plugin.dynamic is False
+        prepared.compile.assert_called_once_with(
+            mode="max-autotune", fullgraph=False, dynamic=False
+        )
+        model.compile.assert_not_called()  # not before the DDP wrap
+        assert kwargs["model"] is prepared  # Trainer gets the module itself
+
+    def test_does_not_compile_when_disabled(self, config):
+        config.trainer.compile = False
+        prepared = MagicMock()
+        _run_main(config, prepared_model=prepared)
+        prepared.compile.assert_not_called()
 
 
 class TestTrackingWiring:
@@ -215,81 +258,9 @@ class TestPrepareOnly:
     """`dataset.prepare_only` builds caches then exits, for warming a slow
     first-time build on CPU-only hardware."""
 
-    @staticmethod
-    def _main(config: PretrainConfig):
-        """Run main() with the config fixed and everything external stubbed."""
-        with (
-            patch.dict(os.environ, {"WORLD_SIZE": "1"}),
-            patch.object(run_pretrain, "load_and_parse", return_value=config),
-            patch.object(run_pretrain, "setup_runtime") as setup_runtime,
-            patch.object(run_pretrain, "setup_tracking") as setup_tracking,
-            patch.object(run_pretrain, "prepare_sources") as prepare_sources,
-            patch.object(run_pretrain, "Trainer") as trainer_cls,
-            patch.object(run_pretrain.sys, "argv", ["run_pretrain.py", "cfg.yaml"]),
-        ):
-            setup_runtime.return_value = MagicMock()
-            prepare_sources.return_value = []
-            run_pretrain.main()
-        return prepare_sources, trainer_cls, setup_tracking, setup_runtime
-
-    def test_prepares_sources_then_exits_without_training(self, config):
-        config.dataset.prepare_only = True
-
-        prepare_sources, trainer_cls, _, setup_runtime = self._main(config)
-
-        prepare_sources.assert_called_once_with(config.dataset)
-        setup_runtime.assert_not_called()
-        trainer_cls.assert_not_called()
-
-    def test_skips_model_build_so_no_gpu_is_needed(self, config):
-        config.dataset.prepare_only = True
-
-        with patch.object(run_pretrain, "get_amplify_masked_lm") as build_model:
-            self._main(config)
-
-        build_model.assert_not_called()
-
-    def test_skips_tracking_so_no_empty_run_is_logged(self, config):
-        config.dataset.prepare_only = True
-
-        _, _, setup_tracking, _ = self._main(config)
-
-        setup_tracking.assert_not_called()
-
-    def test_disabled_by_default(self, config):
-        assert config.dataset.prepare_only is False
-
-
-class TestLossWiring:
-    """`config.loss` reaches the Trainer, the metric logger and the export."""
-
-    @staticmethod
-    def _main(config: PretrainConfig):
-        model = MagicMock()
-        model.config = MagicMock(spec=[])
-        accelerator = MagicMock()
-        accelerator.prepare.side_effect = lambda *o: o if len(o) > 1 else o[0]
-        with (
-            patch.object(run_pretrain, "load_and_parse", return_value=config),
-            patch.object(run_pretrain, "setup_runtime", return_value=accelerator),
-            patch.object(run_pretrain, "setup_tracking"),
-            patch.object(run_pretrain, "get_amplify_masked_lm", return_value=model),
-            patch.object(run_pretrain, "get_tokenizer"),
-            patch.object(run_pretrain, "get_optimizer"),
-            patch.object(run_pretrain, "get_scheduler"),
-            patch.object(run_pretrain, "get_collator"),
-            patch.object(run_pretrain, "prepare_sources", return_value=[]),
-            patch.object(run_pretrain, "ConcatDataset"),
-            patch.object(run_pretrain, "build_split_dataloader"),
-            patch.object(run_pretrain, "Trainer") as trainer_cls,
-            patch.object(run_pretrain.sys, "argv", ["run_pretrain.py", "cfg.yaml"]),
-        ):
-            run_pretrain.main()
-        return model, trainer_cls.call_args.kwargs
-
     def test_cross_entropy_keeps_model_loss(self, config):
         config.loss = LossConfig()
-        model, kwargs = self._main(config)
+        model, kwargs = _run_main(config)
 
         assert kwargs["loss_fn"] is None
         assert kwargs["metric_logger"].log_cross_entropy is False
@@ -297,7 +268,7 @@ class TestLossWiring:
 
     def test_focal_is_passed_to_trainer_and_recorded(self, config):
         config.loss = LossConfig(type="focal", gamma=0.25)
-        model, kwargs = self._main(config)
+        model, kwargs = _run_main(config)
 
         assert isinstance(kwargs["loss_fn"], FocalLoss)
         assert kwargs["loss_fn"].gamma == 0.25

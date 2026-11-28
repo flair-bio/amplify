@@ -286,8 +286,9 @@ differ from the schema defaults (e.g. `trainer.compile` is `true` in the config,
    before initializing distributed training. `dataset.prepare_only=true` builds
    the caches and exits here; distributed workers require those caches to exist.
 3. **Set up the runtime**: create the Accelerate `Accelerator` (GPUs, mixed precision,
-   DDP, `torch.compile`) and seed the RNGs.
-4. **Build the components**: model, tokenizer, optimizer, scheduler, collator.
+   DDP) and seed the RNGs.
+4. **Build the components**: model, tokenizer, optimizer, scheduler, collator; the
+   model is wrapped in DDP, then compiled in place.
 5. **Build the validation dataloader**: once, since the val set never changes.
 6. **Train**: at the start of each epoch, the trainer asks for a new train dataloader
    (phase 2: one sequence per cluster, curriculum threshold, mixing the sources),
@@ -811,8 +812,10 @@ The export logs, and records under `hf_cache` in `meta.json`, the HF cache folde
 ### Using torch.compile
 
 On in `config.yaml` (`trainer.compile=true`, `compile_dynamic=true`); the schema default is off.
-Disable with `trainer.compile=false` (e.g. for CPU or quick debugging). Accelerate applies it
-**after** the DDP wrap, so gradient all-reduce still overlaps with backward compute.
+Disable with `trainer.compile=false` (e.g. for CPU or quick debugging). `run_pretrain.py`
+applies it **after** the DDP wrap, so gradient all-reduce still overlaps with backward compute,
+and compiles in place (`model.compile()`, not `torch.compile(model)`), so the model stays a
+plain DDP module and its state-dict keys get no `_orig_mod.` prefix.
 
 Gains come from fusing the elementwise glue (RMSNorm, SwiGLU, rotary, residual
 adds), not attention. The packed path also uses plain PyTorch for SwiGLU and

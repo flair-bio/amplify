@@ -10,7 +10,6 @@ from accelerate import Accelerator
 from accelerate.utils import (
     DataLoaderConfiguration,
     InitProcessGroupKwargs,
-    TorchDynamoPlugin,
     set_seed,
 )
 from torch.utils.data import ConcatDataset
@@ -58,21 +57,8 @@ def setup_runtime(config: PretrainConfig) -> Accelerator:
 
     # `drop_last=True` on `config.dataloader` already ensures even batches per rank.
     dataloader_config = DataLoaderConfiguration(even_batches=False, non_blocking=True)
-    # Accelerate applies compile after the DDP wrap (PyTorch's recommended
-    # order, so DDPOptimizer can overlap gradient all-reduce with backward).
-    dynamo_plugin = (
-        TorchDynamoPlugin(
-            backend="inductor",
-            mode=config.trainer.compile_mode,
-            fullgraph=config.trainer.compile_fullgraph,
-            dynamic=config.trainer.compile_dynamic,
-        )
-        if config.trainer.compile
-        else None
-    )
     accelerator = Accelerator(
         dataloader_config=dataloader_config,
-        dynamo_plugin=dynamo_plugin,
         gradient_accumulation_steps=config.trainer.gradient_accumulation_steps,
         log_with="wandb" if config.wandb.enabled else None,
         step_scheduler_with_optimizer=False,  # Prevent Accelerate from over-decaying the LR on multi-GPU; Trainer steps the scheduler manually.
@@ -83,13 +69,6 @@ def setup_runtime(config: PretrainConfig) -> Accelerator:
             config.ddp.to_accelerate(),
         ],
     )
-    if config.trainer.compile:
-        logger.info(
-            f"torch.compile enabled (mode={config.trainer.compile_mode}, "
-            f"dynamic={config.trainer.compile_dynamic}). First steps will be slow "
-            "while graphs are compiled."
-        )
-
     # Seed all RNGs (python/numpy/torch) with dataset.seed for determinism across runs and ranks.
     if config.trainer.deterministic:
         # 8 x 4MiB fixed cuBLAS workspaces: pins kernel choice so matmuls are
@@ -202,6 +181,24 @@ def main() -> None:
     scheduler = get_scheduler(optimizer=optimizer, scheduler_config=config.scheduler)
     collator = get_collator(tokenizer=tokenizer, collator_config=config.collator)
     model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
+    if config.trainer.compile:
+        # After `prepare`, so the DDP wrapper itself is compiled: DDPOptimizer
+        # then splits the graph at bucket boundaries and gradient all-reduce
+        # overlaps with backward. In place (`Module.compile`), not
+        # `torch.compile(model)`: the model stays a plain DDP rather than an
+        # OptimizedModule. Unwrapping an OptimizedModule, as
+        # `accelerator.get_state_dict` does, strips DDP off the live model, and
+        # gradient accumulation then syncs on every micro-batch.
+        model.compile(
+            mode=config.trainer.compile_mode,
+            fullgraph=config.trainer.compile_fullgraph,
+            dynamic=config.trainer.compile_dynamic,
+        )
+        logger.info(
+            f"torch.compile enabled (mode={config.trainer.compile_mode}, "
+            f"dynamic={config.trainer.compile_dynamic}). First steps will be slow "
+            "while graphs are compiled."
+        )
     logger.info("Model, tokenizer, optimizer, scheduler, and collator instantiated.")
 
     # Built once and reused every epoch — only the per-epoch row *selection*

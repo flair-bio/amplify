@@ -485,10 +485,9 @@ class TestCompileConfig:
         assert TrainerConfig(compile_mode=mode).compile_mode == mode
 
 
-class TestCompiledCheckpointKeys:
-    """`torch.compile` wraps the model so every state_dict key gains an
-    `_orig_mod.` prefix. If that leaks into the HF checkpoint, the weights no
-    longer load into a plain AMPLIFYForMaskedLM."""
+class TestHFCheckpointState:
+    """The model is compiled in place (`Module.compile`), so it carries no
+    `_orig_mod` wrapper and accelerate's own unwrap yields loadable keys."""
 
     def _save(self, trainer, accelerator, state_dict, tmp_path):
         accelerator.get_state_dict.return_value = state_dict
@@ -496,80 +495,60 @@ class TestCompiledCheckpointKeys:
         trainer.save_hf_checkpoint(path=tmp_path / "hf")
         return accelerator.unwrap_model.return_value.save_pretrained.call_args.kwargs
 
-    def test_orig_mod_prefix_is_stripped(self, trainer, accelerator, tmp_path):
-        kwargs = self._save(
-            trainer,
-            accelerator,
-            {"_orig_mod.encoder.weight": torch.zeros(1), "_orig_mod.bias": torch.zeros(1)},
-            tmp_path,
-        )
-        assert set(kwargs["state_dict"]) == {"encoder.weight", "bias"}
+    def test_accelerate_state_dict_is_saved_unchanged(self, trainer, accelerator, tmp_path):
+        state_dict = {"encoder.weight": torch.zeros(1)}
+        kwargs = self._save(trainer, accelerator, state_dict, tmp_path)
+        assert kwargs["state_dict"] is state_dict
 
-    def test_uncompiled_keys_are_untouched(self, trainer, accelerator, tmp_path):
-        kwargs = self._save(
-            trainer, accelerator, {"encoder.weight": torch.zeros(1)}, tmp_path
-        )
-        assert set(kwargs["state_dict"]) == {"encoder.weight"}
-
-    def test_unwrap_asks_accelerate_to_drop_the_compile_wrapper(
+    def test_state_dict_uses_accelerates_default_unwrap(
         self, trainer, accelerator, tmp_path
     ):
         self._save(trainer, accelerator, {"w": torch.zeros(1)}, tmp_path)
-        assert accelerator.unwrap_model.call_args.kwargs["keep_torch_compile"] is False
-
-    @pytest.mark.parametrize("key", ["_orig_mod.module.encoder.weight", "module.encoder.weight"])
-    def test_compile_and_ddp_prefixes_are_stripped(self, trainer, accelerator, tmp_path, key):
-        kwargs = self._save(trainer, accelerator, {key: torch.zeros(1)}, tmp_path)
-        assert set(kwargs["state_dict"]) == {"encoder.weight"}
-
-    def test_state_dict_is_read_without_unwrapping_the_live_model(
-        self, trainer, accelerator, tmp_path
-    ):
-        """The default unwrap rewrites `_orig_mod` in place and breaks no_sync."""
-        self._save(trainer, accelerator, {"w": torch.zeros(1)}, tmp_path)
-        assert accelerator.get_state_dict.call_args.kwargs["unwrap"] is False
+        accelerator.get_state_dict.assert_called_once_with(trainer.model)
 
 
-@pytest.fixture
-def gloo_group(tmp_path):
-    """A single-process gloo group, so a real DDP can be constructed on CPU."""
-    import torch.distributed as dist
+class TestCompiledDDPUnwrap:
+    """Accelerate's unwrap of a DDP compiled in place leaves the live model
+    intact, so gradient accumulation keeps skipping the sync (`no_sync`) on
+    all but the last micro-batch after an HF save."""
 
-    dist.init_process_group(
-        "gloo", init_method=f"file://{tmp_path / 'pg'}", rank=0, world_size=1
-    )
-    yield
-    dist.destroy_process_group()
-
-
-class TestAccelerateUnwrapMutation:
-    """When accelerate unwraps a compiled DDP model, it strips the DDP wrapper
-    off the live model too. Gradient accumulation then silently syncs
-    gradients on every micro-batch instead of once per step."""
-
-    def _compiled_ddp(self):
-        from torch.nn.parallel import DistributedDataParallel
-
-        return torch.compile(DistributedDataParallel(torch.nn.Linear(2, 2)))
-
-    def test_real_get_state_dict_without_unwrap_keeps_ddp(self, gloo_group):
+    def test_get_state_dict_keeps_ddp_and_strips_its_prefix(self, gloo_group):
         from accelerate import Accelerator
         from torch.nn.parallel import DistributedDataParallel
 
-        model = self._compiled_ddp()
-        Accelerator(cpu=True).get_state_dict(model, unwrap=False)
-        assert isinstance(model._orig_mod, DistributedDataParallel)
+        inner = torch.nn.Linear(2, 2)
+        model = DistributedDataParallel(inner)
+        model.compile()
+        state_dict = Accelerator(cpu=True).get_state_dict(model)
 
-    def test_default_get_state_dict_breaks_ddp(self, gloo_group):
-        """Documents the accelerate behaviour the fix avoids."""
+        assert model._compiled_call_impl is not None
+        assert model.module is inner
+        assert set(state_dict) == {"weight", "bias"}
+
+    def test_trainer_rejects_a_torch_compile_wrapper(self, accelerator, tmp_path):
+        model = torch.nn.Linear(2, 2)
+        with pytest.raises(ValueError, match="Compile it in place"):
+            Trainer(
+                accelerator=accelerator,
+                model=torch.compile(model),
+                optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+                scheduler=MagicMock(),
+                train_dataloader_provider=lambda epoch: [],
+                config=TrainerConfig(output_dir=tmp_path / "checkpoints"),
+            )
+
+    def test_torch_compile_wrapper_is_still_broken_by_unwrap(self, gloo_group):
+        """Why `run_pretrain` avoids `torch.compile(model)`: unwrapping the
+        OptimizedModule strips DDP off the live model."""
         from accelerate import Accelerator
         from torch.nn.parallel import DistributedDataParallel
 
-        model = self._compiled_ddp()
+        model = torch.compile(DistributedDataParallel(torch.nn.Linear(2, 2)))
         Accelerator(cpu=True).get_state_dict(model)
         assert not isinstance(model._orig_mod, DistributedDataParallel), (
-            "accelerate no longer strips DDP off the live model; the "
-            "`unwrap=False` workaround in `save_hf_checkpoint` can be removed"
+            "accelerate no longer strips DDP off a torch.compile'd model when "
+            "unwrapping it, so `torch.compile(model)` would now be safe here; "
+            "`run_pretrain` and the check in `Trainer.__init__` can be relaxed"
         )
 
 

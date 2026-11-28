@@ -15,9 +15,12 @@ from typing import Any, Literal
 
 import torch
 from accelerate import Accelerator
-from accelerate.utils import DDPCommunicationHookType, DistributedDataParallelKwargs
+from accelerate.utils import (
+    DDPCommunicationHookType,
+    DistributedDataParallelKwargs,
+    is_compiled_module,
+)
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
-from torch.nn.modules.utils import consume_prefix_in_state_dict_if_present
 from tqdm import tqdm
 from transformers import PreTrainedTokenizerBase
 
@@ -351,6 +354,18 @@ class Trainer:
         metric_logger: TrainingLogger | None = None,
         tokenizer: PreTrainedTokenizerBase | None = None,
     ) -> None:
+        # `save_hf_checkpoint` lets accelerate unwrap the model. For a
+        # `torch.compile(model)` wrapper that unwrap strips DDP off the live
+        # model, and gradient accumulation then syncs every micro-batch, with
+        # no error. Compile in place instead (`model.compile()`, as `run_pretrain` does).
+        if is_compiled_module(model):
+            raise ValueError(
+                "Trainer got a torch.compile'd model (an OptimizedModule). "
+                "Compile it in place with `model.compile(...)` after "
+                "`accelerator.prepare`, and don't enable Accelerate's dynamo "
+                "backend (ACCELERATE_DYNAMO_BACKEND / `dynamo_backend` in the "
+                "launch config)."
+            )
         self.accelerator = accelerator
         self.is_main = self.accelerator.is_main_process
         self.device = self.accelerator.device  # Explicit device reference
@@ -835,18 +850,12 @@ class Trainer:
         if self.is_main:
             hf_dir.mkdir(parents=True, exist_ok=True)
 
-        unwrapped_model = self.accelerator.unwrap_model(
-            self.model, keep_torch_compile=False
-        )
+        unwrapped_model = self.accelerator.unwrap_model(self.model)
         # Every rank must call this: under FSDP/DeepSpeed it gathers weights.
-        # Don't let accelerate unwrap the model here: with torch.compile it
-        # strips the DDP wrapper off the live model, after which gradient
-        # accumulation syncs gradients on every micro-batch instead of once
-        # per step. Instead, remove the wrapper prefixes from the keys
-        # ourselves so the weights load into a plain AMPLIFYForMaskedLM.
-        state_dict = self.accelerator.get_state_dict(self.model, unwrap=False)
-        for prefix in ("_orig_mod.", "module."):
-            consume_prefix_in_state_dict_if_present(state_dict, prefix)
+        # Its unwrap is safe because the model is compiled in place, never
+        # wrapped (checked in `__init__`): unwrapping a `torch.compile(model)`
+        # wrapper would strip DDP off the live model.
+        state_dict = self.accelerator.get_state_dict(self.model)
 
         # Makes the checkpoint self-contained: copies AMPLIFY source next to
         # the weights and records auto_map, so `from_pretrained(dir,
